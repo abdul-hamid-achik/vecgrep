@@ -52,6 +52,9 @@ jobs:
       - name: Generate code
         run: templ generate
 
+      - name: Download modules
+        run: go mod download
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
