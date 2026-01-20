@@ -44,13 +44,13 @@ func (h *ToolsHandler) ListTools() ToolsListResult {
 	tools := []Tool{
 		{
 			Name:        "vecgrep_init",
-			Description: "Initialize or activate vecgrep for a project directory. Creates .vecgrep folder if needed and activates the project for searching. Must be run before using other vecgrep tools. If the project is already initialized, this just activates it.",
+			Description: "REQUIRED FIRST STEP: Activate vecgrep for a project. Run this before using any other vecgrep tools. If .vecgrep folder exists, it activates the existing index. If not, it creates a new one. Must be run each session to tell vecgrep which project to use.",
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"path": {
 						Type:        "string",
-						Description: "REQUIRED: Full absolute path to the project directory (e.g., /Users/you/projects/myproject). Use the project's root directory.",
+						Description: "REQUIRED: Full absolute path to the project directory. Get this from the current working directory the user is in.",
 					},
 					"force": {
 						Type:        "boolean",

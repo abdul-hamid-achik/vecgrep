@@ -164,9 +164,11 @@ func (s *Server) handleInitialize(ctx context.Context, params json.RawMessage) (
 			Version: version.Version,
 		},
 		Instructions: "vecgrep provides semantic code search using vector embeddings. " +
-			"Use vecgrep_search to find relevant code snippets, " +
-			"vecgrep_index to index new files, and " +
-			"vecgrep_status to check index statistics.",
+			"IMPORTANT: You must run vecgrep_init first with the project path to activate the project. " +
+			"Example: vecgrep_init with path=\"/path/to/project\". " +
+			"This is required even if the project was previously initialized via CLI. " +
+			"After activation, use vecgrep_search to find code, vecgrep_index to index files, " +
+			"and vecgrep_status to check statistics.",
 	}, nil
 }
 
