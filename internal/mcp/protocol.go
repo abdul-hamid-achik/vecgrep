@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 )
 
-// Protocol version
+// ProtocolVersion is the MCP protocol version supported by this server.
 const ProtocolVersion = "2024-11-05"
 
 // JSON-RPC 2.0 message types

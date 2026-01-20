@@ -48,7 +48,6 @@ func DefaultOllamaConfig() OllamaConfig {
 type OllamaProvider struct {
 	config OllamaConfig
 	client *http.Client
-	mu     sync.RWMutex
 }
 
 // ollamaEmbeddingRequest is the request body for Ollama's embedding endpoint.
@@ -60,12 +59,6 @@ type ollamaEmbeddingRequest struct {
 // ollamaEmbeddingResponse is the response from Ollama's embedding endpoint.
 type ollamaEmbeddingResponse struct {
 	Embedding []float64 `json:"embedding"`
-}
-
-// ollamaModelResponse is the response from Ollama's model show endpoint.
-type ollamaModelResponse struct {
-	Name       string `json:"name"`
-	ModifiedAt string `json:"modified_at"`
 }
 
 // ollamaErrorResponse represents an error response from Ollama.

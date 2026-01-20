@@ -75,7 +75,6 @@ type Indexer struct {
 	chunker  *Chunker
 	config   IndexerConfig
 	progress ProgressCallback
-	mu       sync.Mutex
 }
 
 // NewIndexer creates a new Indexer.
@@ -170,7 +169,7 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 			select {
 			case filesChan <- f:
 			case <-ctx.Done():
-				break
+				return
 			}
 		}
 		close(filesChan)
