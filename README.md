@@ -101,17 +101,29 @@ vecgrep search "authentication middleware" -l go -n 5
 vecgrep search "error handling" --file "**/*_test.go"
 ```
 
-### Start Server
+### Web Interface
+
+Start the web server:
 
 ```bash
-vecgrep serve [--web] [--mcp] [--port 8080] [--host localhost]
+vecgrep serve --web
 ```
 
+Open http://localhost:8080 in your browser to search with a visual interface.
+
 Options:
-- `--web` - Start web interface (default if no flags)
-- `--mcp` - Start MCP server on stdio
 - `-p, --port` - Server port (default: 8080)
 - `--host` - Server host (default: localhost)
+
+### MCP Server
+
+Start the MCP server for AI assistant integration:
+
+```bash
+vecgrep serve --mcp
+```
+
+This runs on stdio for integration with Claude Desktop, Claude Code, etc.
 
 ### Check Status
 
@@ -188,20 +200,47 @@ These flags work with all commands:
 
 vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/) for AI assistant integration.
 
-### Claude Desktop
+### Available Tools
 
-Add to your Claude configuration:
+| Tool | Description |
+|------|-------------|
+| `vecgrep_search` | Semantic search across the indexed codebase |
+| `vecgrep_index` | Index or re-index files in the project |
+| `vecgrep_status` | Get index statistics (files, chunks, languages) |
+
+### Claude Code
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "vecgrep": {
       "command": "vecgrep",
-      "args": ["serve", "--mcp"]
+      "args": ["serve", "--mcp"],
+      "cwd": "/path/to/your/project"
     }
   }
 }
 ```
+
+### Claude Desktop
+
+Add to your Claude Desktop configuration:
+
+```json
+{
+  "mcpServers": {
+    "vecgrep": {
+      "command": "vecgrep",
+      "args": ["serve", "--mcp"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+The `cwd` should point to a directory with an initialized `.vecgrep` folder.
 
 ## Docker
 
