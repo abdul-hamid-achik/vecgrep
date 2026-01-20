@@ -26,8 +26,11 @@ jobs:
       - name: Install templ
         run: go install github.com/a-h/templ/cmd/templ@latest
 
+      - name: Install Tailwind
+        run: npm install
+
       - name: Generate CSS
-        run: npx @tailwindcss/cli@latest -i assets/css/input.css -o internal/web/static/css/output.css --minify
+        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

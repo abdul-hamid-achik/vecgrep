@@ -25,8 +25,11 @@ jobs:
       - name: Generate templ code
         run: templ generate
 
+      - name: Install Tailwind
+        run: npm install
+
       - name: Generate CSS
-        run: npx @tailwindcss/cli@latest -i assets/css/input.css -o internal/web/static/css/output.css --minify
+        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
@@ -55,8 +58,11 @@ jobs:
       - name: Generate templ code
         run: templ generate
 
+      - name: Install Tailwind
+        run: npm install
+
       - name: Generate CSS
-        run: npx @tailwindcss/cli@latest -i assets/css/input.css -o internal/web/static/css/output.css --minify
+        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
       - name: Download modules
         run: go mod download
@@ -85,8 +91,11 @@ jobs:
       - name: Generate templ code
         run: templ generate
 
+      - name: Install Tailwind
+        run: npm install
+
       - name: Generate CSS
-        run: npx @tailwindcss/cli@latest -i assets/css/input.css -o internal/web/static/css/output.css --minify
+        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
       - name: Verify build
         run: go build -o /dev/null ./cmd/vecgrep
