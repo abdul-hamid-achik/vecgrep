@@ -206,6 +206,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Database: %s\n", cfg.DBPath)
 	fmt.Printf("  sqlite-vec: %s\n", vecVersion)
 	fmt.Printf("  Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model)
+	fmt.Printf("\nIMPORTANT: Add .vecgrep to your .gitignore file.\n")
 	fmt.Printf("\nRun 'vecgrep index' to index your codebase.\n")
 
 	return nil
@@ -501,6 +502,23 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Files:      %d\n", stats["files"])
 	fmt.Printf("  Chunks:     %d\n", stats["chunks"])
 	fmt.Printf("  Embeddings: %d\n", stats["embeddings"])
+
+	// Check for pending changes
+	indexerCfg := index.DefaultIndexerConfig()
+	indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, indexerCfg.IgnorePatterns...)
+	indexer := index.NewIndexer(database, nil, indexerCfg)
+
+	ctx := context.Background()
+	pending, err := indexer.GetPendingChanges(ctx, projectRoot)
+	if err == nil {
+		fmt.Printf("\nReindex status:\n")
+		fmt.Printf("  New files:      %d\n", pending.NewFiles)
+		fmt.Printf("  Modified files: %d\n", pending.ModifiedFiles)
+		fmt.Printf("  Deleted files:  %d\n", pending.DeletedFiles)
+		if pending.TotalPending > 0 {
+			fmt.Printf("\nRun 'vecgrep index' to update the index.\n")
+		}
+	}
 
 	return nil
 }

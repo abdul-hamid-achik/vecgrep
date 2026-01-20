@@ -91,6 +91,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Version: version.Version,
 	}, &sdkmcp.ServerOptions{
 		Instructions: "vecgrep provides semantic code search using vector embeddings. " +
+			"IMPORTANT: The .vecgrep folder should be added to .gitignore - it contains the local database and should not be committed. " +
 			"For projects with existing .vecgrep folder, just use vecgrep_search directly - it auto-detects the project. " +
 			"For new projects, run vecgrep_init with the project path, then vecgrep_index to index the codebase.",
 	})
@@ -264,6 +265,7 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Activated vecgrep project: %s\n\n", projectPath))
+	sb.WriteString("**IMPORTANT:** Add `.vecgrep` to your `.gitignore` file.\n\n")
 	sb.WriteString(fmt.Sprintf("- Database: %s\n", dbPath))
 	sb.WriteString(fmt.Sprintf("- sqlite-vec: %s\n", vecVersion))
 	sb.WriteString(fmt.Sprintf("- Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model))
@@ -279,6 +281,18 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 		}
 	} else {
 		sb.WriteString("\nNext step: Run vecgrep_index to index your codebase.")
+	}
+
+	// Check for pending changes
+	indexerCfg := index.DefaultIndexerConfig()
+	indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, indexerCfg.IgnorePatterns...)
+	indexer := index.NewIndexer(database, nil, indexerCfg)
+
+	pending, pendingErr := indexer.GetPendingChanges(ctx, projectPath)
+	if pendingErr == nil && pending.TotalPending > 0 {
+		sb.WriteString(fmt.Sprintf("\n**Reindex needed:** %d files changed (%d new, %d modified, %d deleted)\n",
+			pending.TotalPending, pending.NewFiles, pending.ModifiedFiles, pending.DeletedFiles))
+		sb.WriteString("Run vecgrep_index to update the index.\n")
 	}
 
 	return &sdkmcp.CallToolResult{
@@ -477,6 +491,25 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 		sb.WriteString("\nBy language:\n")
 		for lang, count := range langStats {
 			sb.WriteString(fmt.Sprintf("  %s: %d\n", lang, count))
+		}
+	}
+
+	// Check for pending changes
+	cfg, cfgErr := config.Load(s.projectRoot)
+	if cfgErr == nil {
+		indexerCfg := index.DefaultIndexerConfig()
+		indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, indexerCfg.IgnorePatterns...)
+		indexer := index.NewIndexer(s.db, nil, indexerCfg)
+
+		pending, pendingErr := indexer.GetPendingChanges(ctx, s.projectRoot)
+		if pendingErr == nil {
+			sb.WriteString("\nReindex status:\n")
+			sb.WriteString(fmt.Sprintf("  New files: %d\n", pending.NewFiles))
+			sb.WriteString(fmt.Sprintf("  Modified files: %d\n", pending.ModifiedFiles))
+			sb.WriteString(fmt.Sprintf("  Deleted files: %d\n", pending.DeletedFiles))
+			if pending.TotalPending > 0 {
+				sb.WriteString("\n**Action needed:** Run vecgrep_index to update the index.\n")
+			}
 		}
 	}
 

@@ -50,6 +50,11 @@ task install
    vecgrep init
    ```
 
+   **Important:** Add `.vecgrep` to your `.gitignore` file:
+   ```bash
+   echo ".vecgrep" >> .gitignore
+   ```
+
 3. **Index your codebase:**
    ```bash
    vecgrep index
@@ -188,6 +193,9 @@ vecgrep completion fish > ~/.config/fish/completions/vecgrep.fish
 ## Configuration
 
 Configuration is stored in `.vecgrep/config.yaml`:
+
+> **Note:** The `.vecgrep` directory contains your local index database and configuration.
+> Add it to `.gitignore` to avoid committing it to version control.
 
 ```yaml
 embedding:

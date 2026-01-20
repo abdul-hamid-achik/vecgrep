@@ -559,6 +559,93 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// PendingChanges holds counts of files needing reindexing.
+type PendingChanges struct {
+	NewFiles      int
+	ModifiedFiles int
+	DeletedFiles  int
+	TotalPending  int
+}
+
+// GetPendingChanges scans the project and returns counts of files needing reindexing.
+func (idx *Indexer) GetPendingChanges(ctx context.Context, projectRoot string) (*PendingChanges, error) {
+	absPath, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("abs path: %w", err)
+	}
+
+	// Get project ID
+	var projectID int64
+	err = idx.db.QueryRow(`SELECT id FROM projects WHERE root_path = ?`, absPath).Scan(&projectID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// No project exists yet - everything is new
+			return &PendingChanges{}, nil
+		}
+		return nil, fmt.Errorf("query project: %w", err)
+	}
+
+	// Build ignore matcher
+	ignoreMatcher, err := idx.buildIgnoreMatcher(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("build ignore matcher: %w", err)
+	}
+
+	// Collect current files from filesystem
+	currentFiles, err := idx.collectFiles(ctx, projectRoot, nil, ignoreMatcher)
+	if err != nil {
+		return nil, fmt.Errorf("collect files: %w", err)
+	}
+
+	// Build a map of current files for quick lookup
+	currentFileMap := make(map[string]fileInfo)
+	for _, f := range currentFiles {
+		currentFileMap[f.relativePath] = f
+	}
+
+	// Get all indexed files from database
+	rows, err := idx.db.Query(`SELECT relative_path, hash FROM files WHERE project_id = ?`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("query files: %w", err)
+	}
+	defer rows.Close()
+
+	indexedFiles := make(map[string]string) // relative_path -> hash
+	for rows.Next() {
+		var relPath, hash string
+		if err := rows.Scan(&relPath, &hash); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		indexedFiles[relPath] = hash
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+
+	pending := &PendingChanges{}
+
+	// Count new and modified files
+	for relPath, currentFile := range currentFileMap {
+		indexedHash, exists := indexedFiles[relPath]
+		if !exists {
+			pending.NewFiles++
+		} else if indexedHash != currentFile.hash {
+			pending.ModifiedFiles++
+		}
+	}
+
+	// Count deleted files (in index but not on disk)
+	for relPath := range indexedFiles {
+		if _, exists := currentFileMap[relPath]; !exists {
+			pending.DeletedFiles++
+		}
+	}
+
+	pending.TotalPending = pending.NewFiles + pending.ModifiedFiles + pending.DeletedFiles
+
+	return pending, nil
+}
+
 // ReindexAll forces reindexing of all files in the project.
 func (idx *Indexer) ReindexAll(ctx context.Context, projectRoot string) (*IndexResult, error) {
 	// Get project ID
