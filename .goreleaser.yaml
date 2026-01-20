@@ -8,16 +8,67 @@ before:
     - go mod tidy
 
 builds:
-  - id: vecgrep
+  - id: vecgrep-linux-amd64
     main: ./cmd/vecgrep
     binary: vecgrep
     env:
       - CGO_ENABLED=1
+      - CC=zig cc -target x86_64-linux-gnu
+      - CXX=zig c++ -target x86_64-linux-gnu
     goos:
       - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version={{.Version}}
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date={{.Date}}
+
+  - id: vecgrep-linux-arm64
+    main: ./cmd/vecgrep
+    binary: vecgrep
+    env:
+      - CGO_ENABLED=1
+      - CC=zig cc -target aarch64-linux-gnu
+      - CXX=zig c++ -target aarch64-linux-gnu
+    goos:
+      - linux
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version={{.Version}}
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date={{.Date}}
+
+  - id: vecgrep-darwin-amd64
+    main: ./cmd/vecgrep
+    binary: vecgrep
+    env:
+      - CGO_ENABLED=1
+      - CC=zig cc -target x86_64-macos
+      - CXX=zig c++ -target x86_64-macos
+    goos:
       - darwin
     goarch:
       - amd64
+    ldflags:
+      - -s -w
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version={{.Version}}
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date={{.Date}}
+
+  - id: vecgrep-darwin-arm64
+    main: ./cmd/vecgrep
+    binary: vecgrep
+    env:
+      - CGO_ENABLED=1
+      - CC=zig cc -target aarch64-macos
+      - CXX=zig c++ -target aarch64-macos
+    goos:
+      - darwin
+    goarch:
       - arm64
     ldflags:
       - -s -w
