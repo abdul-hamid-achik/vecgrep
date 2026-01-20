@@ -1,0 +1,241 @@
+package templates
+
+import "fmt"
+
+// SimilarData contains data for the similar search page.
+type SimilarData struct {
+	ChunkID  string
+	FileLoc  string
+	Text     string
+	Results  []SearchResult
+}
+
+templ Similar(data SimilarData) {
+	@Layout("Similar Code") {
+		<div class="space-y-6">
+			<!-- Similar Search Form -->
+			<div class="card p-6">
+				<h1 class="text-xl font-bold mb-4" style="color: var(--nord8);">Find Similar Code</h1>
+				<form
+					hx-get="/similar/search"
+					hx-target="#results"
+					hx-indicator="#loading"
+					hx-trigger="submit"
+					class="space-y-4"
+				>
+					<!-- Tab interface for input modes -->
+					<div class="space-y-4">
+						<div class="flex gap-4 border-b border-gray-600 pb-2">
+							<button type="button" class="tab-btn active" data-tab="chunk" onclick="switchTab('chunk')">
+								Chunk ID
+							</button>
+							<button type="button" class="tab-btn" data-tab="file" onclick="switchTab('file')">
+								File:Line
+							</button>
+							<button type="button" class="tab-btn" data-tab="text" onclick="switchTab('text')">
+								Text Snippet
+							</button>
+						</div>
+
+						<!-- Chunk ID input -->
+						<div id="tab-chunk" class="tab-content">
+							<input
+								type="text"
+								name="chunk_id"
+								placeholder="Enter chunk ID (e.g., 42)"
+								value={ data.ChunkID }
+								class="input w-full px-4 py-3"
+							/>
+						</div>
+
+						<!-- File:Line input -->
+						<div id="tab-file" class="tab-content hidden">
+							<input
+								type="text"
+								name="file_loc"
+								placeholder="Enter file:line (e.g., internal/search/search.go:50)"
+								value={ data.FileLoc }
+								class="input w-full px-4 py-3"
+							/>
+						</div>
+
+						<!-- Text snippet input -->
+						<div id="tab-text" class="tab-content hidden">
+							<textarea
+								name="text"
+								placeholder="Enter code snippet to find similar code..."
+								class="input w-full px-4 py-3"
+								rows="4"
+							>{ data.Text }</textarea>
+						</div>
+					</div>
+
+					<!-- Filters -->
+					<div class="flex gap-4 flex-wrap">
+						<select name="lang" class="input px-3 py-2">
+							<option value="">All Languages</option>
+							<option value="go">Go</option>
+							<option value="python">Python</option>
+							<option value="javascript">JavaScript</option>
+							<option value="typescript">TypeScript</option>
+							<option value="rust">Rust</option>
+							<option value="java">Java</option>
+							<option value="c">C</option>
+							<option value="cpp">C++</option>
+						</select>
+						<select name="type" class="input px-3 py-2">
+							<option value="">All Types</option>
+							<option value="function">Function</option>
+							<option value="class">Class</option>
+							<option value="block">Block</option>
+							<option value="comment">Comment</option>
+							<option value="generic">Generic</option>
+						</select>
+						<input
+							type="text"
+							name="file"
+							placeholder="File pattern (e.g., *.go)"
+							class="input px-3 py-2"
+						/>
+						<label class="flex items-center gap-2" style="color: var(--nord4);">
+							<input type="checkbox" name="exclude_same_file" value="true" />
+							Exclude same file
+						</label>
+						<select name="limit" class="input px-3 py-2">
+							<option value="10">10 results</option>
+							<option value="20">20 results</option>
+							<option value="50">50 results</option>
+						</select>
+					</div>
+
+					<button type="submit" class="btn px-6 py-3">
+						Find Similar Code
+					</button>
+				</form>
+			</div>
+
+			<!-- Loading indicator -->
+			<div id="loading" class="htmx-indicator text-center py-8">
+				<svg class="spinner inline-block w-8 h-8" style="color: var(--nord8);" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+				</svg>
+				<p class="mt-2" style="color: var(--nord4);">Finding similar code...</p>
+			</div>
+
+			<!-- Results container -->
+			<div id="results">
+				if len(data.Results) > 0 {
+					@SearchResults(data.Results)
+				}
+			</div>
+		</div>
+
+		<style>
+			.tab-btn {
+				padding: 8px 16px;
+				background: transparent;
+				border: none;
+				color: var(--nord4);
+				cursor: pointer;
+				border-bottom: 2px solid transparent;
+			}
+			.tab-btn:hover {
+				color: var(--nord8);
+			}
+			.tab-btn.active {
+				color: var(--nord8);
+				border-bottom-color: var(--nord8);
+			}
+			.tab-content.hidden {
+				display: none;
+			}
+		</style>
+
+		<script>
+			function switchTab(tabName) {
+				// Update tab buttons
+				document.querySelectorAll('.tab-btn').forEach(btn => {
+					btn.classList.remove('active');
+					if (btn.dataset.tab === tabName) {
+						btn.classList.add('active');
+					}
+				});
+
+				// Update tab content
+				document.querySelectorAll('.tab-content').forEach(content => {
+					content.classList.add('hidden');
+				});
+				document.getElementById('tab-' + tabName).classList.remove('hidden');
+
+				// Clear other inputs
+				document.querySelectorAll('.tab-content input, .tab-content textarea').forEach(input => {
+					if (!input.closest('#tab-' + tabName)) {
+						input.value = '';
+					}
+				});
+			}
+
+			// Initialize - show the tab that has a value
+			document.addEventListener('DOMContentLoaded', function() {
+				const chunkInput = document.querySelector('#tab-chunk input');
+				const fileInput = document.querySelector('#tab-file input');
+				const textInput = document.querySelector('#tab-text textarea');
+
+				if (fileInput && fileInput.value) {
+					switchTab('file');
+				} else if (textInput && textInput.value) {
+					switchTab('text');
+				}
+			});
+		</script>
+	}
+}
+
+templ SimilarResultCard(result SearchResult) {
+	<div class="card p-4 space-y-3">
+		<!-- Header -->
+		<div class="flex items-start justify-between">
+			<div class="flex items-center gap-2 flex-wrap">
+				<a
+					href="#"
+					class="font-medium hover:underline"
+					style="color: var(--nord8);"
+					title={ result.FilePath }
+				>
+					{ result.FilePath }
+				</a>
+				<span class="text-sm" style="color: var(--nord3);">
+					:{ fmt.Sprintf("%d", result.StartLine) }-{ fmt.Sprintf("%d", result.EndLine) }
+				</span>
+			</div>
+			<div class="flex items-center gap-2">
+				<a
+					href={ templ.SafeURL(fmt.Sprintf("/similar?chunk_id=%d", result.ChunkID)) }
+					class="text-xs px-2 py-1 rounded hover:opacity-80"
+					style="background-color: var(--nord10); color: var(--nord6);"
+					title="Find similar code"
+				>
+					Find Similar
+				</a>
+				<span class="badge badge-score">
+					{ fmt.Sprintf("%.0f%%", result.Score*100) }
+				</span>
+			</div>
+		</div>
+		<!-- Badges -->
+		<div class="flex gap-2 flex-wrap">
+			if result.Language != "" && result.Language != "unknown" {
+				<span class="badge badge-lang">{ result.Language }</span>
+			}
+			if result.ChunkType != "" && result.ChunkType != "generic" {
+				<span class="badge badge-type">{ result.ChunkType }</span>
+			}
+			if result.SymbolName != "" {
+				<span class="badge">{ result.SymbolName }</span>
+			}
+		</div>
+		<!-- Code block -->
+		<pre><code>{ result.Content }</code></pre>
+	</div>
+}

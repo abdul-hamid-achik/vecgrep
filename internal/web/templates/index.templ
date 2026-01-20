@@ -136,6 +136,14 @@ templ ResultCard(result SearchResult) {
 				</span>
 			</div>
 			<div class="flex items-center gap-2">
+				<a
+					href={ templ.SafeURL(fmt.Sprintf("/similar?chunk_id=%d", result.ChunkID)) }
+					class="text-xs px-2 py-1 rounded hover:opacity-80"
+					style="background-color: var(--nord10); color: var(--nord6);"
+					title="Find similar code"
+				>
+					Similar
+				</a>
 				<span class="badge badge-score">
 					{ fmt.Sprintf("%.0f%%", result.Score*100) }
 				</span>

@@ -44,6 +44,10 @@ type EmbeddingConfig struct {
 	OllamaURL string `mapstructure:"ollama_url"`
 	// Dimensions is the embedding vector dimensions
 	Dimensions int `mapstructure:"dimensions"`
+	// OpenAIAPIKey is the API key for OpenAI (can also be set via OPENAI_API_KEY or VECGREP_OPENAI_API_KEY env)
+	OpenAIAPIKey string `mapstructure:"openai_api_key"`
+	// OpenAIBaseURL is the base URL for OpenAI API (can also be set via OPENAI_BASE_URL or VECGREP_OPENAI_BASE_URL env)
+	OpenAIBaseURL string `mapstructure:"openai_base_url"`
 }
 
 // IndexingConfig holds indexing settings
@@ -128,6 +132,8 @@ func Load(projectDir string) (*Config, error) {
 	_ = v.BindEnv("embedding.provider", "VECGREP_EMBEDDING_PROVIDER")
 	_ = v.BindEnv("embedding.model", "VECGREP_EMBEDDING_MODEL")
 	_ = v.BindEnv("embedding.ollama_url", "VECGREP_OLLAMA_URL")
+	_ = v.BindEnv("embedding.openai_api_key", "VECGREP_OPENAI_API_KEY")
+	_ = v.BindEnv("embedding.openai_base_url", "VECGREP_OPENAI_BASE_URL")
 	_ = v.BindEnv("server.host", "VECGREP_HOST")
 	_ = v.BindEnv("server.port", "VECGREP_PORT")
 

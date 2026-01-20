@@ -56,6 +56,19 @@ type SimilarInput struct {
 	ExcludeSameFile bool   `json:"exclude_same_file,omitempty" jsonschema:"Exclude results from the same file as the source."`
 }
 
+// DeleteInput is the input for vecgrep_delete.
+type DeleteInput struct {
+	FilePath string `json:"file_path" jsonschema:"The file path to delete from the index (relative or absolute)."`
+}
+
+// CleanInput is the input for vecgrep_clean (empty).
+type CleanInput struct{}
+
+// ResetInput is the input for vecgrep_reset.
+type ResetInput struct {
+	Confirm string `json:"confirm" jsonschema:"Type 'yes' to confirm the reset operation."`
+}
+
 // SDKServer wraps the official MCP SDK server.
 type SDKServer struct {
 	server      *sdkmcp.Server
@@ -121,6 +134,21 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Name:        "vecgrep_similar",
 		Description: "Find code similar to an existing chunk, file location, or text snippet. Provide exactly one of: chunk_id, file_location (e.g., 'search.go:50'), or text.",
 	}, s.handleSimilar)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_delete",
+		Description: "Delete a file and all its chunks from the search index.",
+	}, s.handleDelete)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_clean",
+		Description: "Remove orphaned data (chunks without files, embeddings without chunks) and vacuum the database to reclaim space.",
+	}, s.handleClean)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_reset",
+		Description: "Reset the project database by clearing all indexed files, chunks, and embeddings. Requires confirmation.",
+	}, s.handleReset)
 
 	return s
 }
@@ -246,12 +274,23 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 		}, nil, nil
 	}
 
-	// Create embedding provider
-	provider := embed.NewOllamaProvider(embed.OllamaConfig{
-		URL:        cfg.Embedding.OllamaURL,
-		Model:      cfg.Embedding.Model,
-		Dimensions: cfg.Embedding.Dimensions,
-	})
+	// Create embedding provider based on config
+	var provider embed.Provider
+	switch cfg.Embedding.Provider {
+	case "openai":
+		provider = embed.NewOpenAIProvider(embed.OpenAIConfig{
+			APIKey:     cfg.Embedding.OpenAIAPIKey,
+			BaseURL:    cfg.Embedding.OpenAIBaseURL,
+			Model:      cfg.Embedding.Model,
+			Dimensions: cfg.Embedding.Dimensions,
+		})
+	default:
+		provider = embed.NewOllamaProvider(embed.OllamaConfig{
+			URL:        cfg.Embedding.OllamaURL,
+			Model:      cfg.Embedding.Model,
+			Dimensions: cfg.Embedding.Dimensions,
+		})
+	}
 
 	// Update server state
 	s.db = database
@@ -300,24 +339,35 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	}, nil, nil
 }
 
-// checkOllama verifies Ollama is running.
-func (s *SDKServer) checkOllama(ctx context.Context) *sdkmcp.CallToolResult {
+// checkProvider verifies the embedding provider is available.
+func (s *SDKServer) checkProvider(ctx context.Context) *sdkmcp.CallToolResult {
 	if s.provider == nil {
 		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Ollama provider not configured. Run vecgrep_init first."}},
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Embedding provider not configured. Run vecgrep_init first."}},
 			IsError: true,
 		}
 	}
 
 	if err := s.provider.Ping(ctx); err != nil {
 		var sb strings.Builder
-		sb.WriteString("Ollama is not running or not reachable.\n\n")
-		sb.WriteString("To fix this:\n")
-		sb.WriteString("1. Install Ollama: https://ollama.ai\n")
-		sb.WriteString("2. Start Ollama:\n")
-		sb.WriteString("   OLLAMA_HOST=0.0.0.0 ollama serve\n")
-		sb.WriteString("3. Pull the embedding model:\n")
-		sb.WriteString("   ollama pull nomic-embed-text\n")
+		sb.WriteString("Embedding provider is not available.\n\n")
+
+		// Check if it's an Ollama provider based on error message or model
+		if _, ok := s.provider.(*embed.OllamaProvider); ok {
+			sb.WriteString("To fix this (Ollama):\n")
+			sb.WriteString("1. Install Ollama: https://ollama.ai\n")
+			sb.WriteString("2. Start Ollama:\n")
+			sb.WriteString("   OLLAMA_HOST=0.0.0.0 ollama serve\n")
+			sb.WriteString("3. Pull the embedding model:\n")
+			sb.WriteString("   ollama pull nomic-embed-text\n")
+		} else if _, ok := s.provider.(*embed.OpenAIProvider); ok {
+			sb.WriteString("To fix this (OpenAI):\n")
+			sb.WriteString("1. Ensure OPENAI_API_KEY or VECGREP_OPENAI_API_KEY is set\n")
+			sb.WriteString("2. Verify your API key is valid\n")
+			sb.WriteString("3. Check your OpenAI account has available credits\n")
+		} else {
+			sb.WriteString("Verify your embedding provider is configured correctly.\n")
+		}
 		sb.WriteString(fmt.Sprintf("\nError: %v", err))
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
@@ -337,7 +387,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	}
 
 	// Check Ollama
-	if errResult := s.checkOllama(ctx); errResult != nil {
+	if errResult := s.checkProvider(ctx); errResult != nil {
 		return errResult, nil, nil
 	}
 
@@ -416,7 +466,7 @@ func (s *SDKServer) handleIndex(ctx context.Context, req *sdkmcp.CallToolRequest
 	}
 
 	// Check Ollama
-	if errResult := s.checkOllama(ctx); errResult != nil {
+	if errResult := s.checkProvider(ctx); errResult != nil {
 		return errResult, nil, nil
 	}
 
@@ -528,7 +578,7 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 	}
 
 	// Check Ollama
-	if errResult := s.checkOllama(ctx); errResult != nil {
+	if errResult := s.checkProvider(ctx); errResult != nil {
 		return errResult, nil, nil
 	}
 
@@ -637,5 +687,95 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+	}, nil, nil
+}
+
+// handleDelete handles the vecgrep_delete tool.
+func (s *SDKServer) handleDelete(ctx context.Context, req *sdkmcp.CallToolRequest, input DeleteInput) (*sdkmcp.CallToolResult, any, error) {
+	if err := s.ensureInitialized(ctx); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	if input.FilePath == "" {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "file_path parameter is required"}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	chunksDeleted, err := s.db.DeleteFile(ctx, input.FilePath)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to delete file: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Deleted %s (%d chunks removed)", input.FilePath, chunksDeleted)}},
+	}, nil, nil
+}
+
+// handleClean handles the vecgrep_clean tool.
+func (s *SDKServer) handleClean(ctx context.Context, req *sdkmcp.CallToolRequest, input CleanInput) (*sdkmcp.CallToolResult, any, error) {
+	if err := s.ensureInitialized(ctx); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	stats, err := s.db.Clean(ctx)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to clean database: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Database cleanup complete:\n")
+	sb.WriteString(fmt.Sprintf("- Orphaned chunks removed: %d\n", stats.OrphanedChunks))
+	sb.WriteString(fmt.Sprintf("- Orphaned embeddings removed: %d\n", stats.OrphanedEmbeddings))
+	if stats.VacuumedBytes > 0 {
+		sb.WriteString(fmt.Sprintf("- Space reclaimed: %d bytes\n", stats.VacuumedBytes))
+	} else {
+		sb.WriteString("- Database already optimized\n")
+	}
+
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+	}, nil, nil
+}
+
+// handleReset handles the vecgrep_reset tool.
+func (s *SDKServer) handleReset(ctx context.Context, req *sdkmcp.CallToolRequest, input ResetInput) (*sdkmcp.CallToolResult, any, error) {
+	if err := s.ensureInitialized(ctx); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Require confirmation
+	if input.Confirm != "yes" {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "WARNING: This will delete ALL indexed data. Set confirm='yes' to proceed."}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	if err := s.db.ResetAll(ctx); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to reset database: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Database reset complete. All indexed data has been cleared.\nRun vecgrep_index to re-index your codebase."}},
 	}, nil, nil
 }

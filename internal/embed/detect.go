@@ -153,9 +153,11 @@ func AutoDetectWithConfig(ctx context.Context, cfg DetectConfig) (Provider, erro
 	// Fall back to OpenAI if available
 	for _, p := range providers {
 		if p.Type == ProviderOpenAI && p.Available {
-			// Note: OpenAI provider would need to be implemented
-			// For now, return an error indicating it's not yet supported
-			return nil, fmt.Errorf("OpenAI provider detected but not yet implemented")
+			return NewOpenAIProvider(OpenAIConfig{
+				BaseURL:    p.URL,
+				Model:      p.Model,
+				Dimensions: p.Dimensions,
+			}), nil
 		}
 	}
 
@@ -209,7 +211,12 @@ func VerifyProvider(ctx context.Context, providerType ProviderType) error {
 				})
 				return provider.Ping(ctx)
 			case ProviderOpenAI:
-				return fmt.Errorf("OpenAI provider verification not yet implemented")
+				provider := NewOpenAIProvider(OpenAIConfig{
+					BaseURL:    p.URL,
+					Model:      p.Model,
+					Dimensions: p.Dimensions,
+				})
+				return provider.Ping(ctx)
 			}
 		}
 	}

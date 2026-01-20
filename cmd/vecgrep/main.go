@@ -108,6 +108,32 @@ Examples:
 	RunE: runSimilar,
 }
 
+var deleteCmd = &cobra.Command{
+	Use:   "delete <file-path>",
+	Short: "Delete a file from the index",
+	Long:  `Remove a file and all its chunks from the search index.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runDelete,
+}
+
+var cleanCmd = &cobra.Command{
+	Use:   "clean",
+	Short: "Remove orphaned data and optimize database",
+	Long: `Clean up orphaned data (chunks without files, embeddings without chunks)
+and vacuum the database to reclaim space.`,
+	RunE: runClean,
+}
+
+var resetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Clear the entire project database",
+	Long: `Reset the project by clearing all indexed files, chunks, and embeddings.
+This is a destructive operation and cannot be undone.
+
+Use --force to skip the confirmation prompt.`,
+	RunE: runReset,
+}
+
 func init() {
 	// Set version template
 	rootCmd.SetVersionTemplate("vecgrep version {{.Version}}\n")
@@ -149,6 +175,9 @@ func init() {
 	similarCmd.Flags().Bool("exclude-same-file", false, "exclude results from the same file as the source")
 	similarCmd.Flags().StringP("text", "T", "", "find code similar to this text snippet")
 
+	// Reset command flags
+	resetCmd.Flags().Bool("force", false, "skip confirmation prompt")
+
 	// Add commands
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(initCmd)
@@ -157,6 +186,9 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(similarCmd)
+	rootCmd.AddCommand(deleteCmd)
+	rootCmd.AddCommand(cleanCmd)
+	rootCmd.AddCommand(resetCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -230,16 +262,15 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	// Create embedding provider
-	provider := embed.NewOllamaProvider(embed.OllamaConfig{
-		URL:        cfg.Embedding.OllamaURL,
-		Model:      cfg.Embedding.Model,
-		Dimensions: cfg.Embedding.Dimensions,
-	})
+	provider, err := createProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create embedding provider: %w", err)
+	}
 
 	// Ping provider to verify it's available
 	ctx := context.Background()
 	if err := provider.Ping(ctx); err != nil {
-		return fmt.Errorf("embedding provider unavailable: %w\nMake sure Ollama is running and the model '%s' is available", err, cfg.Embedding.Model)
+		return fmt.Errorf("embedding provider unavailable: %w\nMake sure the provider is running and the model '%s' is available", err, cfg.Embedding.Model)
 	}
 
 	// Get flags
@@ -248,7 +279,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 
 	// Create indexer config
 	indexerCfg := index.DefaultIndexerConfig()
-	indexerCfg.ChunkSize = cfg.Indexing.ChunkSize * 4   // Convert tokens to chars (approx)
+	indexerCfg.ChunkSize = cfg.Indexing.ChunkSize * 4 // Convert tokens to chars (approx)
 	indexerCfg.ChunkOverlap = cfg.Indexing.ChunkOverlap * 4
 	indexerCfg.MaxFileSize = cfg.Indexing.MaxFileSize
 	indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, additionalIgnores...)
@@ -322,11 +353,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	// Create embedding provider
-	provider := embed.NewOllamaProvider(embed.OllamaConfig{
-		URL:        cfg.Embedding.OllamaURL,
-		Model:      cfg.Embedding.Model,
-		Dimensions: cfg.Embedding.Dimensions,
-	})
+	provider, err := createProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create embedding provider: %w", err)
+	}
 
 	// Get flags
 	query := strings.Join(args, " ")
@@ -405,11 +435,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		defer database.Close()
 
 		// Create embedding provider
-		provider = embed.NewOllamaProvider(embed.OllamaConfig{
-			URL:        cfg.Embedding.OllamaURL,
-			Model:      cfg.Embedding.Model,
-			Dimensions: cfg.Embedding.Dimensions,
-		})
+		provider, err = createProvider(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to create embedding provider: %w", err)
+		}
 	} else if !mcpMode {
 		// Web mode requires an initialized project
 		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
@@ -431,8 +460,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if mcpMode {
 		// Use the official MCP SDK for reliable protocol handling
 		mcpServer := mcp.NewSDKServer(mcp.SDKServerConfig{
-			DB:          database,  // nil if not initialized
-			Provider:    provider,  // nil if not initialized
+			DB:          database,    // nil if not initialized
+			Provider:    provider,    // nil if not initialized
 			ProjectRoot: projectRoot, // empty if not initialized
 		})
 		return mcpServer.Run(ctx)
@@ -523,6 +552,139 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runDelete(cmd *cobra.Command, args []string) error {
+	filePath := args[0]
+
+	projectRoot, err := config.GetProjectRoot()
+	if err != nil {
+		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+	}
+
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	chunksDeleted, err := database.DeleteFile(ctx, filePath)
+	if err != nil {
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
+
+	fmt.Printf("Deleted %s (%d chunks removed)\n", filePath, chunksDeleted)
+	return nil
+}
+
+func runClean(cmd *cobra.Command, args []string) error {
+	projectRoot, err := config.GetProjectRoot()
+	if err != nil {
+		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+	}
+
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer database.Close()
+
+	fmt.Println("Cleaning database...")
+
+	ctx := context.Background()
+	stats, err := database.Clean(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to clean database: %w", err)
+	}
+
+	fmt.Printf("Clean complete:\n")
+	fmt.Printf("  Orphaned chunks removed: %d\n", stats.OrphanedChunks)
+	fmt.Printf("  Orphaned embeddings removed: %d\n", stats.OrphanedEmbeddings)
+	if stats.VacuumedBytes > 0 {
+		fmt.Printf("  Space reclaimed: %d bytes\n", stats.VacuumedBytes)
+	} else {
+		fmt.Printf("  Database already optimized\n")
+	}
+
+	return nil
+}
+
+func runReset(cmd *cobra.Command, args []string) error {
+	force, _ := cmd.Flags().GetBool("force")
+
+	projectRoot, err := config.GetProjectRoot()
+	if err != nil {
+		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+	}
+
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Confirmation prompt unless --force is used
+	if !force {
+		fmt.Printf("WARNING: This will delete ALL indexed data for %s\n", projectRoot)
+		fmt.Printf("This action cannot be undone.\n\n")
+		fmt.Printf("Type 'yes' to confirm: ")
+
+		var confirmation string
+		fmt.Scanln(&confirmation)
+		if confirmation != "yes" {
+			fmt.Println("Reset cancelled.")
+			return nil
+		}
+	}
+
+	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	if err := database.ResetAll(ctx); err != nil {
+		return fmt.Errorf("failed to reset database: %w", err)
+	}
+
+	fmt.Println("Database reset complete. All indexed data has been cleared.")
+	fmt.Println("Run 'vecgrep index' to re-index your codebase.")
+
+	return nil
+}
+
+// createProvider creates an embedding provider based on config.
+func createProvider(cfg *config.Config) (embed.Provider, error) {
+	switch cfg.Embedding.Provider {
+	case "openai":
+		provider := embed.NewOpenAIProvider(embed.OpenAIConfig{
+			APIKey:     cfg.Embedding.OpenAIAPIKey,
+			BaseURL:    cfg.Embedding.OpenAIBaseURL,
+			Model:      cfg.Embedding.Model,
+			Dimensions: cfg.Embedding.Dimensions,
+		})
+		return provider, nil
+	case "ollama", "":
+		provider := embed.NewOllamaProvider(embed.OllamaConfig{
+			URL:        cfg.Embedding.OllamaURL,
+			Model:      cfg.Embedding.Model,
+			Dimensions: cfg.Embedding.Dimensions,
+		})
+		return provider, nil
+	default:
+		return nil, fmt.Errorf("unknown embedding provider: %s", cfg.Embedding.Provider)
+	}
+}
+
 func runSimilar(cmd *cobra.Command, args []string) error {
 	// Get flags
 	textSnippet, _ := cmd.Flags().GetString("text")
@@ -558,11 +720,10 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	// Create embedding provider
-	provider := embed.NewOllamaProvider(embed.OllamaConfig{
-		URL:        cfg.Embedding.OllamaURL,
-		Model:      cfg.Embedding.Model,
-		Dimensions: cfg.Embedding.Dimensions,
-	})
+	provider, err := createProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create embedding provider: %w", err)
+	}
 
 	// Create searcher
 	searcher := search.NewSearcher(database, provider)

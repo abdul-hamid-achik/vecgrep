@@ -86,12 +86,15 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/", s.handler.Index)
 	s.router.Get("/search", s.handler.Search)
 	s.router.Get("/status", s.handler.Status)
+	s.router.Get("/similar", s.handler.Similar)
+	s.router.Get("/similar/search", s.handler.SimilarSearch)
 
 	// API routes
 	s.router.Route("/api", func(r chi.Router) {
 		r.Get("/search", s.handler.APISearch)
 		r.Get("/status", s.handler.APIStatus)
 		r.Get("/health", s.handler.Health)
+		r.Get("/similar", s.handler.APISimilar)
 	})
 }
 

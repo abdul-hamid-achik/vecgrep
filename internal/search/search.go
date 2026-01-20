@@ -15,18 +15,18 @@ import (
 
 // Result represents a search result with full metadata.
 type Result struct {
-	ChunkID      int64         `json:"chunk_id"`
-	FileID       int64         `json:"file_id"`
-	FilePath     string        `json:"file_path"`
-	RelativePath string        `json:"relative_path"`
-	Content      string        `json:"content"`
-	StartLine    int           `json:"start_line"`
-	EndLine      int           `json:"end_line"`
-	ChunkType    string        `json:"chunk_type"`
-	SymbolName   string        `json:"symbol_name,omitempty"`
-	Language     string        `json:"language"`
-	Distance     float32       `json:"distance"`
-	Score        float32       `json:"score"` // 1 - distance (higher is better)
+	ChunkID      int64   `json:"chunk_id"`
+	FileID       int64   `json:"file_id"`
+	FilePath     string  `json:"file_path"`
+	RelativePath string  `json:"relative_path"`
+	Content      string  `json:"content"`
+	StartLine    int     `json:"start_line"`
+	EndLine      int     `json:"end_line"`
+	ChunkType    string  `json:"chunk_type"`
+	SymbolName   string  `json:"symbol_name,omitempty"`
+	Language     string  `json:"language"`
+	Distance     float32 `json:"distance"`
+	Score        float32 `json:"score"` // 1 - distance (higher is better)
 }
 
 // SearchOptions configures search behavior.
@@ -41,10 +41,10 @@ type SearchOptions struct {
 
 // SimilarOptions configures similar code search behavior.
 type SimilarOptions struct {
-	SearchOptions            // Embed existing options: Limit, Language, ChunkType, FilePattern
-	ExcludeSameFile  bool    // Exclude results from same file as source
-	ExcludeSourceID  bool    // Exclude the source chunk itself (default: true when using By ID/Location)
-	SourceFileID     int64   // Internal: file ID of source chunk for same-file exclusion
+	SearchOptions         // Embed existing options: Limit, Language, ChunkType, FilePattern
+	ExcludeSameFile bool  // Exclude results from same file as source
+	ExcludeSourceID bool  // Exclude the source chunk itself (default: true when using By ID/Location)
+	SourceFileID    int64 // Internal: file ID of source chunk for same-file exclusion
 }
 
 // DefaultSearchOptions returns sensible defaults.

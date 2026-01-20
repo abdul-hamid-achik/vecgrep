@@ -1,9 +1,10 @@
 package db
 
 import (
+	"context"
 	"database/sql"
-	"encoding/binary"
 	_ "embed"
+	"encoding/binary"
 	"fmt"
 	"math"
 
@@ -203,6 +204,253 @@ func (db *DB) GetChunkByLocation(filePath string, line int) (int64, error) {
 	}
 
 	return chunkID, nil
+}
+
+// DeleteFile removes a file and all its chunks/embeddings from the index.
+func (db *DB) DeleteFile(ctx context.Context, filePath string) (int64, error) {
+	// First, get the file ID and count of chunks to be deleted
+	var fileID int64
+	var chunkCount int64
+
+	err := db.QueryRowContext(ctx, `
+		SELECT f.id, COUNT(c.id)
+		FROM files f
+		LEFT JOIN chunks c ON c.file_id = f.id
+		WHERE f.relative_path = ? OR f.path = ?
+		GROUP BY f.id
+	`, filePath, filePath).Scan(&fileID, &chunkCount)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("file not found: %s", filePath)
+		}
+		return 0, fmt.Errorf("find file: %w", err)
+	}
+
+	// Get all chunk IDs for this file to delete embeddings
+	rows, err := db.QueryContext(ctx, "SELECT id FROM chunks WHERE file_id = ?", fileID)
+	if err != nil {
+		return 0, fmt.Errorf("get chunks: %w", err)
+	}
+	defer rows.Close()
+
+	var chunkIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scan chunk id: %w", err)
+		}
+		chunkIDs = append(chunkIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate chunks: %w", err)
+	}
+
+	// Delete embeddings for all chunks
+	for _, chunkID := range chunkIDs {
+		if err := db.DeleteEmbedding(chunkID); err != nil {
+			// Log but continue - embedding might not exist
+		}
+	}
+
+	// Delete chunks (will cascade from file deletion, but be explicit)
+	_, err = db.ExecContext(ctx, "DELETE FROM chunks WHERE file_id = ?", fileID)
+	if err != nil {
+		return 0, fmt.Errorf("delete chunks: %w", err)
+	}
+
+	// Delete the file
+	_, err = db.ExecContext(ctx, "DELETE FROM files WHERE id = ?", fileID)
+	if err != nil {
+		return 0, fmt.Errorf("delete file: %w", err)
+	}
+
+	return chunkCount, nil
+}
+
+// CleanStats contains statistics from a clean operation.
+type CleanStats struct {
+	OrphanedChunks     int64
+	OrphanedEmbeddings int64
+	VacuumedBytes      int64
+}
+
+// Clean removes orphaned data and vacuums the database.
+func (db *DB) Clean(ctx context.Context) (*CleanStats, error) {
+	stats := &CleanStats{}
+
+	// Find orphaned chunks (chunks without files)
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM chunks
+		WHERE file_id NOT IN (SELECT id FROM files)
+	`).Scan(&stats.OrphanedChunks)
+	if err != nil {
+		return nil, fmt.Errorf("count orphaned chunks: %w", err)
+	}
+
+	// Delete orphaned chunks
+	if stats.OrphanedChunks > 0 {
+		_, err = db.ExecContext(ctx, `
+			DELETE FROM chunks
+			WHERE file_id NOT IN (SELECT id FROM files)
+		`)
+		if err != nil {
+			return nil, fmt.Errorf("delete orphaned chunks: %w", err)
+		}
+	}
+
+	// Find orphaned embeddings (embeddings without chunks)
+	err = db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM vec_chunks
+		WHERE chunk_id NOT IN (SELECT id FROM chunks)
+	`).Scan(&stats.OrphanedEmbeddings)
+	if err != nil {
+		return nil, fmt.Errorf("count orphaned embeddings: %w", err)
+	}
+
+	// Delete orphaned embeddings
+	if stats.OrphanedEmbeddings > 0 {
+		_, err = db.ExecContext(ctx, `
+			DELETE FROM vec_chunks
+			WHERE chunk_id NOT IN (SELECT id FROM chunks)
+		`)
+		if err != nil {
+			return nil, fmt.Errorf("delete orphaned embeddings: %w", err)
+		}
+	}
+
+	// Get database size before vacuum
+	var sizeBefore int64
+	err = db.QueryRowContext(ctx, "SELECT page_count * page_size FROM pragma_page_count, pragma_page_size").Scan(&sizeBefore)
+	if err != nil {
+		// Ignore error, just continue
+		sizeBefore = 0
+	}
+
+	// Vacuum the database
+	_, err = db.ExecContext(ctx, "VACUUM")
+	if err != nil {
+		return nil, fmt.Errorf("vacuum database: %w", err)
+	}
+
+	// Get database size after vacuum
+	var sizeAfter int64
+	err = db.QueryRowContext(ctx, "SELECT page_count * page_size FROM pragma_page_count, pragma_page_size").Scan(&sizeAfter)
+	if err != nil {
+		// Ignore error
+		sizeAfter = sizeBefore
+	}
+
+	stats.VacuumedBytes = sizeBefore - sizeAfter
+	if stats.VacuumedBytes < 0 {
+		stats.VacuumedBytes = 0
+	}
+
+	return stats, nil
+}
+
+// Reset clears all data for a project.
+func (db *DB) Reset(ctx context.Context, projectID int64) error {
+	// If projectID is 0, reset all data
+	if projectID == 0 {
+		// Delete all embeddings
+		_, err := db.ExecContext(ctx, "DELETE FROM vec_chunks")
+		if err != nil {
+			return fmt.Errorf("delete embeddings: %w", err)
+		}
+
+		// Delete all chunks
+		_, err = db.ExecContext(ctx, "DELETE FROM chunks")
+		if err != nil {
+			return fmt.Errorf("delete chunks: %w", err)
+		}
+
+		// Delete all files
+		_, err = db.ExecContext(ctx, "DELETE FROM files")
+		if err != nil {
+			return fmt.Errorf("delete files: %w", err)
+		}
+
+		// Delete all projects
+		_, err = db.ExecContext(ctx, "DELETE FROM projects")
+		if err != nil {
+			return fmt.Errorf("delete projects: %w", err)
+		}
+
+		// Vacuum
+		_, err = db.ExecContext(ctx, "VACUUM")
+		if err != nil {
+			return fmt.Errorf("vacuum database: %w", err)
+		}
+
+		return nil
+	}
+
+	// Get all file IDs for this project
+	rows, err := db.QueryContext(ctx, "SELECT id FROM files WHERE project_id = ?", projectID)
+	if err != nil {
+		return fmt.Errorf("get files: %w", err)
+	}
+	defer rows.Close()
+
+	var fileIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan file id: %w", err)
+		}
+		fileIDs = append(fileIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate files: %w", err)
+	}
+
+	// Delete embeddings for all chunks in project files
+	for _, fileID := range fileIDs {
+		chunkRows, err := db.QueryContext(ctx, "SELECT id FROM chunks WHERE file_id = ?", fileID)
+		if err != nil {
+			return fmt.Errorf("get chunks for file %d: %w", fileID, err)
+		}
+
+		for chunkRows.Next() {
+			var chunkID int64
+			if err := chunkRows.Scan(&chunkID); err != nil {
+				chunkRows.Close()
+				return fmt.Errorf("scan chunk id: %w", err)
+			}
+			db.DeleteEmbedding(chunkID) // Ignore errors
+		}
+		chunkRows.Close()
+	}
+
+	// Delete chunks for all files in this project
+	_, err = db.ExecContext(ctx, `
+		DELETE FROM chunks WHERE file_id IN (
+			SELECT id FROM files WHERE project_id = ?
+		)
+	`, projectID)
+	if err != nil {
+		return fmt.Errorf("delete chunks: %w", err)
+	}
+
+	// Delete files for this project
+	_, err = db.ExecContext(ctx, "DELETE FROM files WHERE project_id = ?", projectID)
+	if err != nil {
+		return fmt.Errorf("delete files: %w", err)
+	}
+
+	// Delete the project
+	_, err = db.ExecContext(ctx, "DELETE FROM projects WHERE id = ?", projectID)
+	if err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+
+	return nil
+}
+
+// ResetAll clears all data from the database.
+func (db *DB) ResetAll(ctx context.Context) error {
+	return db.Reset(ctx, 0)
 }
 
 // Stats returns database statistics

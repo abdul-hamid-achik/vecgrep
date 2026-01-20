@@ -8,10 +8,12 @@ vecgrep indexes your codebase and enables natural language search using vector e
 
 - **Semantic Search** - Find code by meaning, not just keywords
 - **Local-First** - All embeddings generated locally via Ollama
+- **OpenAI Support** - Optional cloud embeddings via OpenAI API
 - **Incremental Indexing** - Only re-index changed files
 - **Language-Aware Chunking** - Intelligent code splitting by functions, classes, and blocks
 - **MCP Support** - Model Context Protocol server for AI assistant integration
 - **Web Interface** - Browser-based search UI with syntax highlighting
+- **Similar Code Finder** - Find semantically similar code across your codebase
 
 ## Installation
 
@@ -63,6 +65,36 @@ task install
 4. **Search:**
    ```bash
    vecgrep search "error handling in HTTP requests"
+   ```
+
+### Using OpenAI (Alternative)
+
+If you prefer cloud embeddings via OpenAI:
+
+1. **Set your API key:**
+   ```bash
+   export OPENAI_API_KEY=sk-your-key-here
+   ```
+
+2. **Configure vecgrep to use OpenAI:**
+
+   Edit `.vecgrep/config.yaml`:
+   ```yaml
+   embedding:
+     provider: openai
+     model: text-embedding-3-small
+     dimensions: 1536
+   ```
+
+   Or set via environment:
+   ```bash
+   export VECGREP_EMBEDDING_PROVIDER=openai
+   export VECGREP_EMBEDDING_MODEL=text-embedding-3-small
+   ```
+
+3. **Re-index your codebase:**
+   ```bash
+   vecgrep index --full
    ```
 
 ## Usage
@@ -175,6 +207,40 @@ vecgrep status
 
 Displays index statistics and configuration.
 
+### Index Management
+
+#### Delete a File
+
+Remove a specific file and its chunks from the index:
+
+```bash
+vecgrep delete <file-path>
+```
+
+Example:
+```bash
+vecgrep delete internal/old_file.go
+```
+
+#### Clean Database
+
+Remove orphaned data (chunks without files, embeddings without chunks) and optimize:
+
+```bash
+vecgrep clean
+```
+
+#### Reset Index
+
+Clear all indexed data (destructive):
+
+```bash
+vecgrep reset [--force]
+```
+
+Options:
+- `--force` - Skip confirmation prompt
+
 ### Shell Completion
 
 Generate shell completion scripts:
@@ -199,10 +265,12 @@ Configuration is stored in `.vecgrep/config.yaml`:
 
 ```yaml
 embedding:
-  provider: ollama
-  model: nomic-embed-text
-  dimensions: 768
+  provider: ollama              # or "openai" for cloud embeddings
+  model: nomic-embed-text       # or "text-embedding-3-small" for OpenAI
+  dimensions: 768               # 1536 for text-embedding-3-small, 3072 for large
   ollama_url: http://localhost:11434
+  openai_api_key: ""            # Set via env var OPENAI_API_KEY or VECGREP_OPENAI_API_KEY
+  openai_base_url: ""           # Optional: for Azure OpenAI or custom endpoints
 
 indexing:
   chunk_size: 512
@@ -227,9 +295,11 @@ All environment variables use the `VECGREP_` prefix:
 
 | Variable | Description |
 |----------|-------------|
-| `VECGREP_OLLAMA_URL` | Ollama API URL (default: `http://localhost:11434`) |
-| `VECGREP_EMBEDDING_PROVIDER` | Embedding provider (`ollama`) |
+| `VECGREP_EMBEDDING_PROVIDER` | Embedding provider: `ollama` (default) or `openai` |
 | `VECGREP_EMBEDDING_MODEL` | Embedding model name |
+| `VECGREP_OLLAMA_URL` | Ollama API URL (default: `http://localhost:11434`) |
+| `VECGREP_OPENAI_API_KEY` | OpenAI API key (or use `OPENAI_API_KEY`) |
+| `VECGREP_OPENAI_BASE_URL` | OpenAI base URL (for Azure/custom endpoints) |
 | `VECGREP_HOST` | Server bind address |
 | `VECGREP_PORT` | Server port |
 
@@ -254,6 +324,9 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 | `vecgrep_index` | Index or re-index files in the project |
 | `vecgrep_status` | Get index statistics (files, chunks, languages) |
 | `vecgrep_similar` | Find code similar to a chunk ID, file:line location, or text snippet |
+| `vecgrep_delete` | Delete a file and its chunks from the index |
+| `vecgrep_clean` | Remove orphaned data and optimize the database |
+| `vecgrep_reset` | Reset the project database (requires confirmation) |
 
 **Note:** In uninitialized directories, only `vecgrep_init` is available. After initialization, all tools become available.
 

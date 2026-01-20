@@ -56,13 +56,13 @@ func DefaultIndexerConfig() IndexerConfig {
 
 // Progress represents indexing progress information.
 type Progress struct {
-	TotalFiles    int
+	TotalFiles     int
 	ProcessedFiles int
-	SkippedFiles  int
-	TotalChunks   int
-	CurrentFile   string
-	StartTime     time.Time
-	Errors        []error
+	SkippedFiles   int
+	TotalChunks    int
+	CurrentFile    string
+	StartTime      time.Time
+	Errors         []error
 }
 
 // ProgressCallback is called during indexing to report progress.
