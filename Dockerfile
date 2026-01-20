@@ -1,92 +1,67 @@
 # syntax=docker/dockerfile:1
 
 # =============================================================================
-# Build stage: Generate templates and build the Go binary
+# Stage 1: Build Tailwind CSS
+# =============================================================================
+FROM node:22-alpine3.21 AS tailwind
+
+WORKDIR /build
+
+RUN npm init -y && npm install tailwindcss @tailwindcss/cli --save-dev
+
+COPY assets/css/input.css ./assets/css/
+COPY internal/web/templates ./internal/web/templates/
+
+RUN npx @tailwindcss/cli -i ./assets/css/input.css -o ./output.css --minify
+
+# =============================================================================
+# Stage 2: Build Go binary (Debian for sqlite-vec glibc compatibility)
 # =============================================================================
 FROM golang:1.25-bookworm AS builder
 
-# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libc6-dev \
+    gcc libc6-dev libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install templ for template generation
 RUN go install github.com/a-h/templ/cmd/templ@latest
 
-WORKDIR /app
+WORKDIR /build
 
-# Copy go.mod and go.sum first for better caching
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download && go mod verify
 
-# Copy source code
 COPY . .
+COPY --from=tailwind /build/output.css ./internal/web/static/css/output.css
 
-# Generate templ files
 RUN templ generate
 
-# Build the binary with CGO enabled (required for sqlite-vec)
 ENV CGO_ENABLED=1
-RUN go build -ldflags="-s -w" -o /app/bin/vecgrep ./cmd/vecgrep
+RUN go build -trimpath -ldflags="-s -w" -o vecgrep ./cmd/vecgrep
 
 # =============================================================================
-# Frontend build stage: Build Tailwind CSS
-# =============================================================================
-FROM node:20-slim AS frontend
-
-WORKDIR /app
-
-# Install tailwindcss
-RUN npm install -g tailwindcss
-
-# Copy CSS source
-COPY assets/css/input.css ./assets/css/
-COPY tailwind.config.js ./
-
-# Generate CSS output
-RUN npx tailwindcss -i ./assets/css/input.css -o ./assets/css/output.css --minify
-
-# =============================================================================
-# Final stage: Runtime image
+# Stage 3: Runtime (Alpine for minimal size)
 # =============================================================================
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 1000 -m vecgrep \
+    && mkdir -p /data \
+    && chown vecgrep:vecgrep /data
 
-# Create non-root user
-RUN useradd -r -u 1000 -m vecgrep
+COPY --from=builder /build/vecgrep /usr/local/bin/
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Create necessary directories
-RUN mkdir -p /data /app && chown -R vecgrep:vecgrep /data /app
-
-WORKDIR /app
-
-# Copy binary from builder
-COPY --from=builder /app/bin/vecgrep /usr/local/bin/vecgrep
-
-# Copy generated CSS
-COPY --from=frontend /app/assets/css/output.css /app/internal/web/static/css/
-
-# Set ownership
-RUN chown -R vecgrep:vecgrep /app
-
-# Switch to non-root user
 USER vecgrep
+WORKDIR /data
 
-# Environment variables
 ENV VECGREP_DATA_DIR=/data
-ENV VECGREP_EMBEDDING_OLLAMA_URL=http://ollama:11434
+ENV VECGREP_OLLAMA_URL=http://host.docker.internal:11434
 
-# Expose web server port
 EXPOSE 8080
-
-# Volume for persistent data
 VOLUME ["/data"]
 
-# Default command
-ENTRYPOINT ["vecgrep"]
-CMD ["serve", "--web", "--port", "8080"]
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["vecgrep", "serve", "--web", "--host", "0.0.0.0", "--port", "8080"]

@@ -66,3 +66,4 @@ tmp/
 
 # Generated Tailwind CSS
 assets/css/output.css
+internal/web/static/css/output.css

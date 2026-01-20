@@ -1,85 +1,17 @@
-version: "3.8"
-
 services:
-  # Ollama service for embedding generation
-  ollama:
-    image: ollama/ollama:latest
-    container_name: vecgrep-ollama
+  app:
+    build: .
+    container_name: app
     volumes:
-      - ollama_data:/root/.ollama
-    ports:
-      - "11434:11434"
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-
-  # Model initialization (pull the embedding model)
-  ollama-init:
-    image: ollama/ollama:latest
-    container_name: vecgrep-ollama-init
-    depends_on:
-      ollama:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-        echo 'Waiting for Ollama to be ready...' &&
-        sleep 5 &&
-        echo 'Pulling nomic-embed-text model...' &&
-        ollama pull nomic-embed-text &&
-        echo 'Model ready!'
-      "
-    environment:
-      - OLLAMA_HOST=ollama:11434
-    restart: "no"
-
-  # vecgrep service
-  vecgrep:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: vecgrep
-    depends_on:
-      ollama:
-        condition: service_healthy
-      ollama-init:
-        condition: service_completed_successfully
-    volumes:
-      - vecgrep_data:/data
-      - ./:/workspace:ro  # Mount workspace for indexing (read-only)
+      - ./.vecgrep:/data/.vecgrep
+      - ./:/workspace:ro
     ports:
       - "8080:8080"
     environment:
       - VECGREP_DATA_DIR=/data
-      - VECGREP_EMBEDDING_OLLAMA_URL=http://ollama:11434
+      - VECGREP_OLLAMA_URL=http://host.docker.internal:11434
       - VECGREP_SERVER_HOST=0.0.0.0
       - VECGREP_SERVER_PORT=8080
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
-volumes:
-  ollama_data:
-    name: vecgrep-ollama-data
-  vecgrep_data:
-    name: vecgrep-data
-
-networks:
-  default:
-    name: vecgrep-network

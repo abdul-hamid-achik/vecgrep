@@ -63,7 +63,7 @@ tasks:
         echo ""
         echo "  Ollama Status"
         echo "  ─────────────"
-        curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "    ✓ Ollama running" || echo "    ✗ Ollama not running (run: ollama serve)"
+        curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "    ✓ Ollama running" || echo "    ✗ Ollama not running (run: task ollama)"
         ollama list 2>/dev/null | grep -q nomic-embed-text && echo "    ✓ nomic-embed-text model" || echo "    ✗ nomic-embed-text (run: ollama pull nomic-embed-text)"
         echo ""
         echo "  Project Status"
@@ -144,6 +144,10 @@ tasks:
     cmds:
       - go mod download
       - go mod tidy
+    sources:
+      - go.mod
+      - go.sum
+    method: checksum
 
   "setup:tools":
     desc: Install development tools
@@ -151,11 +155,17 @@ tasks:
       - go install github.com/a-h/templ/cmd/templ@latest
       - go install github.com/air-verse/air@latest
       - go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+    status:
+      - command -v templ
+      - command -v air
+      - command -v sqlc
 
   "setup:tailwind":
     desc: Download Tailwind CSS CLI
     cmds:
       - ./scripts/download-tailwind.sh
+    status:
+      - test -x ./bin/tailwindcss
 
   # ════════════════════════════════════════════════════════════════════════════
   # CODE GENERATION
@@ -189,11 +199,10 @@ tasks:
     sources:
       - 'assets/css/input.css'
       - 'internal/web/templates/**/*.templ'
-      - 'tailwind.config.js'
     generates:
-      - 'assets/css/output.css'
+      - 'internal/web/static/css/output.css'
     cmds:
-      - ./bin/tailwindcss -i assets/css/input.css -o assets/css/output.css --minify
+      - ./bin/tailwindcss -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
   # ════════════════════════════════════════════════════════════════════════════
   # BUILD
@@ -242,7 +251,7 @@ tasks:
   "dev:css":
     desc: Watch and rebuild Tailwind CSS
     cmds:
-      - ./bin/tailwindcss -i assets/css/input.css -o assets/css/output.css --watch
+      - ./bin/tailwindcss -i assets/css/input.css -o internal/web/static/css/output.css --watch
 
   "watch:templ":
     desc: Watch and regenerate templ files
@@ -318,6 +327,18 @@ tasks:
       - rm -rf .vecgrep/
       - "{{.BUILD_DIR}}/{{.BINARY_NAME}} init"
       - echo "  ✓ Database reset"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # OLLAMA
+  # ════════════════════════════════════════════════════════════════════════════
+
+  ollama:
+    desc: Start Ollama with Metal GPU support
+    env:
+      OLLAMA_METAL: "1"
+      OLLAMA_HOST: 0.0.0.0
+    cmds:
+      - ollama serve
 
   # ════════════════════════════════════════════════════════════════════════════
   # DOCKER
