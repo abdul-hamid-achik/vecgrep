@@ -26,6 +26,9 @@ jobs:
       - name: Install templ
         run: go install github.com/a-h/templ/cmd/templ@latest
 
+      - name: Download Tailwind CSS CLI
+        run: ./scripts/download-tailwind.sh
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:

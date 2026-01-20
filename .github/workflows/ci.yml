@@ -22,8 +22,14 @@ jobs:
       - name: Install templ
         run: go install github.com/a-h/templ/cmd/templ@latest
 
-      - name: Generate code
+      - name: Generate templ code
         run: templ generate
+
+      - name: Download Tailwind CSS CLI
+        run: ./scripts/download-tailwind.sh
+
+      - name: Generate CSS
+        run: ./bin/tailwindcss -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
@@ -49,8 +55,14 @@ jobs:
       - name: Install templ
         run: go install github.com/a-h/templ/cmd/templ@latest
 
-      - name: Generate code
+      - name: Generate templ code
         run: templ generate
+
+      - name: Download Tailwind CSS CLI
+        run: ./scripts/download-tailwind.sh
+
+      - name: Generate CSS
+        run: ./bin/tailwindcss -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
       - name: Download modules
         run: go mod download
@@ -76,8 +88,14 @@ jobs:
       - name: Install templ
         run: go install github.com/a-h/templ/cmd/templ@latest
 
-      - name: Generate code
+      - name: Generate templ code
         run: templ generate
+
+      - name: Download Tailwind CSS CLI
+        run: ./scripts/download-tailwind.sh
+
+      - name: Generate CSS
+        run: ./bin/tailwindcss -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
       - name: Verify build
         run: go build -o /dev/null ./cmd/vecgrep

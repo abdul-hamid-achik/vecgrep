@@ -4,8 +4,9 @@ project_name: vecgrep
 
 before:
   hooks:
-    - go mod tidy
     - templ generate
+    - ./bin/tailwindcss -i assets/css/input.css -o internal/web/static/css/output.css --minify
+    - go mod tidy
 
 builds:
   - id: vecgrep
