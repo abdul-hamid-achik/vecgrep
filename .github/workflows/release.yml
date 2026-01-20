@@ -109,7 +109,7 @@ jobs:
           path: vecgrep_*.tar.gz
 
   build-darwin-amd64:
-    runs-on: macos-13
+    runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -136,6 +136,7 @@ jobs:
       - name: Build
         env:
           CGO_ENABLED: 1
+          GOARCH: amd64
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           COMMIT=$(git rev-parse --short HEAD)
