@@ -1,0 +1,183 @@
+package templates
+
+import "fmt"
+
+// IndexData contains data for the index page.
+type IndexData struct {
+	Query   string
+	Results []SearchResult
+}
+
+// SearchResult represents a search result for display.
+type SearchResult struct {
+	ChunkID    int64
+	FilePath   string
+	Content    string
+	StartLine  int
+	EndLine    int
+	ChunkType  string
+	SymbolName string
+	Language   string
+	Score      float32
+}
+
+templ Index(data IndexData) {
+	@Layout("Search") {
+		<div class="space-y-6">
+			<!-- Search Form -->
+			<div class="card p-6">
+				<form
+					hx-get="/search"
+					hx-target="#results"
+					hx-indicator="#loading"
+					hx-trigger="submit"
+					class="space-y-4"
+				>
+					<div class="flex gap-4">
+						<input
+							type="text"
+							name="q"
+							placeholder="Search your codebase semantically..."
+							value={ data.Query }
+							class="input flex-1 px-4 py-3 text-lg"
+							autocomplete="off"
+							autofocus
+						/>
+						<button type="submit" class="btn px-6 py-3 text-lg">
+							Search
+						</button>
+					</div>
+					<!-- Filters -->
+					<div class="flex gap-4 flex-wrap">
+						<select name="lang" class="input px-3 py-2">
+							<option value="">All Languages</option>
+							<option value="go">Go</option>
+							<option value="python">Python</option>
+							<option value="javascript">JavaScript</option>
+							<option value="typescript">TypeScript</option>
+							<option value="rust">Rust</option>
+							<option value="java">Java</option>
+							<option value="c">C</option>
+							<option value="cpp">C++</option>
+						</select>
+						<select name="type" class="input px-3 py-2">
+							<option value="">All Types</option>
+							<option value="function">Function</option>
+							<option value="class">Class</option>
+							<option value="block">Block</option>
+							<option value="comment">Comment</option>
+							<option value="generic">Generic</option>
+						</select>
+						<input
+							type="text"
+							name="file"
+							placeholder="File pattern (e.g., *.go)"
+							class="input px-3 py-2"
+						/>
+						<select name="limit" class="input px-3 py-2">
+							<option value="10">10 results</option>
+							<option value="20">20 results</option>
+							<option value="50">50 results</option>
+						</select>
+					</div>
+				</form>
+			</div>
+			<!-- Loading indicator -->
+			<div id="loading" class="htmx-indicator text-center py-8">
+				<svg class="spinner inline-block w-8 h-8" style="color: var(--nord8);" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+				</svg>
+				<p class="mt-2" style="color: var(--nord4);">Searching...</p>
+			</div>
+			<!-- Results container -->
+			<div id="results">
+				if len(data.Results) > 0 {
+					@SearchResults(data.Results)
+				}
+			</div>
+		</div>
+	}
+}
+
+templ SearchResults(results []SearchResult) {
+	if len(results) == 0 {
+		<div class="card p-8 text-center" style="color: var(--nord4);">
+			<p class="text-lg">No results found.</p>
+			<p class="mt-2 text-sm" style="color: var(--nord3);">Try a different query or adjust your filters.</p>
+		</div>
+	} else {
+		<div class="space-y-4">
+			<p class="text-sm" style="color: var(--nord3);">
+				Found { fmt.Sprintf("%d", len(results)) } results
+			</p>
+			for _, result := range results {
+				@ResultCard(result)
+			}
+		</div>
+	}
+}
+
+templ ResultCard(result SearchResult) {
+	<div class="card p-4 space-y-3">
+		<!-- Header -->
+		<div class="flex items-start justify-between">
+			<div class="flex items-center gap-2 flex-wrap">
+				<a
+					href="#"
+					class="font-medium hover:underline"
+					style="color: var(--nord8);"
+					title={ result.FilePath }
+				>
+					{ result.FilePath }
+				</a>
+				<span class="text-sm" style="color: var(--nord3);">
+					:{ fmt.Sprintf("%d", result.StartLine) }-{ fmt.Sprintf("%d", result.EndLine) }
+				</span>
+			</div>
+			<div class="flex items-center gap-2">
+				<span class="badge badge-score">
+					{ fmt.Sprintf("%.0f%%", result.Score*100) }
+				</span>
+			</div>
+		</div>
+		<!-- Badges -->
+		<div class="flex gap-2 flex-wrap">
+			if result.Language != "" && result.Language != "unknown" {
+				<span class="badge badge-lang">{ result.Language }</span>
+			}
+			if result.ChunkType != "" && result.ChunkType != "generic" {
+				<span class="badge badge-type">{ result.ChunkType }</span>
+			}
+			if result.SymbolName != "" {
+				<span class="badge">{ result.SymbolName }</span>
+			}
+		</div>
+		<!-- Code block -->
+		<pre><code>{ result.Content }</code></pre>
+	</div>
+}
+
+templ Error(message string) {
+	<div class="card p-6 text-center" style="border-color: var(--nord11);">
+		<p style="color: var(--nord11);">Error: { message }</p>
+	</div>
+}
+
+templ StatusPage(stats map[string]interface{}) {
+	@Layout("Status") {
+		<div class="space-y-6">
+			<h1 class="text-2xl font-bold" style="color: var(--nord8);">Index Status</h1>
+			<div class="card p-6">
+				<dl class="grid grid-cols-2 gap-4">
+					for key, value := range stats {
+						<div>
+							<dt class="text-sm" style="color: var(--nord3);">{ key }</dt>
+							<dd class="text-lg font-medium" style="color: var(--nord4);">{ fmt.Sprintf("%v", value) }</dd>
+						</div>
+					}
+				</dl>
+			</div>
+		</div>
+	}
+}

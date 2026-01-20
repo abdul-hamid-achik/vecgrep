@@ -1,0 +1,138 @@
+version: '3'
+
+vars:
+  BINARY_NAME: vecgrep
+  BUILD_DIR: ./bin
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  BUILD_TIME:
+    sh: date -u '+%Y-%m-%dT%H:%M:%SZ'
+  LDFLAGS: >-
+    -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version={{.VERSION}}
+    -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit={{.COMMIT}}
+    -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date={{.BUILD_TIME}}
+
+env:
+  CGO_ENABLED: "1"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # Setup tasks
+  setup:
+    desc: Run all setup tasks
+    cmds:
+      - task: setup:go
+      - task: setup:tools
+      - task: setup:tailwind
+
+  setup:go:
+    desc: Download Go dependencies
+    cmds:
+      - go mod download
+      - go mod tidy
+
+  setup:tools:
+    desc: Install development tools
+    cmds:
+      - go install github.com/air-verse/air@latest
+      - go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+
+  setup:tailwind:
+    desc: Download Tailwind CSS CLI
+    cmds:
+      - ./scripts/download-tailwind.sh
+
+  # Build tasks
+  build:
+    desc: Build the vecgrep binary
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}} ./cmd/vecgrep
+    sources:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+    generates:
+      - "{{.BUILD_DIR}}/{{.BINARY_NAME}}"
+
+  build:release:
+    desc: Build optimized release binary
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -ldflags "{{.LDFLAGS}} -s -w" -trimpath -o {{.BUILD_DIR}}/{{.BINARY_NAME}} ./cmd/vecgrep
+
+  # Development tasks
+  dev:
+    desc: Run with hot reload using Air
+    cmds:
+      - air
+
+  run:
+    desc: Build and run vecgrep
+    deps: [build]
+    cmds:
+      - "{{.BUILD_DIR}}/{{.BINARY_NAME}} {{.CLI_ARGS}}"
+
+  # Code generation
+  generate:
+    desc: Run all code generation
+    cmds:
+      - task: generate:sqlc
+
+  generate:sqlc:
+    desc: Generate SQL code with sqlc
+    dir: internal/db
+    cmds:
+      - sqlc generate
+
+  # Testing
+  test:
+    desc: Run tests
+    cmds:
+      - go test -v ./...
+
+  test:coverage:
+    desc: Run tests with coverage
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+
+  # Linting
+  lint:
+    desc: Run linters
+    cmds:
+      - go vet ./...
+      - test -z "$(gofmt -l .)"
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - go fmt ./...
+
+  # Clean
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf {{.BUILD_DIR}}
+      - rm -rf tmp
+      - rm -f coverage.out coverage.html
+      - rm -rf internal/db/generated
+
+  # Database tasks
+  db:reset:
+    desc: Reset the local database
+    cmds:
+      - rm -rf .vecgrep/
+      - "{{.BUILD_DIR}}/{{.BINARY_NAME}} init"
+
+  # Install
+  install:
+    desc: Install vecgrep to GOPATH/bin
+    cmds:
+      - go install -ldflags "{{.LDFLAGS}}" ./cmd/vecgrep

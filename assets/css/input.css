@@ -1,0 +1,305 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Nord color theme custom properties */
+:root {
+  /* Polar Night */
+  --nord0: #2e3440;
+  --nord1: #3b4252;
+  --nord2: #434c5e;
+  --nord3: #4c566a;
+
+  /* Snow Storm */
+  --nord4: #d8dee9;
+  --nord5: #e5e9f0;
+  --nord6: #eceff4;
+
+  /* Frost */
+  --nord7: #8fbcbb;
+  --nord8: #88c0d0;
+  --nord9: #81a1c1;
+  --nord10: #5e81ac;
+
+  /* Aurora */
+  --nord11: #bf616a;
+  --nord12: #d08770;
+  --nord13: #ebcb8b;
+  --nord14: #a3be8c;
+  --nord15: #b48ead;
+}
+
+/* Base styles */
+@layer base {
+  html {
+    @apply h-full;
+  }
+
+  body {
+    background-color: var(--nord0);
+    color: var(--nord4);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    @apply h-full antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    color: var(--nord6);
+    @apply font-semibold;
+  }
+
+  a {
+    color: var(--nord8);
+    @apply hover:underline;
+  }
+
+  code, pre {
+    font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+  }
+}
+
+/* Component styles */
+@layer components {
+  /* Card component */
+  .card {
+    background-color: var(--nord1);
+    border: 1px solid var(--nord2);
+    @apply rounded-lg shadow-lg;
+  }
+
+  .card-hover:hover {
+    border-color: var(--nord3);
+    @apply shadow-xl transition-shadow;
+  }
+
+  /* Button component */
+  .btn {
+    background-color: var(--nord10);
+    color: var(--nord6);
+    @apply px-4 py-2 rounded-md font-medium cursor-pointer transition-colors;
+  }
+
+  .btn:hover {
+    background-color: var(--nord9);
+  }
+
+  .btn:active {
+    background-color: var(--nord7);
+  }
+
+  .btn:disabled {
+    background-color: var(--nord3);
+    color: var(--nord4);
+    @apply cursor-not-allowed opacity-50;
+  }
+
+  .btn-secondary {
+    background-color: var(--nord2);
+    color: var(--nord4);
+  }
+
+  .btn-secondary:hover {
+    background-color: var(--nord3);
+  }
+
+  .btn-danger {
+    background-color: var(--nord11);
+  }
+
+  .btn-danger:hover {
+    @apply brightness-110;
+  }
+
+  /* Input component */
+  .input {
+    background-color: var(--nord1);
+    border: 1px solid var(--nord3);
+    color: var(--nord6);
+    @apply rounded-md transition-colors;
+  }
+
+  .input:focus {
+    border-color: var(--nord8);
+    @apply outline-none ring-1 ring-opacity-50;
+    --tw-ring-color: var(--nord8);
+  }
+
+  .input::placeholder {
+    color: var(--nord3);
+  }
+
+  /* Badge component */
+  .badge {
+    background-color: var(--nord2);
+    color: var(--nord4);
+    @apply px-2 py-0.5 rounded text-xs font-medium inline-block;
+  }
+
+  .badge-lang {
+    background-color: var(--nord10);
+    color: var(--nord6);
+  }
+
+  .badge-type {
+    background-color: var(--nord15);
+    color: var(--nord6);
+  }
+
+  .badge-score {
+    background-color: var(--nord14);
+    color: var(--nord0);
+  }
+
+  .badge-warning {
+    background-color: var(--nord13);
+    color: var(--nord0);
+  }
+
+  .badge-error {
+    background-color: var(--nord11);
+    color: var(--nord6);
+  }
+
+  /* Code block component */
+  .code-block {
+    background-color: var(--nord0);
+    border: 1px solid var(--nord2);
+    @apply rounded-lg p-4 overflow-x-auto;
+  }
+
+  .code-block code {
+    @apply text-sm leading-relaxed;
+  }
+
+  /* Line numbers */
+  .line-numbers {
+    color: var(--nord3);
+    @apply select-none text-right pr-4 text-xs;
+  }
+
+  /* Alert components */
+  .alert {
+    @apply rounded-lg p-4 border;
+  }
+
+  .alert-info {
+    background-color: rgba(136, 192, 208, 0.1);
+    border-color: var(--nord8);
+    color: var(--nord8);
+  }
+
+  .alert-success {
+    background-color: rgba(163, 190, 140, 0.1);
+    border-color: var(--nord14);
+    color: var(--nord14);
+  }
+
+  .alert-warning {
+    background-color: rgba(235, 203, 139, 0.1);
+    border-color: var(--nord13);
+    color: var(--nord13);
+  }
+
+  .alert-error {
+    background-color: rgba(191, 97, 106, 0.1);
+    border-color: var(--nord11);
+    color: var(--nord11);
+  }
+}
+
+/* Utility styles */
+@layer utilities {
+  /* Text colors using Nord */
+  .text-nord-frost {
+    color: var(--nord8);
+  }
+
+  .text-nord-snow {
+    color: var(--nord6);
+  }
+
+  .text-nord-muted {
+    color: var(--nord3);
+  }
+
+  /* Background colors */
+  .bg-nord-dark {
+    background-color: var(--nord0);
+  }
+
+  .bg-nord-light {
+    background-color: var(--nord1);
+  }
+
+  /* Custom scrollbar */
+  .custom-scrollbar::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background-color: var(--nord1);
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background-color: var(--nord3);
+    @apply rounded;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: var(--nord9);
+  }
+
+  /* Spinner animation */
+  .spinner {
+    @apply animate-spin;
+  }
+
+  /* Fade in animation */
+  .fade-in {
+    animation: fadeIn 0.2s ease-in-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Slide in animation */
+  .slide-in {
+    animation: slideIn 0.3s ease-out;
+  }
+
+  @keyframes slideIn {
+    from {
+      opacity: 0;
+      transform: translateX(-20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+}
+
+/* HTMX-specific styles */
+.htmx-indicator {
+  display: none;
+}
+
+.htmx-request .htmx-indicator {
+  display: inline-block;
+}
+
+.htmx-request.htmx-indicator {
+  display: inline-block;
+}
+
+/* Make swapped content fade in */
+.htmx-added {
+  animation: fadeIn 0.2s ease-in-out;
+}

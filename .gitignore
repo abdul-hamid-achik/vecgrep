@@ -1,0 +1,68 @@
+# Binaries (at root only)
+/vecgrep
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+/bin/
+/dist/
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated files
+internal/db/generated/
+
+# Environment files (keep .env.example)
+.env
+.env.local
+.env.*.local
+
+# Tailwind CLI binary
+/bin/tailwindcss*
+
+# Air tmp directory
+tmp/
+
+# vecgrep data directories (project-specific)
+.vecgrep/
+
+# Logs
+*.log
+
+# Task cache
+.task/
+
+# Claude Code
+.claude/
+
+# Generated templ files
+*_templ.go
+
+# Generated Tailwind CSS
+assets/css/output.css

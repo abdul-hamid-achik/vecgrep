@@ -1,0 +1,132 @@
+package components
+
+import "fmt"
+
+// CodeResult represents a code search result for display.
+type CodeResult struct {
+	ChunkID    int64
+	FilePath   string
+	Content    string
+	StartLine  int
+	EndLine    int
+	ChunkType  string
+	SymbolName string
+	Language   string
+	Score      float32
+}
+
+// ResultCardCompact renders a compact result card.
+templ ResultCardCompact(result CodeResult) {
+	<div class="border-b border-gray-700 py-3 hover:bg-gray-800 px-2 -mx-2">
+		<div class="flex items-center justify-between">
+			<div class="flex items-center gap-2">
+				<span style="color: var(--nord8);">{ result.FilePath }</span>
+				<span class="text-sm" style="color: var(--nord3);">
+					:{ fmt.Sprintf("%d", result.StartLine) }
+				</span>
+				if result.SymbolName != "" {
+					<span class="badge">{ result.SymbolName }</span>
+				}
+			</div>
+			<span class="text-sm" style="color: var(--nord14);">
+				{ fmt.Sprintf("%.0f%%", result.Score*100) }
+			</span>
+		</div>
+	</div>
+}
+
+// ResultCardFull renders a full result card with code preview.
+templ ResultCardFull(result CodeResult) {
+	<div class="card p-4 space-y-3">
+		<!-- Header with file info -->
+		<div class="flex items-start justify-between">
+			<div>
+				<a
+					href="#"
+					class="font-medium hover:underline"
+					style="color: var(--nord8);"
+				>
+					{ result.FilePath }
+				</a>
+				<span class="ml-2 text-sm" style="color: var(--nord3);">
+					lines { fmt.Sprintf("%d", result.StartLine) }-{ fmt.Sprintf("%d", result.EndLine) }
+				</span>
+			</div>
+			<div class="flex items-center gap-2">
+				<span class="badge badge-score">
+					{ fmt.Sprintf("%.0f%%", result.Score*100) } match
+				</span>
+			</div>
+		</div>
+		<!-- Metadata badges -->
+		<div class="flex gap-2 flex-wrap">
+			if result.Language != "" && result.Language != "unknown" {
+				<span class="badge badge-lang">{ result.Language }</span>
+			}
+			if result.ChunkType != "" && result.ChunkType != "generic" {
+				<span class="badge badge-type">{ result.ChunkType }</span>
+			}
+			if result.SymbolName != "" {
+				<span class="badge">{ result.SymbolName }</span>
+			}
+		</div>
+		<!-- Code block with line numbers -->
+		<div class="relative">
+			<div class="absolute left-0 top-0 bottom-0 w-12 flex flex-col text-right pr-2 pt-4 text-xs select-none" style="color: var(--nord3);">
+				for i := result.StartLine; i <= result.EndLine; i++ {
+					<span>{ fmt.Sprintf("%d", i) }</span>
+				}
+			</div>
+			<pre class="pl-14"><code class={ "language-" + result.Language }>{ result.Content }</code></pre>
+		</div>
+	</div>
+}
+
+// CodeBlock renders a syntax-highlighted code block.
+templ CodeBlock(code string, language string, startLine int) {
+	<pre class="overflow-x-auto"><code class={ "language-" + language }>{ code }</code></pre>
+}
+
+// Badge renders a simple badge.
+templ Badge(text string, variant string) {
+	<span class={ "badge badge-" + variant }>{ text }</span>
+}
+
+// ScoreBadge renders a score as a percentage badge.
+templ ScoreBadge(score float32) {
+	<span class="badge badge-score">
+		{ fmt.Sprintf("%.0f%%", score*100) }
+	</span>
+}
+
+// LanguageBadge renders a language badge.
+templ LanguageBadge(lang string) {
+	if lang != "" && lang != "unknown" {
+		<span class="badge badge-lang">{ lang }</span>
+	}
+}
+
+// TypeBadge renders a chunk type badge.
+templ TypeBadge(chunkType string) {
+	if chunkType != "" && chunkType != "generic" {
+		<span class="badge badge-type">{ chunkType }</span>
+	}
+}
+
+// EmptyState renders an empty state message.
+templ EmptyState(title string, message string) {
+	<div class="card p-8 text-center">
+		<h3 class="text-lg font-medium" style="color: var(--nord4);">{ title }</h3>
+		<p class="mt-2 text-sm" style="color: var(--nord3);">{ message }</p>
+	</div>
+}
+
+// LoadingSpinner renders a loading spinner.
+templ LoadingSpinner() {
+	<div class="flex items-center justify-center py-8">
+		<svg class="spinner w-8 h-8" style="color: var(--nord8);" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+			<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+			<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+		</svg>
+	</div>
+}

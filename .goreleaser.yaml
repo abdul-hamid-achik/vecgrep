@@ -1,0 +1,76 @@
+version: 2
+
+project_name: vecgrep
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: vecgrep
+    main: ./cmd/vecgrep
+    binary: vecgrep
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version={{.Version}}
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date={{.Date}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+brews:
+  - name: vecgrep
+    repository:
+      owner: abdul-hamid-achik
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/abdul-hamid-achik/vecgrep"
+    description: "Local-first semantic code search powered by embeddings"
+    license: "MIT"
+    install: |
+      bin.install "vecgrep"
+    test: |
+      system "#{bin}/vecgrep", "--version"
+    skip_upload: "{{ if .Env.HOMEBREW_TAP_TOKEN }}false{{ else }}true{{ end }}"
+
+release:
+  github:
+    owner: abdul-hamid-achik
+    name: vecgrep
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"

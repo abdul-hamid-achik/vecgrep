@@ -1,0 +1,68 @@
+# Air configuration for hot reload development
+# https://github.com/air-verse/air
+
+root = "."
+testdata_dir = "testdata"
+tmp_dir = "tmp"
+
+[build]
+  # Build arguments
+  args_bin = []
+  # Binary output location
+  bin = "./tmp/vecgrep"
+  # Build command
+  cmd = "go build -o ./tmp/vecgrep ./cmd/vecgrep"
+  # Time delay after file change before rebuild (ms)
+  delay = 500
+  # Directories to exclude
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "node_modules", ".git", ".vecgrep"]
+  # File extensions to exclude
+  exclude_file = []
+  # Regex patterns to exclude
+  exclude_regex = ["_test.go", ".*_templ.go"]
+  # Unchanged files to exclude
+  exclude_unchanged = false
+  # Follow symlinks
+  follow_symlink = false
+  # Run binary with full path
+  full_bin = ""
+  # File extensions to watch
+  include_ext = ["go", "tpl", "tmpl", "html", "sql"]
+  # Directories to include
+  include_dir = []
+  # Include files matching regex
+  include_file = []
+  # Stop running old binary before building new one
+  kill_delay = "0s"
+  # Log output
+  log = "build-errors.log"
+  # Pass arguments to binary
+  poll = false
+  poll_interval = 0
+  post_cmd = []
+  pre_cmd = []
+  rerun = false
+  rerun_delay = 500
+  send_interrupt = false
+  stop_on_error = false
+
+[color]
+  # Customize colors
+  app = ""
+  build = "yellow"
+  main = "magenta"
+  runner = "green"
+  watcher = "cyan"
+
+[log]
+  # Log level: debug, info, warn, error
+  main_only = false
+  time = false
+
+[misc]
+  # Clean tmp on exit
+  clean_on_exit = false
+
+[screen]
+  clear_on_rebuild = false
+  keep_scroll = true

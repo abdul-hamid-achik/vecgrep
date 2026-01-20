@@ -1,0 +1,122 @@
+package templates
+
+templ Layout(title string) {
+	<!DOCTYPE html>
+	<html lang="en" class="h-full">
+		<head>
+			<meta charset="UTF-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+			<title>{ title } - vecgrep</title>
+			<link rel="stylesheet" href="/static/css/output.css"/>
+			<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+			<style>
+				/* Nord color scheme */
+				:root {
+					--nord0: #2e3440;
+					--nord1: #3b4252;
+					--nord2: #434c5e;
+					--nord3: #4c566a;
+					--nord4: #d8dee9;
+					--nord5: #e5e9f0;
+					--nord6: #eceff4;
+					--nord7: #8fbcbb;
+					--nord8: #88c0d0;
+					--nord9: #81a1c1;
+					--nord10: #5e81ac;
+					--nord11: #bf616a;
+					--nord12: #d08770;
+					--nord13: #ebcb8b;
+					--nord14: #a3be8c;
+					--nord15: #b48ead;
+				}
+				body {
+					background-color: var(--nord0);
+					color: var(--nord4);
+				}
+				.card {
+					background-color: var(--nord1);
+					border: 1px solid var(--nord2);
+					border-radius: 8px;
+				}
+				.input {
+					background-color: var(--nord1);
+					border: 1px solid var(--nord3);
+					color: var(--nord6);
+				}
+				.input:focus {
+					border-color: var(--nord8);
+					outline: none;
+				}
+				.btn {
+					background-color: var(--nord10);
+					color: var(--nord6);
+					border-radius: 6px;
+					padding: 8px 16px;
+					cursor: pointer;
+				}
+				.btn:hover {
+					background-color: var(--nord9);
+				}
+				.badge {
+					background-color: var(--nord2);
+					color: var(--nord4);
+					padding: 2px 8px;
+					border-radius: 4px;
+					font-size: 12px;
+				}
+				.badge-lang { background-color: var(--nord10); }
+				.badge-type { background-color: var(--nord15); }
+				.badge-score { background-color: var(--nord14); color: var(--nord0); }
+				pre {
+					background-color: var(--nord0);
+					border: 1px solid var(--nord2);
+					border-radius: 6px;
+					padding: 16px;
+					overflow-x: auto;
+				}
+				code {
+					font-family: 'JetBrains Mono', 'Fira Code', monospace;
+					font-size: 14px;
+				}
+				.htmx-indicator {
+					display: none;
+				}
+				.htmx-request .htmx-indicator {
+					display: inline-block;
+				}
+				.htmx-request.htmx-indicator {
+					display: inline-block;
+				}
+				.spinner {
+					animation: spin 1s linear infinite;
+				}
+				@keyframes spin {
+					from { transform: rotate(0deg); }
+					to { transform: rotate(360deg); }
+				}
+			</style>
+		</head>
+		<body class="h-full flex flex-col">
+			<header class="border-b border-gray-700 p-4">
+				<div class="max-w-6xl mx-auto flex justify-between items-center">
+					<a href="/" class="text-2xl font-bold" style="color: var(--nord8);">
+						vecgrep
+					</a>
+					<nav class="flex gap-4">
+						<a href="/" class="hover:underline" style="color: var(--nord9);">Search</a>
+						<a href="/status" class="hover:underline" style="color: var(--nord9);">Status</a>
+						<a href="/api/health" class="hover:underline" style="color: var(--nord9);">API</a>
+					</nav>
+				</div>
+			</header>
+			<main class="flex-1 p-4">
+				<div class="max-w-6xl mx-auto">
+					{ children... }
+				</div>
+			</main>
+			<footer class="border-t border-gray-700 p-4 text-center text-sm" style="color: var(--nord3);">
+				vecgrep - Semantic code search powered by vector embeddings
+			</footer>
+		</body>
+	</html>
+}
