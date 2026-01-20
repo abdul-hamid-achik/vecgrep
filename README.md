@@ -210,15 +210,14 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 
 ### Claude Code (CLI)
 
-Add vecgrep as an MCP server using the CLI:
+Add vecgrep as an MCP server. Run this from your project directory (where `.vecgrep` exists):
 
 ```bash
-# Add for current project only
-claude mcp add vecgrep -- vecgrep serve --mcp
-
-# Add for all your projects (user scope)
-claude mcp add --scope user vecgrep -- vecgrep serve --mcp
+# Add for current project (recommended)
+claude mcp add --scope local vecgrep -- vecgrep serve --mcp
 ```
+
+**Important:** Use `--scope local` (default) so vecgrep runs from the correct project directory. Using `--scope user` will fail because vecgrep needs a `.vecgrep` folder in the working directory.
 
 Manage your MCP servers:
 
