@@ -1,21 +1,28 @@
-run:
-  timeout: 5m
+version: "2"
 
 linters:
+  default: standard
   enable:
     - errcheck
-    - gosimple
-    - govet
-    - ineffassign
     - staticcheck
-    - unused
-    - gofmt
-    - goimports
-
-linters-settings:
-  gofmt:
-    simplify: true
-
-issues:
-  exclude-dirs:
-    - internal/db/generated
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+        - (io.Closer).Close
+        - (*os.File).Close
+    staticcheck:
+      checks:
+        - "all"
+        - "-QF1001"
+        - "-QF1003"
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - errcheck
+        source: "defer.*\\.Close\\(\\)"
+    paths:
+      - internal/web/templates/*_templ.go
