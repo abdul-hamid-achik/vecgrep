@@ -340,29 +340,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	projectRoot, err := config.GetProjectRoot()
-	if err != nil {
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
-	}
-
-	cfg, err := config.Load(projectRoot)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer database.Close()
-
-	// Create embedding provider
-	provider := embed.NewOllamaProvider(embed.OllamaConfig{
-		URL:        cfg.Embedding.OllamaURL,
-		Model:      cfg.Embedding.Model,
-		Dimensions: cfg.Embedding.Dimensions,
-	})
-
 	// Get flags
 	host, _ := cmd.Flags().GetString("host")
 	port, _ := cmd.Flags().GetInt("port")
@@ -372,6 +349,38 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Default to web mode if neither is specified
 	if !mcpMode && !webMode {
 		webMode = true
+	}
+
+	// Try to find project root - MCP mode can work without it
+	projectRoot, projectErr := config.GetProjectRoot()
+
+	var cfg *config.Config
+	var database *db.DB
+	var provider embed.Provider
+
+	// If we have a project, load it fully
+	if projectErr == nil {
+		var err error
+		cfg, err = config.Load(projectRoot)
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+
+		database, err = db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+		if err != nil {
+			return fmt.Errorf("failed to open database: %w", err)
+		}
+		defer database.Close()
+
+		// Create embedding provider
+		provider = embed.NewOllamaProvider(embed.OllamaConfig{
+			URL:        cfg.Embedding.OllamaURL,
+			Model:      cfg.Embedding.Model,
+			Dimensions: cfg.Embedding.Dimensions,
+		})
+	} else if !mcpMode {
+		// Web mode requires an initialized project
+		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
 	}
 
 	// Set up context with signal handling
@@ -386,18 +395,22 @@ func runServe(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Start MCP server (stdio)
+	// Start MCP server (stdio) - works even without initialized project
 	if mcpMode {
-		fmt.Fprintln(os.Stderr, "Starting MCP server on stdio...")
+		if projectErr != nil {
+			fmt.Fprintln(os.Stderr, "Starting MCP server on stdio (no project initialized)...")
+		} else {
+			fmt.Fprintln(os.Stderr, "Starting MCP server on stdio...")
+		}
 		mcpServer := mcp.NewServer(mcp.ServerConfig{
-			DB:          database,
-			Provider:    provider,
-			ProjectRoot: projectRoot,
+			DB:          database,  // nil if not initialized
+			Provider:    provider,  // nil if not initialized
+			ProjectRoot: projectRoot, // empty if not initialized
 		})
 		return mcpServer.Run(ctx)
 	}
 
-	// Start web server
+	// Start web server (requires initialized project)
 	if webMode {
 		webServer := web.NewServer(web.ServerConfig{
 			Host:        host,

@@ -204,20 +204,26 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 
 | Tool | Description |
 |------|-------------|
+| `vecgrep_init` | Initialize vecgrep in a directory (creates `.vecgrep` folder) |
 | `vecgrep_search` | Semantic search across the indexed codebase |
 | `vecgrep_index` | Index or re-index files in the project |
 | `vecgrep_status` | Get index statistics (files, chunks, languages) |
 
+**Note:** In uninitialized directories, only `vecgrep_init` is available. After initialization, all tools become available.
+
 ### Claude Code (CLI)
 
-Add vecgrep as an MCP server. Run this from your project directory (where `.vecgrep` exists):
+Add vecgrep as an MCP server:
 
 ```bash
-# Add for current project (recommended)
+# Add for all your projects (recommended)
+claude mcp add --scope user vecgrep -- vecgrep serve --mcp
+
+# Or add for current project only
 claude mcp add --scope local vecgrep -- vecgrep serve --mcp
 ```
 
-**Important:** Use `--scope local` (default) so vecgrep runs from the correct project directory. Using `--scope user` will fail because vecgrep needs a `.vecgrep` folder in the working directory.
+The MCP server works in any directory. If `.vecgrep` doesn't exist, use `vecgrep_init` to initialize it first.
 
 Manage your MCP servers:
 
