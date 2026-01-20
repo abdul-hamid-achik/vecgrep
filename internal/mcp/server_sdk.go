@@ -78,22 +78,19 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Version: version.Version,
 	}, &sdkmcp.ServerOptions{
 		Instructions: "vecgrep provides semantic code search using vector embeddings. " +
-			"IMPORTANT: You must run vecgrep_init first with the project path to activate the project. " +
-			"Example: vecgrep_init with path=\"/path/to/project\". " +
-			"This is required even if the project was previously initialized via CLI. " +
-			"After activation, use vecgrep_search to find code, vecgrep_index to index files, " +
-			"and vecgrep_status to check statistics.",
+			"For projects with existing .vecgrep folder, just use vecgrep_search directly - it auto-detects the project. " +
+			"For new projects, run vecgrep_init with the project path, then vecgrep_index to index the codebase.",
 	})
 
 	// Register tools using typed handlers
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_init",
-		Description: "REQUIRED FIRST STEP: Activate vecgrep for a project. Run this before using any other vecgrep tools. If .vecgrep folder exists, it activates the existing index. If not, it creates a new one. Must be run each session to tell vecgrep which project to use.",
+		Description: "Initialize or activate vecgrep for a project. If .vecgrep folder exists, activates the existing index. If not, creates a new one. Note: Search/index/status commands auto-detect projects, so this is only needed for new projects or switching directories.",
 	}, s.handleInit)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_search",
-		Description: "Perform semantic search across the indexed codebase. Returns code chunks that are semantically similar to the query.",
+		Description: "Perform semantic search across the indexed codebase. Auto-detects the project from current directory. Returns code chunks semantically similar to the query.",
 	}, s.handleSearch)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -112,6 +109,23 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 // Run starts the MCP server.
 func (s *SDKServer) Run(ctx context.Context) error {
 	return s.server.Run(ctx, &sdkmcp.StdioTransport{})
+}
+
+// ensureInitialized attempts to auto-detect and activate a project if not already initialized.
+func (s *SDKServer) ensureInitialized(ctx context.Context) error {
+	if s.initialized {
+		return nil
+	}
+
+	// Try to auto-detect project from current working directory
+	projectRoot, err := config.GetProjectRoot()
+	if err != nil {
+		return fmt.Errorf("no vecgrep project found. Run vecgrep_init with the project path, or run 'vecgrep init' in the project directory first")
+	}
+
+	// Auto-activate the detected project
+	_, _, err = s.activateProject(ctx, projectRoot)
+	return err
 }
 
 // handleInit handles the vecgrep_init tool.
@@ -283,9 +297,9 @@ func (s *SDKServer) checkOllama(ctx context.Context) *sdkmcp.CallToolResult {
 
 // handleSearch handles the vecgrep_search tool.
 func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolRequest, input SearchInput) (*sdkmcp.CallToolResult, any, error) {
-	if !s.initialized {
+	if err := s.ensureInitialized(ctx); err != nil {
 		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "vecgrep is not initialized in this directory. Run vecgrep_init first."}},
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
 			IsError: true,
 		}, nil, nil
 	}
@@ -362,9 +376,9 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 
 // handleIndex handles the vecgrep_index tool.
 func (s *SDKServer) handleIndex(ctx context.Context, req *sdkmcp.CallToolRequest, input IndexInput) (*sdkmcp.CallToolResult, any, error) {
-	if !s.initialized {
+	if err := s.ensureInitialized(ctx); err != nil {
 		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "vecgrep is not initialized in this directory. Run vecgrep_init first."}},
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
 			IsError: true,
 		}, nil, nil
 	}
@@ -416,9 +430,9 @@ func (s *SDKServer) handleIndex(ctx context.Context, req *sdkmcp.CallToolRequest
 
 // handleStatus handles the vecgrep_status tool.
 func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolRequest, input StatusInput) (*sdkmcp.CallToolResult, any, error) {
-	if !s.initialized {
+	if err := s.ensureInitialized(ctx); err != nil {
 		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "vecgrep is not initialized in this directory. Run vecgrep_init first."}},
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
 			IsError: true,
 		}, nil, nil
 	}
