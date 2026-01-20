@@ -115,7 +115,6 @@ tasks:
         echo "  ╚═══════════════════════════════════════════════════════════════╝"
         echo ""
         echo "    git push origin main"
-        echo "    task release -- v1.0.0"
         echo ""
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -370,40 +369,6 @@ tasks:
     aliases: [compose:down]
     cmds:
       - docker-compose down
-
-  # ════════════════════════════════════════════════════════════════════════════
-  # RELEASE
-  # ════════════════════════════════════════════════════════════════════════════
-
-  release:
-    desc: "Create a new release (usage: task release -- v1.0.0)"
-    vars:
-      TAG: '{{.CLI_ARGS}}'
-    preconditions:
-      - sh: '[ -n "{{.TAG}}" ]'
-        msg: "Usage: task release -- v1.0.0"
-    cmds:
-      - |
-        echo ""
-        echo "  Creating release {{.TAG}}..."
-        echo ""
-      - git tag -a {{.TAG}} -m "Release {{.TAG}}"
-      - git push origin {{.TAG}}
-      - goreleaser release --clean
-      - |
-        echo ""
-        echo "  ✓ Released {{.TAG}}"
-        echo ""
-
-  "release:snapshot":
-    desc: Build release binaries locally (no publish)
-    cmds:
-      - goreleaser release --snapshot --clean
-      - |
-        echo ""
-        echo "  ✓ Snapshot build complete"
-        echo "  Binaries in ./dist/"
-        echo ""
 
   # ════════════════════════════════════════════════════════════════════════════
   # CLEANUP
