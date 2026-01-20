@@ -98,7 +98,9 @@ func TestOpenAIProvider_EmbedBatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Decode request to check input
 		var req openaiEmbeddingRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
 
 		// Get input texts
 		inputs, ok := req.Input.([]interface{})

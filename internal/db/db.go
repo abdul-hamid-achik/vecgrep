@@ -248,9 +248,7 @@ func (db *DB) DeleteFile(ctx context.Context, filePath string) (int64, error) {
 
 	// Delete embeddings for all chunks
 	for _, chunkID := range chunkIDs {
-		if err := db.DeleteEmbedding(chunkID); err != nil {
-			// Log but continue - embedding might not exist
-		}
+		_ = db.DeleteEmbedding(chunkID) // Ignore errors - embedding might not exist
 	}
 
 	// Delete chunks (will cascade from file deletion, but be explicit)
@@ -415,12 +413,12 @@ func (db *DB) Reset(ctx context.Context, projectID int64) error {
 		for chunkRows.Next() {
 			var chunkID int64
 			if err := chunkRows.Scan(&chunkID); err != nil {
-				chunkRows.Close()
+				_ = chunkRows.Close()
 				return fmt.Errorf("scan chunk id: %w", err)
 			}
-			db.DeleteEmbedding(chunkID) // Ignore errors
+			_ = db.DeleteEmbedding(chunkID) // Ignore errors
 		}
-		chunkRows.Close()
+		_ = chunkRows.Close()
 	}
 
 	// Delete chunks for all files in this project
