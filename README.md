@@ -208,7 +208,27 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 | `vecgrep_index` | Index or re-index files in the project |
 | `vecgrep_status` | Get index statistics (files, chunks, languages) |
 
-### Claude Code
+### Claude Code (CLI)
+
+Add vecgrep as an MCP server using the CLI:
+
+```bash
+# Add for current project only
+claude mcp add vecgrep -- vecgrep serve --mcp
+
+# Add for all your projects (user scope)
+claude mcp add --scope user vecgrep -- vecgrep serve --mcp
+```
+
+Manage your MCP servers:
+
+```bash
+claude mcp list              # List all servers
+claude mcp get vecgrep       # Show vecgrep config
+claude mcp remove vecgrep    # Remove vecgrep
+```
+
+### Claude Code (Manual Config)
 
 Add to `~/.claude/settings.json`:
 
@@ -226,7 +246,7 @@ Add to `~/.claude/settings.json`:
 
 ### Claude Desktop
 
-Add to your Claude Desktop configuration:
+Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
 ```json
 {
@@ -240,7 +260,7 @@ Add to your Claude Desktop configuration:
 }
 ```
 
-The `cwd` should point to a directory with an initialized `.vecgrep` folder.
+**Note:** The `cwd` should point to a directory with an initialized `.vecgrep` folder.
 
 ## Docker
 
