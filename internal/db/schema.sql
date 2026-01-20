@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     root_path TEXT NOT NULL UNIQUE,
+    embedding_model TEXT DEFAULT 'nomic-embed-text',
+    embedding_dim INTEGER DEFAULT 768,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     last_indexed_at DATETIME

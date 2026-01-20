@@ -5,6 +5,7 @@ project_name: vecgrep
 before:
   hooks:
     - go mod tidy
+    - templ generate
 
 builds:
   - id: vecgrep
@@ -61,6 +62,9 @@ brews:
     homepage: "https://github.com/abdul-hamid-achik/vecgrep"
     description: "Local-first semantic code search powered by embeddings"
     license: "MIT"
+    dependencies:
+      - name: ollama
+        type: optional
     install: |
       bin.install "vecgrep"
     test: |
