@@ -66,7 +66,7 @@ type ServerCapabilities struct {
 
 // ToolsCapability describes tools support.
 type ToolsCapability struct {
-	ListChanged bool `json:"listChanged,omitempty"`
+	ListChanged bool `json:"listChanged"`
 }
 
 // ResourcesCapability describes resources support.

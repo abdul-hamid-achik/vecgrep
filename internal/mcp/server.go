@@ -155,7 +155,7 @@ func (s *Server) handleInitialize(ctx context.Context, params json.RawMessage) (
 		ProtocolVersion: ProtocolVersion,
 		Capabilities: ServerCapabilities{
 			Tools: &ToolsCapability{
-				ListChanged: false,
+				ListChanged: true, // Tools list changes after vecgrep_init
 			},
 			Resources: &ResourcesCapability{
 				Subscribe:   false,
