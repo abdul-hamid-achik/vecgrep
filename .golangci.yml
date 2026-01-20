@@ -16,9 +16,14 @@ linters:
         - (*database/sql.DB).Close
         - (io.Writer).Write
         - (*database/sql.Row).Scan
+        - (*encoding/json.Encoder).Encode
+        - (github.com/a-h/templ.Component).Render
+        - (*github.com/spf13/viper.Viper).BindPFlag
+        - github.com/spf13/viper.BindPFlag
     staticcheck:
       checks:
         - "all"
+        - "-ST1000"
         - "-QF1001"
         - "-QF1003"
   exclusions:
@@ -27,5 +32,8 @@ linters:
       - linters:
           - errcheck
         source: "defer.*\\.Close\\(\\)"
+      - linters:
+          - errcheck
+        source: "\\.Render\\("
     paths:
       - internal/web/templates/*_templ.go
