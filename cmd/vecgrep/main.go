@@ -397,8 +397,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Start MCP server (stdio) - works even without initialized project
 	if mcpMode {
-		// Note: Don't print to stderr in MCP mode - clients may interpret it as errors
-		mcpServer := mcp.NewServer(mcp.ServerConfig{
+		// Use the official MCP SDK for reliable protocol handling
+		mcpServer := mcp.NewSDKServer(mcp.SDKServerConfig{
 			DB:          database,  // nil if not initialized
 			Provider:    provider,  // nil if not initialized
 			ProjectRoot: projectRoot, // empty if not initialized

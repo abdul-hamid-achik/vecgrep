@@ -14,6 +14,19 @@ import (
 	"github.com/abdul-hamid-achik/vecgrep/internal/version"
 )
 
+// flushWriter wraps a writer and flushes after each write if possible.
+type flushWriter struct {
+	w io.Writer
+}
+
+func (fw *flushWriter) Write(p []byte) (n int, err error) {
+	n, err = fw.w.Write(p)
+	if f, ok := fw.w.(*os.File); ok {
+		_ = f.Sync()
+	}
+	return
+}
+
 // Server implements the MCP protocol over stdio.
 type Server struct {
 	db          *db.DB
@@ -48,7 +61,7 @@ func NewServer(cfg ServerConfig) *Server {
 		provider:    cfg.Provider,
 		projectRoot: cfg.ProjectRoot,
 		reader:      bufio.NewReader(os.Stdin),
-		writer:      os.Stdout,
+		writer:      &flushWriter{w: os.Stdout},
 		handlers:    make(map[string]Handler),
 	}
 
@@ -75,31 +88,59 @@ func (s *Server) registerHandlers() {
 
 // Run starts the MCP server and processes messages until context is canceled.
 func (s *Server) Run(ctx context.Context) error {
+	// Debug logging to file
+	debugFile, _ := os.OpenFile("/tmp/vecgrep-mcp-debug.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if debugFile != nil {
+		defer debugFile.Close()
+		fmt.Fprintf(debugFile, "=== MCP Server Started ===\n")
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			if debugFile != nil {
+				fmt.Fprintf(debugFile, "Context canceled\n")
+			}
 			return ctx.Err()
 		default:
 		}
 
 		// Read a line from stdin
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "Waiting for input...\n")
+		}
 		line, err := s.reader.ReadBytes('\n')
 		if err != nil {
+			if debugFile != nil {
+				fmt.Fprintf(debugFile, "Read error: %v\n", err)
+			}
 			if err == io.EOF {
 				return nil
 			}
 			return fmt.Errorf("read error: %w", err)
 		}
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "Received: %s\n", string(line))
+		}
 
 		// Parse the request
 		var req Request
 		if err := json.Unmarshal(line, &req); err != nil {
+			if debugFile != nil {
+				fmt.Fprintf(debugFile, "Parse error: %v\n", err)
+			}
 			s.sendError(nil, ParseError, "Parse error", err.Error())
 			continue
+		}
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "Parsed method: %s, id: %v\n", req.Method, req.ID)
 		}
 
 		// Handle the request
 		s.handleRequest(ctx, req)
+		if debugFile != nil {
+			fmt.Fprintf(debugFile, "Handled method: %s\n", req.Method)
+		}
 	}
 }
 
