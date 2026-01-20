@@ -167,23 +167,47 @@ Add to your Claude configuration:
 }
 ```
 
-## Development
+## Docker
+
+Run vecgrep in a container while using Ollama on your host machine.
+
+### Quick Start
 
 ```bash
-# Install dependencies
-task setup
+# Start Ollama on host (with Metal GPU on macOS)
+OLLAMA_METAL=1 OLLAMA_HOST=0.0.0.0 ollama serve
 
-# Run with hot reload
-task dev
+# Run vecgrep container
+docker compose up -d
+```
 
-# Run tests
-task test
+The web interface is available at http://localhost:8080
 
-# Build
-task build
+### Configuration
 
-# Generate code (sqlc, templ, css)
-task generate
+The container connects to Ollama on your host via `host.docker.internal:11434`.
+
+Volumes:
+- `./.vecgrep:/data/.vecgrep` - Persistent index database
+- `./:/workspace:ro` - Your codebase (read-only)
+
+### Index from Container
+
+```bash
+docker compose exec app vecgrep index /workspace
+docker compose exec app vecgrep search "your query"
+```
+
+## Development
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed development workflow.
+
+```bash
+task doctor       # Check your environment
+task setup        # Install dependencies
+task dev          # Run with hot reload
+task check        # Run fmt, lint, test
+task build        # Build binary
 ```
 
 ## License

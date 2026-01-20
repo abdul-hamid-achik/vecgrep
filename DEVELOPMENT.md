@@ -17,7 +17,7 @@ task dev
 
 ```bash
 task dev          # Hot reload development
-task check        # Run before committing
+task check        # Run before committing (fmt, lint, test)
 task ship         # Full CI pipeline locally
 ```
 
@@ -28,8 +28,23 @@ task wtf          # What's broken?
 task doctor       # Environment check
 ```
 
-## Release
+## Ollama
 
 ```bash
-task release -- v1.0.0
+task ollama       # Start Ollama with Metal GPU support
+```
+
+Requires `nomic-embed-text` model:
+```bash
+ollama pull nomic-embed-text
+```
+
+## Useful Commands
+
+```bash
+task              # List all available tasks
+task build        # Build the binary
+task test         # Run tests
+task gen          # Generate code (sqlc, templ, css)
+task clean        # Remove build artifacts
 ```
