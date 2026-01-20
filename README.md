@@ -121,6 +121,21 @@ vecgrep status
 
 Displays index statistics and configuration.
 
+### Shell Completion
+
+Generate shell completion scripts:
+
+```bash
+# Bash
+vecgrep completion bash > /etc/bash_completion.d/vecgrep
+
+# Zsh
+vecgrep completion zsh > "${fpath[1]}/_vecgrep"
+
+# Fish
+vecgrep completion fish > ~/.config/fish/completions/vecgrep.fish
+```
+
 ## Configuration
 
 Configuration is stored in `.vecgrep/config.yaml`:
@@ -137,16 +152,37 @@ indexing:
   chunk_overlap: 64
   max_file_size: 1048576
   ignore_patterns:
-    - ".git"
-    - "node_modules"
-    - "vendor"
+    - ".git/**"
+    - "node_modules/**"
+    - "vendor/**"
     - "*.min.js"
+    - "*.min.css"
+    - "*.lock"
+
+server:
+  host: localhost
+  port: 8080
 ```
 
 ### Environment Variables
 
-- `OLLAMA_HOST` - Override Ollama URL
-- `VECGREP_VERBOSE` - Enable verbose output
+All environment variables use the `VECGREP_` prefix:
+
+| Variable | Description |
+|----------|-------------|
+| `VECGREP_OLLAMA_URL` | Ollama API URL (default: `http://localhost:11434`) |
+| `VECGREP_EMBEDDING_PROVIDER` | Embedding provider (`ollama`) |
+| `VECGREP_EMBEDDING_MODEL` | Embedding model name |
+| `VECGREP_HOST` | Server bind address |
+| `VECGREP_PORT` | Server port |
+
+### Global Flags
+
+These flags work with all commands:
+
+- `-c, --config` - Custom config file path
+- `-v, --verbose` - Enable verbose output
+- `--version` - Show version information
 
 ## MCP Integration
 
