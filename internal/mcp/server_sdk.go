@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
@@ -42,6 +43,18 @@ type IndexInput struct {
 
 // StatusInput is the input for vecgrep_status (empty).
 type StatusInput struct{}
+
+// SimilarInput is the input for vecgrep_similar.
+type SimilarInput struct {
+	ChunkID         int64  `json:"chunk_id,omitempty" jsonschema:"Find code similar to this chunk ID."`
+	FileLocation    string `json:"file_location,omitempty" jsonschema:"Find code similar to the chunk at this file:line location (e.g., 'search.go:50')."`
+	Text            string `json:"text,omitempty" jsonschema:"Find code similar to this text snippet."`
+	Limit           int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return."`
+	Language        string `json:"language,omitempty" jsonschema:"Filter results by programming language."`
+	ChunkType       string `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
+	FilePattern     string `json:"file_pattern,omitempty" jsonschema:"Filter results by file path pattern (glob)."`
+	ExcludeSameFile bool   `json:"exclude_same_file,omitempty" jsonschema:"Exclude results from the same file as the source."`
+}
 
 // SDKServer wraps the official MCP SDK server.
 type SDKServer struct {
@@ -102,6 +115,11 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Name:        "vecgrep_status",
 		Description: "Get statistics about the search index, including number of files, chunks, and language distribution.",
 	}, s.handleStatus)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_similar",
+		Description: "Find code similar to an existing chunk, file location, or text snippet. Provide exactly one of: chunk_id, file_location (e.g., 'search.go:50'), or text.",
+	}, s.handleSimilar)
 
 	return s
 }
@@ -460,6 +478,128 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 		for lang, count := range langStats {
 			sb.WriteString(fmt.Sprintf("  %s: %d\n", lang, count))
 		}
+	}
+
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+	}, nil, nil
+}
+
+// handleSimilar handles the vecgrep_similar tool.
+func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolRequest, input SimilarInput) (*sdkmcp.CallToolResult, any, error) {
+	if err := s.ensureInitialized(ctx); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Check Ollama
+	if errResult := s.checkOllama(ctx); errResult != nil {
+		return errResult, nil, nil
+	}
+
+	// Validate: exactly one of chunk_id, file_location, or text must be provided
+	specCount := 0
+	if input.ChunkID != 0 {
+		specCount++
+	}
+	if input.FileLocation != "" {
+		specCount++
+	}
+	if input.Text != "" {
+		specCount++
+	}
+
+	if specCount == 0 {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Error: Provide exactly one of chunk_id, file_location, or text."}},
+			IsError: true,
+		}, nil, nil
+	}
+	if specCount > 1 {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Error: Provide only one of chunk_id, file_location, or text (not multiple)."}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Build similar options
+	opts := search.SimilarOptions{
+		SearchOptions: search.SearchOptions{
+			Limit:       input.Limit,
+			Language:    input.Language,
+			ChunkType:   input.ChunkType,
+			FilePattern: input.FilePattern,
+			ProjectRoot: s.projectRoot,
+		},
+		ExcludeSameFile: input.ExcludeSameFile,
+		ExcludeSourceID: true, // Default to excluding source
+	}
+
+	if opts.Limit == 0 {
+		opts.Limit = 10
+	}
+
+	var results []search.Result
+	var err error
+
+	if input.ChunkID != 0 {
+		results, err = s.searcher.SearchSimilarByID(ctx, input.ChunkID, opts)
+	} else if input.FileLocation != "" {
+		// Parse file:line
+		parts := strings.SplitN(input.FileLocation, ":", 2)
+		if len(parts) != 2 {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Invalid file_location format: %s (expected 'file:line')", input.FileLocation)}},
+				IsError: true,
+			}, nil, nil
+		}
+		line, lineErr := strconv.Atoi(parts[1])
+		if lineErr != nil {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Invalid line number in file_location: %s", input.FileLocation)}},
+				IsError: true,
+			}, nil, nil
+		}
+		results, err = s.searcher.SearchSimilarByLocation(ctx, parts[0], line, opts)
+	} else if input.Text != "" {
+		results, err = s.searcher.SearchSimilarByText(ctx, input.Text, opts)
+	}
+
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Format results
+	if len(results) == 0 {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "No similar code found."}},
+		}, nil, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Found %d similar code chunks:\n\n", len(results)))
+
+	for i, r := range results {
+		sb.WriteString(fmt.Sprintf("### Result %d (score: %.2f)\n", i+1, r.Score))
+		sb.WriteString(fmt.Sprintf("**File:** %s (lines %d-%d)\n", r.RelativePath, r.StartLine, r.EndLine))
+		if r.SymbolName != "" {
+			sb.WriteString(fmt.Sprintf("**Symbol:** %s\n", r.SymbolName))
+		}
+		if r.Language != "" && r.Language != "unknown" {
+			sb.WriteString(fmt.Sprintf("**Language:** %s\n", r.Language))
+		}
+		sb.WriteString("\n```")
+		if r.Language != "" && r.Language != "unknown" {
+			sb.WriteString(r.Language)
+		}
+		sb.WriteString("\n")
+		sb.WriteString(r.Content)
+		sb.WriteString("\n```\n\n")
 	}
 
 	return &sdkmcp.CallToolResult{

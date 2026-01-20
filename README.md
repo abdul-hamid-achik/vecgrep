@@ -125,6 +125,43 @@ vecgrep serve --mcp
 
 This runs on stdio for integration with Claude Desktop, Claude Code, etc.
 
+### Find Similar Code
+
+```bash
+vecgrep similar <target> [options]
+```
+
+Find code semantically similar to an existing chunk, file location, or text snippet.
+
+Targets:
+- `42` - Chunk ID (numeric)
+- `main.go:15` - File:line location
+- `--text "code"` - Inline text snippet
+
+Options:
+- `-n, --limit N` - Maximum results (default: 10)
+- `-f, --format` - Output format: `default`, `json`, `compact`
+- `-l, --lang` - Filter by language
+- `-t, --type` - Filter by chunk type
+- `--file` - Filter by file pattern (glob)
+- `--exclude-same-file` - Exclude results from the same file
+- `-T, --text` - Find similar to text snippet
+
+Examples:
+```bash
+# Find code similar to chunk ID 42
+vecgrep similar 42
+
+# Find code similar to line 50 in search.go
+vecgrep similar internal/search/search.go:50
+
+# Find code similar to a text snippet
+vecgrep similar --text "func NewSearcher"
+
+# Find similar Go code, excluding same file
+vecgrep similar 42 --lang go --exclude-same-file
+```
+
 ### Check Status
 
 ```bash
@@ -208,6 +245,7 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 | `vecgrep_search` | Semantic search across the indexed codebase |
 | `vecgrep_index` | Index or re-index files in the project |
 | `vecgrep_status` | Get index statistics (files, chunks, languages) |
+| `vecgrep_similar` | Find code similar to a chunk ID, file:line location, or text snippet |
 
 **Note:** In uninitialized directories, only `vecgrep_init` is available. After initialization, all tools become available.
 

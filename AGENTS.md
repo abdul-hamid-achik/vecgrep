@@ -83,6 +83,7 @@ The MCP implementation in `internal/mcp/` provides:
 - `vecgrep_search` - Semantic search
 - `vecgrep_index` - Index files
 - `vecgrep_status` - Index statistics
+- `vecgrep_similar` - Find similar code by chunk ID, file:line, or text
 
 ### Configuration
 - Config stored in `.vecgrep/config.yaml`

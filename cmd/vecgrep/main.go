@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -87,6 +88,26 @@ var statusCmd = &cobra.Command{
 	RunE:  runStatus,
 }
 
+var similarCmd = &cobra.Command{
+	Use:   "similar <target>",
+	Short: "Find code similar to an existing chunk, file location, or text",
+	Long: `Find code semantically similar to an existing chunk, file location, or text snippet.
+
+Targets:
+  42              # Chunk ID
+  main.go:15      # File:line location
+
+For text snippets, use the --text flag:
+  vecgrep similar --text "func NewSearcher"
+
+Examples:
+  vecgrep similar 42
+  vecgrep similar internal/search/search.go:50
+  vecgrep similar --text "error handling" --lang go
+  vecgrep similar 42 --exclude-same-file`,
+	RunE: runSimilar,
+}
+
 func init() {
 	// Set version template
 	rootCmd.SetVersionTemplate("vecgrep version {{.Version}}\n")
@@ -119,6 +140,15 @@ func init() {
 	serveCmd.Flags().Bool("mcp", false, "start MCP server (stdio)")
 	serveCmd.Flags().Bool("web", false, "start web server")
 
+	// Similar command flags
+	similarCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
+	similarCmd.Flags().StringP("format", "f", "default", "output format (default, json, compact)")
+	similarCmd.Flags().StringP("lang", "l", "", "filter by programming language")
+	similarCmd.Flags().StringP("type", "t", "", "filter by chunk type (function, class, block)")
+	similarCmd.Flags().String("file", "", "filter by file pattern (glob)")
+	similarCmd.Flags().Bool("exclude-same-file", false, "exclude results from the same file as the source")
+	similarCmd.Flags().StringP("text", "T", "", "find code similar to this text snippet")
+
 	// Add commands
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(initCmd)
@@ -126,6 +156,7 @@ func init() {
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(similarCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -470,6 +501,112 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Files:      %d\n", stats["files"])
 	fmt.Printf("  Chunks:     %d\n", stats["chunks"])
 	fmt.Printf("  Embeddings: %d\n", stats["embeddings"])
+
+	return nil
+}
+
+func runSimilar(cmd *cobra.Command, args []string) error {
+	// Get flags
+	textSnippet, _ := cmd.Flags().GetString("text")
+	limit, _ := cmd.Flags().GetInt("limit")
+	format, _ := cmd.Flags().GetString("format")
+	lang, _ := cmd.Flags().GetString("lang")
+	chunkType, _ := cmd.Flags().GetString("type")
+	filePattern, _ := cmd.Flags().GetString("file")
+	excludeSameFile, _ := cmd.Flags().GetBool("exclude-same-file")
+
+	// Validate input: either text flag or positional argument required
+	if textSnippet == "" && len(args) == 0 {
+		return fmt.Errorf("target required: provide a chunk ID, file:line location, or use --text")
+	}
+	if textSnippet != "" && len(args) > 0 {
+		return fmt.Errorf("cannot specify both --text and a positional target")
+	}
+
+	projectRoot, err := config.GetProjectRoot()
+	if err != nil {
+		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+	}
+
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer database.Close()
+
+	// Create embedding provider
+	provider := embed.NewOllamaProvider(embed.OllamaConfig{
+		URL:        cfg.Embedding.OllamaURL,
+		Model:      cfg.Embedding.Model,
+		Dimensions: cfg.Embedding.Dimensions,
+	})
+
+	// Create searcher
+	searcher := search.NewSearcher(database, provider)
+
+	// Build similar options
+	opts := search.SimilarOptions{
+		SearchOptions: search.SearchOptions{
+			Limit:       limit,
+			Language:    lang,
+			ChunkType:   chunkType,
+			FilePattern: filePattern,
+			ProjectRoot: projectRoot,
+		},
+		ExcludeSameFile: excludeSameFile,
+		ExcludeSourceID: true, // Default to excluding source
+	}
+
+	ctx := context.Background()
+	var results []search.Result
+
+	if textSnippet != "" {
+		// Text-based search
+		results, err = searcher.SearchSimilarByText(ctx, textSnippet, opts)
+	} else {
+		target := args[0]
+
+		// Parse target: numeric → chunk ID, contains ":" → file:line
+		if chunkID, parseErr := strconv.ParseInt(target, 10, 64); parseErr == nil {
+			// Chunk ID
+			results, err = searcher.SearchSimilarByID(ctx, chunkID, opts)
+		} else if strings.Contains(target, ":") {
+			// File:line location
+			parts := strings.SplitN(target, ":", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid file:line format: %s", target)
+			}
+			line, lineErr := strconv.Atoi(parts[1])
+			if lineErr != nil {
+				return fmt.Errorf("invalid line number in %s: %w", target, lineErr)
+			}
+			results, err = searcher.SearchSimilarByLocation(ctx, parts[0], line, opts)
+		} else {
+			return fmt.Errorf("invalid target format: %s (expected chunk ID or file:line)", target)
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("search failed: %w", err)
+	}
+
+	// Format and print results
+	var outputFormat search.OutputFormat
+	switch format {
+	case "json":
+		outputFormat = search.FormatJSON
+	case "compact":
+		outputFormat = search.FormatCompact
+	default:
+		outputFormat = search.FormatDefault
+	}
+
+	fmt.Print(search.FormatResults(results, outputFormat))
 
 	return nil
 }

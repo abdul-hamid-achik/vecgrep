@@ -2,8 +2,10 @@ package db
 
 import (
 	"database/sql"
+	"encoding/binary"
 	_ "embed"
 	"fmt"
+	"math"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
@@ -156,6 +158,51 @@ func (db *DB) VecVersion() (string, error) {
 	var version string
 	err := db.QueryRow("SELECT vec_version()").Scan(&version)
 	return version, err
+}
+
+// GetEmbedding retrieves the embedding for a chunk by its ID.
+func (db *DB) GetEmbedding(chunkID int64) ([]float32, error) {
+	var embeddingBytes []byte
+	err := db.QueryRow("SELECT embedding FROM vec_chunks WHERE chunk_id = ?", chunkID).Scan(&embeddingBytes)
+	if err != nil {
+		return nil, fmt.Errorf("get embedding for chunk %d: %w", chunkID, err)
+	}
+
+	// Deserialize bytes to []float32 (little-endian format)
+	if len(embeddingBytes)%4 != 0 {
+		return nil, fmt.Errorf("invalid embedding blob size: %d bytes", len(embeddingBytes))
+	}
+
+	embedding := make([]float32, len(embeddingBytes)/4)
+	for i := range embedding {
+		bits := binary.LittleEndian.Uint32(embeddingBytes[i*4 : (i+1)*4])
+		embedding[i] = math.Float32frombits(bits)
+	}
+
+	return embedding, nil
+}
+
+// GetChunkByLocation finds a chunk containing the given file path and line number.
+// Returns the chunk_id of the smallest (most specific) chunk containing the line.
+func (db *DB) GetChunkByLocation(filePath string, line int) (int64, error) {
+	// Query for chunks that contain the specified line, ordered by size (smallest first)
+	// Join chunks with files to match on relative_path or path
+	var chunkID int64
+	err := db.QueryRow(`
+		SELECT c.id
+		FROM chunks c
+		JOIN files f ON c.file_id = f.id
+		WHERE (f.relative_path = ? OR f.path = ?)
+		  AND c.start_line <= ?
+		  AND c.end_line >= ?
+		ORDER BY (c.end_line - c.start_line) ASC
+		LIMIT 1
+	`, filePath, filePath, line, line).Scan(&chunkID)
+	if err != nil {
+		return 0, fmt.Errorf("get chunk at %s:%d: %w", filePath, line, err)
+	}
+
+	return chunkID, nil
 }
 
 // Stats returns database statistics

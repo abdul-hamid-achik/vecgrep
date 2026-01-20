@@ -32,11 +32,19 @@ type Result struct {
 // SearchOptions configures search behavior.
 type SearchOptions struct {
 	Limit       int
-	Language    string        // Filter by language
-	ChunkType   string        // Filter by chunk type
-	FilePattern string        // Filter by file path pattern
-	MinScore    float32       // Minimum similarity score (0-1)
-	ProjectRoot string        // Project root for relative path filtering
+	Language    string  // Filter by language
+	ChunkType   string  // Filter by chunk type
+	FilePattern string  // Filter by file path pattern
+	MinScore    float32 // Minimum similarity score (0-1)
+	ProjectRoot string  // Project root for relative path filtering
+}
+
+// SimilarOptions configures similar code search behavior.
+type SimilarOptions struct {
+	SearchOptions            // Embed existing options: Limit, Language, ChunkType, FilePattern
+	ExcludeSameFile  bool    // Exclude results from same file as source
+	ExcludeSourceID  bool    // Exclude the source chunk itself (default: true when using By ID/Location)
+	SourceFileID     int64   // Internal: file ID of source chunk for same-file exclusion
 }
 
 // DefaultSearchOptions returns sensible defaults.
@@ -99,6 +107,135 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 
 		// Apply filters
 		if !s.matchesFilters(result, opts) {
+			continue
+		}
+
+		results = append(results, result)
+
+		if len(results) >= opts.Limit {
+			break
+		}
+	}
+
+	return results, nil
+}
+
+// SearchSimilarByID finds code similar to the chunk with the given ID.
+func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts SimilarOptions) ([]Result, error) {
+	if opts.Limit == 0 {
+		opts.Limit = DefaultSearchOptions().Limit
+	}
+
+	// Get the embedding for the source chunk
+	embedding, err := s.db.GetEmbedding(chunkID)
+	if err != nil {
+		return nil, fmt.Errorf("get embedding for chunk %d: %w", chunkID, err)
+	}
+
+	// Get source chunk's file ID for same-file exclusion
+	if opts.ExcludeSameFile && opts.SourceFileID == 0 {
+		var fileID int64
+		err := s.db.QueryRow("SELECT file_id FROM chunks WHERE id = ?", chunkID).Scan(&fileID)
+		if err == nil {
+			opts.SourceFileID = fileID
+		}
+	}
+
+	// Search for similar vectors (request more to account for filtering)
+	searchLimit := opts.Limit * 3
+	if searchLimit < 50 {
+		searchLimit = 50
+	}
+
+	searchResults, err := s.db.SearchEmbeddings(embedding, searchLimit)
+	if err != nil {
+		return nil, fmt.Errorf("search embeddings: %w", err)
+	}
+
+	// Hydrate results with chunk metadata
+	results := make([]Result, 0, len(searchResults))
+	for _, sr := range searchResults {
+		// Exclude source chunk by default
+		if opts.ExcludeSourceID && sr.ChunkID == chunkID {
+			continue
+		}
+
+		result, err := s.hydrateResult(sr)
+		if err != nil {
+			continue
+		}
+
+		// Exclude same file if requested
+		if opts.ExcludeSameFile && result.FileID == opts.SourceFileID {
+			continue
+		}
+
+		// Apply standard filters
+		if !s.matchesFilters(result, opts.SearchOptions) {
+			continue
+		}
+
+		results = append(results, result)
+
+		if len(results) >= opts.Limit {
+			break
+		}
+	}
+
+	return results, nil
+}
+
+// SearchSimilarByLocation finds code similar to the chunk at the given file:line location.
+func (s *Searcher) SearchSimilarByLocation(ctx context.Context, filePath string, line int, opts SimilarOptions) ([]Result, error) {
+	// Resolve file:line to chunk ID
+	chunkID, err := s.db.GetChunkByLocation(filePath, line)
+	if err != nil {
+		return nil, fmt.Errorf("resolve location %s:%d: %w", filePath, line, err)
+	}
+
+	// Enable source exclusion by default for location-based search
+	opts.ExcludeSourceID = true
+
+	return s.SearchSimilarByID(ctx, chunkID, opts)
+}
+
+// SearchSimilarByText finds code similar to the given text snippet.
+func (s *Searcher) SearchSimilarByText(ctx context.Context, text string, opts SimilarOptions) ([]Result, error) {
+	if text == "" {
+		return nil, fmt.Errorf("text cannot be empty")
+	}
+
+	if opts.Limit == 0 {
+		opts.Limit = DefaultSearchOptions().Limit
+	}
+
+	// Generate embedding for the text (requires Ollama)
+	embedding, err := s.provider.Embed(ctx, text)
+	if err != nil {
+		return nil, fmt.Errorf("embed text: %w", err)
+	}
+
+	// Search for similar vectors
+	searchLimit := opts.Limit * 3
+	if searchLimit < 50 {
+		searchLimit = 50
+	}
+
+	searchResults, err := s.db.SearchEmbeddings(embedding, searchLimit)
+	if err != nil {
+		return nil, fmt.Errorf("search embeddings: %w", err)
+	}
+
+	// Hydrate results with chunk metadata
+	results := make([]Result, 0, len(searchResults))
+	for _, sr := range searchResults {
+		result, err := s.hydrateResult(sr)
+		if err != nil {
+			continue
+		}
+
+		// Apply standard filters
+		if !s.matchesFilters(result, opts.SearchOptions) {
 			continue
 		}
 
