@@ -19,6 +19,11 @@ RUN npx @tailwindcss/cli -i ./assets/css/input.css -o ./output.css --minify
 # =============================================================================
 FROM golang:1.25-bookworm AS builder
 
+# Build args for version info
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libc6-dev libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -36,7 +41,11 @@ COPY --from=tailwind /build/output.css ./internal/web/static/css/output.css
 RUN templ generate
 
 ENV CGO_ENABLED=1
-RUN go build -trimpath -ldflags="-s -w" -o vecgrep ./cmd/vecgrep
+RUN go build -trimpath -ldflags="-s -w \
+    -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version=${VERSION} \
+    -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit=${COMMIT} \
+    -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date=${BUILD_DATE}" \
+    -o vecgrep ./cmd/vecgrep
 
 # =============================================================================
 # Stage 3: Runtime (Alpine for minimal size)

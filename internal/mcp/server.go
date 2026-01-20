@@ -157,13 +157,7 @@ func (s *Server) handleInitialize(ctx context.Context, params json.RawMessage) (
 			Tools: &ToolsCapability{
 				ListChanged: true, // Tools list changes after vecgrep_init
 			},
-			Resources: &ResourcesCapability{
-				Subscribe:   false,
-				ListChanged: false,
-			},
-			Prompts: &PromptsCapability{
-				ListChanged: false,
-			},
+			// Resources and Prompts are nil - we don't provide any
 		},
 		ServerInfo: Implementation{
 			Name:    "vecgrep",
