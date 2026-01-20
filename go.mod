@@ -3,6 +3,7 @@ module github.com/abdul-hamid-achik/vecgrep
 go 1.25.5
 
 require (
+	github.com/a-h/templ v0.3.977
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-chi/chi/v5 v5.2.1
