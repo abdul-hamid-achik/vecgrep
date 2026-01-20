@@ -160,11 +160,11 @@ tasks:
       - command -v sqlc
 
   "setup:tailwind":
-    desc: Download Tailwind CSS CLI
+    desc: Check Tailwind CSS CLI is available via npx
     cmds:
-      - ./scripts/download-tailwind.sh
+      - echo "Tailwind CSS v4 is used via npx @tailwindcss/cli"
     status:
-      - test -x ./bin/tailwindcss
+      - command -v npx
 
   # ════════════════════════════════════════════════════════════════════════════
   # CODE GENERATION
@@ -201,7 +201,7 @@ tasks:
     generates:
       - 'internal/web/static/css/output.css'
     cmds:
-      - ./bin/tailwindcss -i assets/css/input.css -o internal/web/static/css/output.css --minify
+      - npx @tailwindcss/cli@latest -i assets/css/input.css -o internal/web/static/css/output.css --minify
 
   # ════════════════════════════════════════════════════════════════════════════
   # BUILD
@@ -250,7 +250,7 @@ tasks:
   "dev:css":
     desc: Watch and rebuild Tailwind CSS
     cmds:
-      - ./bin/tailwindcss -i assets/css/input.css -o internal/web/static/css/output.css --watch
+      - npx @tailwindcss/cli@latest -i assets/css/input.css -o internal/web/static/css/output.css --watch
 
   "watch:templ":
     desc: Watch and regenerate templ files
