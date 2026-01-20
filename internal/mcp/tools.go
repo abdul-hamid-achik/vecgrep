@@ -44,13 +44,13 @@ func (h *ToolsHandler) ListTools() ToolsListResult {
 	tools := []Tool{
 		{
 			Name:        "vecgrep_init",
-			Description: "Initialize vecgrep in a directory. Creates the .vecgrep folder with configuration and database. Must be run before using other vecgrep tools.",
+			Description: "Initialize or activate vecgrep for a project directory. Creates .vecgrep folder if needed and activates the project for searching. Must be run before using other vecgrep tools. If the project is already initialized, this just activates it.",
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
 					"path": {
 						Type:        "string",
-						Description: "Directory path to initialize. Defaults to current working directory if not specified.",
+						Description: "REQUIRED: Full absolute path to the project directory (e.g., /Users/you/projects/myproject). Use the project's root directory.",
 					},
 					"force": {
 						Type:        "boolean",
@@ -58,6 +58,7 @@ func (h *ToolsHandler) ListTools() ToolsListResult {
 						Default:     false,
 					},
 				},
+				Required: []string{"path"},
 			},
 		},
 	}
@@ -169,17 +170,39 @@ func (h *ToolsHandler) CallTool(ctx context.Context, name string, args map[strin
 
 // handleInit initializes a vecgrep project.
 func (h *ToolsHandler) handleInit(ctx context.Context, args map[string]interface{}) (CallToolResult, error) {
-	// Get path argument or use current directory
+	// Get path argument - REQUIRED for MCP since we don't know the user's cwd
 	path, _ := args["path"].(string)
 	if path == "" {
-		var err error
-		path, err = os.Getwd()
-		if err != nil {
-			return CallToolResult{
-				Content: []ContentBlock{TextContent(fmt.Sprintf("Failed to get current directory: %v", err))},
-				IsError: true,
-			}, nil
+		return CallToolResult{
+			Content: []ContentBlock{TextContent("Error: 'path' parameter is required.\n\nPlease specify the full path to the project directory you want to initialize.\nExample: vecgrep_init with path=\"/Users/you/projects/myproject\"")},
+			IsError: true,
+		}, nil
+	}
+
+	// Expand ~ to home directory if needed
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			path = filepath.Join(home, path[2:])
 		}
+	}
+
+	// Resolve to absolute path
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return CallToolResult{
+			Content: []ContentBlock{TextContent(fmt.Sprintf("Failed to resolve path: %v", err))},
+			IsError: true,
+		}, nil
+	}
+	path = absPath
+
+	// Verify the directory exists
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		return CallToolResult{
+			Content: []ContentBlock{TextContent(fmt.Sprintf("Directory does not exist: %s", path))},
+			IsError: true,
+		}, nil
 	}
 
 	force, _ := args["force"].(bool)
@@ -188,9 +211,8 @@ func (h *ToolsHandler) handleInit(ctx context.Context, args map[string]interface
 
 	// Check if already initialized
 	if _, err := os.Stat(dataDir); err == nil && !force {
-		return CallToolResult{
-			Content: []ContentBlock{TextContent(fmt.Sprintf("vecgrep already initialized in %s. Use force=true to reinitialize.", path))},
-		}, nil
+		// Already initialized - just activate this project
+		return h.activateProject(ctx, path)
 	}
 
 	// Create configuration
@@ -214,25 +236,73 @@ func (h *ToolsHandler) handleInit(ctx context.Context, args map[string]interface
 		}, nil
 	}
 
-	// Initialize database
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	// Initialize and activate the project
+	return h.activateProject(ctx, path)
+}
+
+// activateProject opens the database and configures the handler for the given project.
+func (h *ToolsHandler) activateProject(ctx context.Context, projectPath string) (CallToolResult, error) {
+	dataDir := filepath.Join(projectPath, config.DefaultDataDir)
+	dbPath := filepath.Join(dataDir, config.DefaultDBFile)
+
+	// Load config
+	cfg, err := config.Load(projectPath)
 	if err != nil {
 		return CallToolResult{
-			Content: []ContentBlock{TextContent(fmt.Sprintf("Failed to initialize database: %v", err))},
+			Content: []ContentBlock{TextContent(fmt.Sprintf("Failed to load config: %v", err))},
 			IsError: true,
 		}, nil
 	}
-	defer database.Close()
+
+	// Close existing database if open
+	if h.db != nil {
+		h.db.Close()
+	}
+
+	// Open database
+	database, err := db.Open(dbPath, cfg.Embedding.Dimensions)
+	if err != nil {
+		return CallToolResult{
+			Content: []ContentBlock{TextContent(fmt.Sprintf("Failed to open database: %v", err))},
+			IsError: true,
+		}, nil
+	}
+
+	// Create embedding provider
+	provider := embed.NewOllamaProvider(embed.OllamaConfig{
+		URL:        cfg.Embedding.OllamaURL,
+		Model:      cfg.Embedding.Model,
+		Dimensions: cfg.Embedding.Dimensions,
+	})
+
+	// Update handler state
+	h.db = database
+	h.provider = provider
+	h.projectRoot = projectPath
+	h.searcher = search.NewSearcher(database, provider)
+	h.initialized = true
 
 	// Get sqlite-vec version
 	vecVersion, _ := database.VecVersion()
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Initialized vecgrep in %s\n\n", dataDir))
-	sb.WriteString(fmt.Sprintf("- Database: %s\n", cfg.DBPath))
+	sb.WriteString(fmt.Sprintf("Activated vecgrep project: %s\n\n", projectPath))
+	sb.WriteString(fmt.Sprintf("- Database: %s\n", dbPath))
 	sb.WriteString(fmt.Sprintf("- sqlite-vec: %s\n", vecVersion))
 	sb.WriteString(fmt.Sprintf("- Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model))
-	sb.WriteString("\nNext step: Run vecgrep_index to index your codebase.")
+
+	// Get stats
+	stats, err := h.searcher.GetIndexStats(ctx)
+	if err == nil {
+		if totalFiles, ok := stats["total_files"].(int64); ok && totalFiles > 0 {
+			totalChunks, _ := stats["total_chunks"].(int64)
+			sb.WriteString(fmt.Sprintf("\nIndex stats: %d files, %d chunks\n", totalFiles, totalChunks))
+		} else {
+			sb.WriteString("\nNext step: Run vecgrep_index to index your codebase.")
+		}
+	} else {
+		sb.WriteString("\nNext step: Run vecgrep_index to index your codebase.")
+	}
 
 	return CallToolResult{
 		Content: []ContentBlock{TextContent(sb.String())},
