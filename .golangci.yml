@@ -13,6 +13,9 @@ linters:
         - fmt.Fprint
         - (io.Closer).Close
         - (*os.File).Close
+        - (*database/sql.DB).Close
+        - (io.Writer).Write
+        - (*database/sql.Row).Scan
     staticcheck:
       checks:
         - "all"

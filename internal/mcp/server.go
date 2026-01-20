@@ -276,7 +276,7 @@ func (s *Server) sendNotification(method string, params interface{}) error {
 
 // Log sends a logging notification.
 func (s *Server) Log(level LoggingLevel, logger string, data interface{}) {
-	s.sendNotification("notifications/message", LoggingMessageParams{
+	_ = s.sendNotification("notifications/message", LoggingMessageParams{
 		Level:  level,
 		Logger: logger,
 		Data:   data,
