@@ -134,6 +134,78 @@ Use --force to skip the confirmation prompt.`,
 	RunE: runReset,
 }
 
+var configCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Manage vecgrep configuration",
+	Long: `View and manage vecgrep configuration.
+
+Subcommands:
+  show    Show the resolved configuration
+  set     Set a configuration value`,
+}
+
+var configShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show the resolved configuration",
+	Long: `Display the current resolved configuration from all sources.
+
+Configuration is loaded in the following order (highest to lowest priority):
+1. Environment variables (VECGREP_*)
+2. Project root vecgrep.yaml or vecgrep.yml
+3. Project .config/vecgrep.yaml (XDG-style)
+4. Project .vecgrep/config.yaml (legacy)
+5. Global project entry in ~/.vecgrep/config.yaml
+6. Global defaults in ~/.vecgrep/config.yaml
+7. Built-in defaults`,
+	RunE: runConfigShow,
+}
+
+var configSetCmd = &cobra.Command{
+	Use:   "set <key> <value>",
+	Short: "Set a configuration value",
+	Long: `Set a configuration value in the project or global config.
+
+Examples:
+  vecgrep config set embedding.provider openai
+  vecgrep config set --global embedding.provider openai`,
+	Args: cobra.ExactArgs(2),
+	RunE: runConfigSet,
+}
+
+var projectsCmd = &cobra.Command{
+	Use:   "projects",
+	Short: "Manage globally registered projects",
+	Long: `Manage projects registered in ~/.vecgrep/config.yaml.
+
+Subcommands:
+  list    List all registered projects
+  add     Register the current project globally
+  remove  Unregister a project`,
+}
+
+var projectsListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all registered projects",
+	RunE:  runProjectsList,
+}
+
+var projectsAddCmd = &cobra.Command{
+	Use:   "add [name]",
+	Short: "Register the current project globally",
+	Long: `Register the current project in ~/.vecgrep/config.yaml.
+
+The project name is automatically derived from the directory name if not provided.
+Project data will be stored in ~/.vecgrep/projects/{name}/`,
+	RunE: runProjectsAdd,
+}
+
+var projectsRemoveCmd = &cobra.Command{
+	Use:   "remove <name>",
+	Short: "Unregister a project",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runProjectsRemove,
+}
+
 func init() {
 	// Set version template
 	rootCmd.SetVersionTemplate("vecgrep version {{.Version}}\n")
@@ -178,6 +250,26 @@ func init() {
 	// Reset command flags
 	resetCmd.Flags().Bool("force", false, "skip confirmation prompt")
 
+	// Config show command flags
+	configShowCmd.Flags().Bool("global", false, "show global config only")
+
+	// Config set command flags
+	configSetCmd.Flags().Bool("global", false, "set value in global config")
+
+	// Add config subcommands
+	configCmd.AddCommand(configShowCmd)
+	configCmd.AddCommand(configSetCmd)
+
+	// Add projects subcommands
+	projectsCmd.AddCommand(projectsListCmd)
+	projectsCmd.AddCommand(projectsAddCmd)
+	projectsCmd.AddCommand(projectsRemoveCmd)
+
+	// Init command flags for global/local mode
+	initCmd.Flags().Bool("global", false, "register project in ~/.vecgrep/ instead of creating local .vecgrep/")
+	initCmd.Flags().Bool("local", false, "create local .vecgrep/ directory (default behavior)")
+	initCmd.Flags().String("extension", "yaml", "preferred config file extension (yaml or yml)")
+
 	// Add commands
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(initCmd)
@@ -189,16 +281,95 @@ func init() {
 	rootCmd.AddCommand(deleteCmd)
 	rootCmd.AddCommand(cleanCmd)
 	rootCmd.AddCommand(resetCmd)
+	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(projectsCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
 	force, _ := cmd.Flags().GetBool("force")
+	globalMode, _ := cmd.Flags().GetBool("global")
+	localMode, _ := cmd.Flags().GetBool("local")
+
+	// If both flags are specified, error
+	if globalMode && localMode {
+		return fmt.Errorf("cannot specify both --global and --local")
+	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
+	// Global mode: register in ~/.vecgrep/projects/
+	if globalMode {
+		return runInitGlobal(cwd, force)
+	}
+
+	// Local mode (default): create .vecgrep/ directory
+	return runInitLocal(cwd, force)
+}
+
+// runInitGlobal initializes a project in global mode (~/.vecgrep/projects/)
+func runInitGlobal(cwd string, force bool) error {
+	// Check if already registered
+	existingName, existingEntry, _ := config.FindProjectByPath(cwd)
+	if existingEntry != nil && !force {
+		return fmt.Errorf("project already registered as '%s' (use --force to reinitialize)", existingName)
+	}
+
+	// Add to global projects
+	if err := config.AddProjectToGlobal(cwd, ""); err != nil {
+		return fmt.Errorf("failed to register project: %w", err)
+	}
+
+	// Get the derived name
+	name, _, _ := config.FindProjectByPath(cwd)
+
+	// Get data directory
+	dataDir, err := config.GetProjectDataDir(name)
+	if err != nil {
+		return fmt.Errorf("failed to get project data directory: %w", err)
+	}
+
+	// Create data directory
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	// Create config
+	cfg := config.DefaultConfig()
+	cfg.DataDir = dataDir
+	cfg.DBPath = filepath.Join(dataDir, config.DefaultDBFile)
+
+	// Initialize database
+	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	if err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	defer database.Close()
+
+	// Get sqlite-vec version
+	vecVersion, err := database.VecVersion()
+	if err != nil {
+		return fmt.Errorf("failed to verify sqlite-vec: %w", err)
+	}
+
+	fmt.Printf("Initialized vecgrep (global mode)\n")
+	fmt.Printf("  Project: %s\n", name)
+	fmt.Printf("  Path: %s\n", cwd)
+	fmt.Printf("  Data: %s\n", dataDir)
+	fmt.Printf("  Database: %s\n", cfg.DBPath)
+	fmt.Printf("  sqlite-vec: %s\n", vecVersion)
+	fmt.Printf("  Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model)
+	fmt.Println()
+	fmt.Println("Tip: Create a vecgrep.yaml in your project root for project-specific settings.")
+	fmt.Printf("\nRun 'vecgrep index' to index your codebase.\n")
+
+	return nil
+}
+
+// runInitLocal initializes a project in local mode (.vecgrep/ directory)
+func runInitLocal(cwd string, force bool) error {
 	dataDir := filepath.Join(cwd, config.DefaultDataDir)
 
 	// Check if already initialized
@@ -786,6 +957,263 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(search.FormatResults(results, outputFormat))
+
+	return nil
+}
+
+func runConfigShow(cmd *cobra.Command, args []string) error {
+	globalOnly, _ := cmd.Flags().GetBool("global")
+
+	if globalOnly {
+		// Show global config only
+		globalCfg, err := config.LoadGlobalConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load global config: %w", err)
+		}
+
+		fmt.Println("Global configuration (~/.vecgrep/config.yaml):")
+		fmt.Println()
+		fmt.Println("Defaults:")
+		fmt.Printf("  Embedding:\n")
+		fmt.Printf("    provider: %s\n", globalCfg.Defaults.Embedding.Provider)
+		fmt.Printf("    model: %s\n", globalCfg.Defaults.Embedding.Model)
+		fmt.Printf("    dimensions: %d\n", globalCfg.Defaults.Embedding.Dimensions)
+		fmt.Println()
+		if len(globalCfg.Projects) > 0 {
+			fmt.Printf("Projects: %d registered\n", len(globalCfg.Projects))
+			for name := range globalCfg.Projects {
+				fmt.Printf("  - %s\n", name)
+			}
+		} else {
+			fmt.Println("Projects: none registered")
+		}
+		return nil
+	}
+
+	// Show resolved config for current project
+	projectRoot, err := config.GetProjectRoot()
+	if err != nil {
+		// No project found - show defaults
+		fmt.Println("No project found. Showing default configuration:")
+		fmt.Println()
+		cfg := config.DefaultConfig()
+		fmt.Print(config.ShowResolvedConfig(cfg, nil))
+		return nil
+	}
+
+	resolver := config.NewConfigResolution()
+	resolved, err := resolver.Resolve(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to resolve config: %w", err)
+	}
+
+	fmt.Printf("Project: %s\n", projectRoot)
+	if resolved.ProjectName != "" {
+		fmt.Printf("Registered as: %s\n", resolved.ProjectName)
+	}
+	if resolved.IsGlobalMode {
+		fmt.Println("Mode: global (data stored in ~/.vecgrep/projects/)")
+	}
+	fmt.Println()
+	fmt.Print(config.ShowResolvedConfig(resolved.Config, resolver.FoundConfigFiles()))
+
+	return nil
+}
+
+func runConfigSet(cmd *cobra.Command, args []string) error {
+	key := args[0]
+	value := args[1]
+	isGlobal, _ := cmd.Flags().GetBool("global")
+
+	if isGlobal {
+		// Set in global config
+		globalCfg, err := config.LoadGlobalConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load global config: %w", err)
+		}
+
+		// Parse dot-notation key
+		if err := setConfigValue(&globalCfg.Defaults, key, value); err != nil {
+			return err
+		}
+
+		if err := config.SaveGlobalConfig(globalCfg); err != nil {
+			return fmt.Errorf("failed to save global config: %w", err)
+		}
+
+		fmt.Printf("Set %s = %s in global config\n", key, value)
+		return nil
+	}
+
+	// Set in project config
+	projectRoot, err := config.GetProjectRoot()
+	if err != nil {
+		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+	}
+
+	// Determine config file path
+	configPath := filepath.Join(projectRoot, "vecgrep.yaml")
+	if _, err := os.Stat(filepath.Join(projectRoot, "vecgrep.yml")); err == nil {
+		configPath = filepath.Join(projectRoot, "vecgrep.yml")
+	}
+
+	// Load or create project config
+	cfg := &config.Config{}
+	if data, err := os.ReadFile(configPath); err == nil {
+		// TODO: parse existing yaml and merge
+		_ = data
+	}
+
+	if err := setConfigValue(cfg, key, value); err != nil {
+		return err
+	}
+
+	// Write config using viper
+	v := viper.New()
+	v.Set(key, value)
+	if err := v.WriteConfigAs(configPath); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+
+	fmt.Printf("Set %s = %s in %s\n", key, value, configPath)
+	return nil
+}
+
+// setConfigValue sets a value in a Config struct using dot notation
+func setConfigValue(cfg *config.Config, key, value string) error {
+	switch key {
+	case "embedding.provider":
+		cfg.Embedding.Provider = value
+	case "embedding.model":
+		cfg.Embedding.Model = value
+	case "embedding.ollama_url":
+		cfg.Embedding.OllamaURL = value
+	case "embedding.openai_api_key":
+		cfg.Embedding.OpenAIAPIKey = value
+	case "embedding.openai_base_url":
+		cfg.Embedding.OpenAIBaseURL = value
+	case "embedding.dimensions":
+		dim, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid dimensions value: %w", err)
+		}
+		cfg.Embedding.Dimensions = dim
+	case "indexing.chunk_size":
+		size, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid chunk_size value: %w", err)
+		}
+		cfg.Indexing.ChunkSize = size
+	case "indexing.chunk_overlap":
+		overlap, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid chunk_overlap value: %w", err)
+		}
+		cfg.Indexing.ChunkOverlap = overlap
+	case "indexing.max_file_size":
+		size, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid max_file_size value: %w", err)
+		}
+		cfg.Indexing.MaxFileSize = size
+	case "server.host":
+		cfg.Server.Host = value
+	case "server.port":
+		port, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid port value: %w", err)
+		}
+		cfg.Server.Port = port
+	case "data_dir":
+		cfg.DataDir = value
+	default:
+		return fmt.Errorf("unknown config key: %s", key)
+	}
+	return nil
+}
+
+func runProjectsList(cmd *cobra.Command, args []string) error {
+	projects, err := config.ListGlobalProjects()
+	if err != nil {
+		return fmt.Errorf("failed to list projects: %w", err)
+	}
+
+	if len(projects) == 0 {
+		fmt.Println("No projects registered globally.")
+		fmt.Println("Use 'vecgrep projects add' or 'vecgrep init --global' to register a project.")
+		return nil
+	}
+
+	fmt.Printf("Registered projects (%d):\n\n", len(projects))
+	for name, entry := range projects {
+		fmt.Printf("  %s\n", name)
+		fmt.Printf("    Path: %s\n", entry.Path)
+		if entry.DataDir != "" {
+			fmt.Printf("    Data: %s\n", entry.DataDir)
+		}
+		if entry.Embedding != nil && entry.Embedding.Provider != "" {
+			fmt.Printf("    Provider: %s\n", entry.Embedding.Provider)
+		}
+		fmt.Println()
+	}
+
+	return nil
+}
+
+func runProjectsAdd(cmd *cobra.Command, args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	var name string
+	if len(args) > 0 {
+		name = args[0]
+	}
+
+	// Check if project is already registered
+	existingName, existingEntry, _ := config.FindProjectByPath(cwd)
+	if existingEntry != nil {
+		fmt.Printf("Project already registered as '%s'\n", existingName)
+		return nil
+	}
+
+	if err := config.AddProjectToGlobal(cwd, name); err != nil {
+		return fmt.Errorf("failed to add project: %w", err)
+	}
+
+	// Get the derived name if not provided
+	if name == "" {
+		name, _, _ = config.FindProjectByPath(cwd)
+	}
+
+	// Ensure the project data directory exists
+	dataDir, err := config.GetProjectDataDir(name)
+	if err != nil {
+		return fmt.Errorf("failed to get project data directory: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("failed to create project data directory: %w", err)
+	}
+
+	fmt.Printf("Project registered as '%s'\n", name)
+	fmt.Printf("  Path: %s\n", cwd)
+	fmt.Printf("  Data: %s\n", dataDir)
+	fmt.Println()
+	fmt.Println("Run 'vecgrep index' to index the project.")
+
+	return nil
+}
+
+func runProjectsRemove(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	if err := config.RemoveProjectFromGlobal(name); err != nil {
+		return fmt.Errorf("failed to remove project: %w", err)
+	}
+
+	fmt.Printf("Project '%s' removed from global config.\n", name)
+	fmt.Println("Note: Project data directory was not deleted. Remove it manually if needed.")
 
 	return nil
 }

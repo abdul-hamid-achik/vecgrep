@@ -20,56 +20,56 @@ const (
 // Config holds the application configuration
 type Config struct {
 	// DataDir is the directory where vecgrep stores its data
-	DataDir string `mapstructure:"data_dir"`
+	DataDir string `mapstructure:"data_dir" yaml:"data_dir,omitempty"`
 	// DBPath is the path to the SQLite database file
-	DBPath string `mapstructure:"db_path"`
+	DBPath string `mapstructure:"db_path" yaml:"db_path,omitempty"`
 
 	// Embedding configuration
-	Embedding EmbeddingConfig `mapstructure:"embedding"`
+	Embedding EmbeddingConfig `mapstructure:"embedding" yaml:"embedding,omitempty"`
 
 	// Indexing configuration
-	Indexing IndexingConfig `mapstructure:"indexing"`
+	Indexing IndexingConfig `mapstructure:"indexing" yaml:"indexing,omitempty"`
 
 	// Server configuration
-	Server ServerConfig `mapstructure:"server"`
+	Server ServerConfig `mapstructure:"server" yaml:"server,omitempty"`
 }
 
 // EmbeddingConfig holds embedding provider settings
 type EmbeddingConfig struct {
 	// Provider is the embedding provider: "ollama", "openai", "local"
-	Provider string `mapstructure:"provider"`
+	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
 	// Model is the embedding model name
-	Model string `mapstructure:"model"`
+	Model string `mapstructure:"model" yaml:"model,omitempty"`
 	// OllamaURL is the Ollama API URL
-	OllamaURL string `mapstructure:"ollama_url"`
+	OllamaURL string `mapstructure:"ollama_url" yaml:"ollama_url,omitempty"`
 	// Dimensions is the embedding vector dimensions
-	Dimensions int `mapstructure:"dimensions"`
+	Dimensions int `mapstructure:"dimensions" yaml:"dimensions,omitempty"`
 	// OpenAIAPIKey is the API key for OpenAI (can also be set via OPENAI_API_KEY or VECGREP_OPENAI_API_KEY env)
-	OpenAIAPIKey string `mapstructure:"openai_api_key"`
+	OpenAIAPIKey string `mapstructure:"openai_api_key" yaml:"openai_api_key,omitempty"`
 	// OpenAIBaseURL is the base URL for OpenAI API (can also be set via OPENAI_BASE_URL or VECGREP_OPENAI_BASE_URL env)
-	OpenAIBaseURL string `mapstructure:"openai_base_url"`
+	OpenAIBaseURL string `mapstructure:"openai_base_url" yaml:"openai_base_url,omitempty"`
 }
 
 // IndexingConfig holds indexing settings
 type IndexingConfig struct {
 	// ChunkSize is the target chunk size in tokens
-	ChunkSize int `mapstructure:"chunk_size"`
+	ChunkSize int `mapstructure:"chunk_size" yaml:"chunk_size,omitempty"`
 	// ChunkOverlap is the overlap between chunks in tokens
-	ChunkOverlap int `mapstructure:"chunk_overlap"`
+	ChunkOverlap int `mapstructure:"chunk_overlap" yaml:"chunk_overlap,omitempty"`
 	// IgnorePatterns are glob patterns to ignore during indexing
-	IgnorePatterns []string `mapstructure:"ignore_patterns"`
+	IgnorePatterns []string `mapstructure:"ignore_patterns" yaml:"ignore_patterns,omitempty"`
 	// MaxFileSize is the maximum file size to index in bytes
-	MaxFileSize int64 `mapstructure:"max_file_size"`
+	MaxFileSize int64 `mapstructure:"max_file_size" yaml:"max_file_size,omitempty"`
 }
 
 // ServerConfig holds server settings
 type ServerConfig struct {
 	// Host is the server bind address
-	Host string `mapstructure:"host"`
+	Host string `mapstructure:"host" yaml:"host,omitempty"`
 	// Port is the server port
-	Port int `mapstructure:"port"`
+	Port int `mapstructure:"port" yaml:"port,omitempty"`
 	// MCPEnabled enables the MCP server
-	MCPEnabled bool `mapstructure:"mcp_enabled"`
+	MCPEnabled bool `mapstructure:"mcp_enabled" yaml:"mcp_enabled,omitempty"`
 }
 
 // DefaultConfig returns the default configuration
@@ -107,8 +107,26 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Load loads configuration from file, environment, and flags
+// Load loads configuration from file, environment, and flags using the
+// new hierarchical config resolution system.
 func Load(projectDir string) (*Config, error) {
+	resolver := NewConfigResolution()
+	resolved, err := resolver.Resolve(projectDir)
+	if err != nil {
+		return nil, err
+	}
+	return resolved.Config, nil
+}
+
+// LoadResolved loads configuration and returns full resolution information
+func LoadResolved(projectDir string) (*ResolvedConfig, error) {
+	resolver := NewConfigResolution()
+	return resolver.Resolve(projectDir)
+}
+
+// LoadLegacy loads configuration using the legacy viper-based system.
+// This is kept for backward compatibility.
+func LoadLegacy(projectDir string) (*Config, error) {
 	cfg := DefaultConfig()
 
 	v := viper.New()
@@ -190,8 +208,16 @@ func (c *Config) WriteDefaultConfig() error {
 	return v.WriteConfigAs(configPath)
 }
 
-// GetProjectRoot finds the project root by looking for .vecgrep directory
+// GetProjectRoot finds the project root by looking for vecgrep config files.
+// Search order: vecgrep.yaml, vecgrep.yml, .config/vecgrep.yaml, .vecgrep/
+// Also checks if the project is registered in the global config.
 func GetProjectRoot() (string, error) {
+	return FindProjectRoot()
+}
+
+// GetProjectRootLegacy finds the project root by looking for .vecgrep directory only.
+// This is the original implementation kept for backward compatibility.
+func GetProjectRootLegacy() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err
