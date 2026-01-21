@@ -19,11 +19,17 @@ vecgrep is a local-first semantic code search tool powered by vector embeddings.
 ```
 cmd/vecgrep/        # CLI entrypoint
 internal/
-  config/           # Configuration loading (YAML + env vars)
+  config/           # Hierarchical configuration system
+    config.go       # Core config types and loading
+    resolution.go   # Multi-level config resolution
+    global.go       # Global project registry (~/.vecgrep/)
   db/               # SQLite database with sqlc-generated code
-  embed/            # Embedding providers (Ollama)
+    vector_backend.go      # Pluggable vector backend interface
+    sqlite_vec_backend.go  # sqlite-vec implementation
+    veclite_backend.go     # VecLite HNSW implementation
+  embed/            # Embedding providers (Ollama, OpenAI)
   index/            # File indexer and chunker
-  mcp/              # Model Context Protocol server
+  mcp/              # Model Context Protocol server (server_sdk.go)
   search/           # Search implementation
   version/          # Version info (set via ldflags)
   web/              # Web server with templ templates
@@ -78,17 +84,27 @@ Tests that require Ollama are skipped if it's not running.
 4. Search uses cosine similarity in `internal/search/search.go`
 
 ### MCP Server
-The MCP implementation in `internal/mcp/` provides:
+The MCP implementation in `internal/mcp/server_sdk.go` provides:
 - `vecgrep_init` - Initialize a project
 - `vecgrep_search` - Semantic search
 - `vecgrep_index` - Index files
 - `vecgrep_status` - Index statistics
 - `vecgrep_similar` - Find similar code by chunk ID, file:line, or text
+- `vecgrep_delete` - Remove file from index
+- `vecgrep_clean` - Optimize database
+- `vecgrep_reset` - Clear database
 
 ### Configuration
-- Config stored in `.vecgrep/config.yaml`
-- Environment variables use `VECGREP_` prefix
-- See `internal/config/config.go` for defaults
+Configuration uses a hierarchical resolution system (highest to lowest priority):
+1. Environment variables (`VECGREP_*`)
+2. Project root `vecgrep.yaml`
+3. Project `.config/vecgrep.yaml`
+4. Project `.vecgrep/config.yaml` (legacy)
+5. Global project entry in `~/.vecgrep/config.yaml`
+6. Global defaults
+7. Built-in defaults
+
+See `internal/config/resolution.go` for the full resolution logic.
 
 ## Common Tasks for Agents
 
@@ -98,9 +114,8 @@ The MCP implementation in `internal/mcp/` provides:
 3. Update README.md with usage
 
 ### Adding a new MCP tool
-1. Add tool definition in `internal/mcp/tools.go`
-2. Implement handler in `internal/mcp/server.go`
-3. Update README.md MCP section
+1. Add tool definition and handler in `internal/mcp/server_sdk.go`
+2. Update README.md MCP section
 
 ### Modifying the database schema
 1. Edit SQL in `internal/db/schema.sql` and `internal/db/queries.sql`
@@ -132,7 +147,9 @@ Access config via the `config.Load()` function. Don't hardcode paths.
 Use the sqlc-generated functions in `internal/db/`. Don't write raw SQL in Go code.
 
 ### Embedding Provider
-The `embed.Provider` interface allows for future provider additions. Currently only Ollama is implemented.
+The `embed.Provider` interface allows for multiple provider implementations:
+- `internal/embed/ollama.go` - Ollama (local, default)
+- `internal/embed/openai.go` - OpenAI (cloud, requires API key)
 
 ## Before Committing
 

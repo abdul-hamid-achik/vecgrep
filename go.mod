@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/abdul-hamid-achik/veclite v0.2.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/google/jsonschema-go v0.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

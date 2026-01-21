@@ -32,6 +32,27 @@ type Config struct {
 
 	// Server configuration
 	Server ServerConfig `mapstructure:"server" yaml:"server,omitempty"`
+
+	// Vector configuration
+	Vector VectorConfig `mapstructure:"vector" yaml:"vector,omitempty"`
+}
+
+// VectorConfig holds vector backend settings
+type VectorConfig struct {
+	// Backend is the vector storage backend: "sqlite-vec" (default) or "veclite"
+	Backend string `mapstructure:"backend" yaml:"backend,omitempty"`
+	// VecLite holds VecLite-specific configuration
+	VecLite VecLiteConfig `mapstructure:"veclite" yaml:"veclite,omitempty"`
+}
+
+// VecLiteConfig holds VecLite backend settings
+type VecLiteConfig struct {
+	// M is the HNSW max connections per node (default: 16)
+	M int `mapstructure:"m" yaml:"m,omitempty"`
+	// EfConstruction is the HNSW build quality parameter (default: 200)
+	EfConstruction int `mapstructure:"ef_construction" yaml:"ef_construction,omitempty"`
+	// EfSearch is the HNSW search quality parameter (default: 100)
+	EfSearch int `mapstructure:"ef_search" yaml:"ef_search,omitempty"`
 }
 
 // EmbeddingConfig holds embedding provider settings
@@ -103,6 +124,14 @@ func DefaultConfig() *Config {
 			Host:       "localhost",
 			Port:       8080,
 			MCPEnabled: true,
+		},
+		Vector: VectorConfig{
+			Backend: "sqlite-vec", // Default to sqlite-vec for backward compatibility
+			VecLite: VecLiteConfig{
+				M:              16,
+				EfConstruction: 200,
+				EfSearch:       100,
+			},
 		},
 	}
 }

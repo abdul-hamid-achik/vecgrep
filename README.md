@@ -287,7 +287,43 @@ indexing:
 server:
   host: localhost
   port: 8080
+
+vector:
+  backend: sqlite-vec           # or "veclite" for HNSW-based search
+  veclite:
+    m: 16                       # HNSW max connections per node
+    ef_construction: 200        # Build quality (higher = better quality, slower build)
+    ef_search: 100              # Search quality (higher = better recall, slower search)
 ```
+
+### Vector Backends
+
+vecgrep supports two vector storage backends:
+
+| Backend | Description | Best For |
+|---------|-------------|----------|
+| `sqlite-vec` | SQLite extension with exact cosine similarity | Smaller codebases, exact results |
+| `veclite` | HNSW-based approximate nearest neighbor search | Larger codebases, faster queries |
+
+To switch backends, update your config and re-index:
+```bash
+# Edit .vecgrep/config.yaml to set vector.backend
+vecgrep reset --force
+vecgrep index
+```
+
+### Configuration Sources
+
+vecgrep loads configuration from multiple sources in priority order:
+
+1. **Environment variables** (`VECGREP_*`) - Highest priority
+2. **Project root** `vecgrep.yaml` or `vecgrep.yml`
+3. **XDG-style** `.config/vecgrep.yaml`
+4. **Legacy** `.vecgrep/config.yaml`
+5. **Global defaults** `~/.vecgrep/config.yaml`
+6. **Built-in defaults** - Lowest priority
+
+This allows you to set global defaults while overriding per-project settings.
 
 ### Environment Variables
 
