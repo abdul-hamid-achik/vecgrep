@@ -342,7 +342,12 @@ func runInitGlobal(cwd string, force bool) error {
 	cfg.DBPath = filepath.Join(dataDir, config.DefaultDBFile)
 
 	// Initialize database
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
@@ -393,7 +398,12 @@ func runInitLocal(cwd string, force bool) error {
 	}
 
 	// Initialize database
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
@@ -426,7 +436,12 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -517,7 +532,12 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -599,7 +619,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 
-		database, err = db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+		database, err = db.OpenWithBackend(db.OpenOptions{
+			DBPath:      cfg.DBPath,
+			Dimensions:  cfg.Embedding.Dimensions,
+			BackendType: db.VectorBackendType(cfg.Vector.Backend),
+			DataDir:     cfg.DataDir,
+		})
 		if err != nil {
 			return fmt.Errorf("failed to open database: %w", err)
 		}
@@ -679,7 +704,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -736,7 +766,12 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -763,7 +798,12 @@ func runClean(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -816,7 +856,12 @@ func runReset(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -884,7 +929,12 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      cfg.DBPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     cfg.DataDir,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}

@@ -262,11 +262,16 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 
 	// Close existing database if open
 	if s.db != nil {
-		s.db.Close()
+		_ = s.db.Close()
 	}
 
-	// Open database
-	database, err := db.Open(dbPath, cfg.Embedding.Dimensions)
+	// Open database with configured vector backend
+	database, err := db.OpenWithBackend(db.OpenOptions{
+		DBPath:      dbPath,
+		Dimensions:  cfg.Embedding.Dimensions,
+		BackendType: db.VectorBackendType(cfg.Vector.Backend),
+		DataDir:     dataDir,
+	})
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},

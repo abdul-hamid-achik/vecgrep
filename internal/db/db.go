@@ -4,9 +4,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
-	"encoding/binary"
 	"fmt"
-	"math"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
@@ -18,16 +16,38 @@ var schemaSQL string
 // DB wraps the database connection with vecgrep-specific functionality
 type DB struct {
 	*sql.DB
-	dimensions int
+	dimensions    int
+	vectorBackend VectorBackend
 }
 
-// Open opens a database connection and initializes the schema
+// OpenOptions contains options for opening a database with a specific vector backend.
+type OpenOptions struct {
+	DBPath      string
+	Dimensions  int
+	BackendType VectorBackendType
+	DataDir     string // For veclite path construction
+}
+
+// Open opens a database connection and initializes the schema.
+// This is a convenience function that uses sqlite-vec backend by default.
+// Use OpenWithBackend for explicit backend selection.
 func Open(dbPath string, dimensions int) (*DB, error) {
-	// Register sqlite-vec extension
-	sqlite_vec.Auto()
+	return OpenWithBackend(OpenOptions{
+		DBPath:      dbPath,
+		Dimensions:  dimensions,
+		BackendType: VectorBackendSqliteVec,
+	})
+}
+
+// OpenWithBackend opens a database connection with the specified vector backend.
+func OpenWithBackend(opts OpenOptions) (*DB, error) {
+	// Register sqlite-vec extension (needed for sqlite-vec backend)
+	if opts.BackendType == VectorBackendSqliteVec || opts.BackendType == "" {
+		sqlite_vec.Auto()
+	}
 
 	// Open database connection
-	sqlDB, err := sql.Open("sqlite3", dbPath)
+	sqlDB, err := sql.Open("sqlite3", opts.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -44,73 +64,70 @@ func Open(dbPath string, dimensions int) (*DB, error) {
 		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
 	}
 
+	// Create vector backend
+	backend, err := createVectorBackend(sqlDB, opts.BackendType, opts.DataDir)
+	if err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("failed to create vector backend: %w", err)
+	}
+
 	db := &DB{
-		DB:         sqlDB,
-		dimensions: dimensions,
+		DB:            sqlDB,
+		dimensions:    opts.Dimensions,
+		vectorBackend: backend,
 	}
 
 	// Initialize schema
 	if err := db.initSchema(); err != nil {
-		sqlDB.Close()
+		_ = backend.Close()
+		_ = sqlDB.Close()
 		return nil, err
+	}
+
+	// Initialize vector backend
+	if err := backend.Init(opts.Dimensions); err != nil {
+		_ = backend.Close()
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("failed to initialize vector backend: %w", err)
 	}
 
 	return db, nil
 }
 
-// initSchema creates the database tables and vector index
+// createVectorBackend creates the appropriate vector backend based on the type.
+func createVectorBackend(sqlDB *sql.DB, backendType VectorBackendType, dataDir string) (VectorBackend, error) {
+	switch backendType {
+	case VectorBackendVecLite:
+		if dataDir == "" {
+			return nil, fmt.Errorf("dataDir is required for veclite backend")
+		}
+		return NewVecLiteBackend(VecLitePath(dataDir)), nil
+	case VectorBackendSqliteVec, "":
+		return NewSqliteVecBackend(sqlDB), nil
+	default:
+		return nil, fmt.Errorf("unknown vector backend type: %s", backendType)
+	}
+}
+
+// initSchema creates the database tables (vector index is handled by backend)
 func (db *DB) initSchema() error {
 	// Create regular tables
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("failed to create schema: %w", err)
 	}
 
-	// Verify sqlite-vec is loaded
-	var vecVersion string
-	err := db.QueryRow("SELECT vec_version()").Scan(&vecVersion)
-	if err != nil {
-		return fmt.Errorf("sqlite-vec extension not loaded: %w", err)
-	}
-
-	// Create vector table if it doesn't exist
-	// sqlite-vec uses vec0 virtual table
-	createVecTable := fmt.Sprintf(`
-		CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
-			chunk_id INTEGER PRIMARY KEY,
-			embedding FLOAT[%d]
-		)
-	`, db.dimensions)
-
-	if _, err := db.Exec(createVecTable); err != nil {
-		return fmt.Errorf("failed to create vector table: %w", err)
-	}
-
+	// Vector backend initialization is handled separately by backend.Init()
 	return nil
 }
 
 // InsertEmbedding inserts an embedding for a chunk
 func (db *DB) InsertEmbedding(chunkID int64, embedding []float32) error {
-	if len(embedding) != db.dimensions {
-		return fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), db.dimensions)
-	}
-
-	serialized, err := sqlite_vec.SerializeFloat32(embedding)
-	if err != nil {
-		return fmt.Errorf("failed to serialize embedding: %w", err)
-	}
-
-	_, err = db.Exec(
-		"INSERT INTO vec_chunks(chunk_id, embedding) VALUES (?, ?)",
-		chunkID,
-		serialized,
-	)
-	return err
+	return db.vectorBackend.InsertEmbedding(chunkID, embedding)
 }
 
 // DeleteEmbedding removes an embedding for a chunk
 func (db *DB) DeleteEmbedding(chunkID int64) error {
-	_, err := db.Exec("DELETE FROM vec_chunks WHERE chunk_id = ?", chunkID)
-	return err
+	return db.vectorBackend.DeleteEmbedding(chunkID)
 }
 
 // SearchResult represents a vector search result
@@ -121,66 +138,24 @@ type SearchResult struct {
 
 // SearchEmbeddings performs a vector similarity search
 func (db *DB) SearchEmbeddings(queryEmbedding []float32, limit int) ([]SearchResult, error) {
-	if len(queryEmbedding) != db.dimensions {
-		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), db.dimensions)
-	}
-
-	serialized, err := sqlite_vec.SerializeFloat32(queryEmbedding)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize query embedding: %w", err)
-	}
-
-	rows, err := db.Query(`
-		SELECT chunk_id, distance
-		FROM vec_chunks
-		WHERE embedding MATCH ?
-		ORDER BY distance
-		LIMIT ?
-	`, serialized, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var results []SearchResult
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.ChunkID, &r.Distance); err != nil {
-			return nil, err
-		}
-		results = append(results, r)
-	}
-
-	return results, rows.Err()
+	return db.vectorBackend.SearchEmbeddings(queryEmbedding, limit)
 }
 
-// VecVersion returns the sqlite-vec version
+// VecVersion returns the vector backend version info
 func (db *DB) VecVersion() (string, error) {
-	var version string
-	err := db.QueryRow("SELECT vec_version()").Scan(&version)
-	return version, err
+	backendType := db.vectorBackend.Type()
+	if backendType == string(VectorBackendSqliteVec) {
+		var version string
+		err := db.QueryRow("SELECT vec_version()").Scan(&version)
+		return version, err
+	}
+	// For other backends, return the backend type
+	return backendType, nil
 }
 
 // GetEmbedding retrieves the embedding for a chunk by its ID.
 func (db *DB) GetEmbedding(chunkID int64) ([]float32, error) {
-	var embeddingBytes []byte
-	err := db.QueryRow("SELECT embedding FROM vec_chunks WHERE chunk_id = ?", chunkID).Scan(&embeddingBytes)
-	if err != nil {
-		return nil, fmt.Errorf("get embedding for chunk %d: %w", chunkID, err)
-	}
-
-	// Deserialize bytes to []float32 (little-endian format)
-	if len(embeddingBytes)%4 != 0 {
-		return nil, fmt.Errorf("invalid embedding blob size: %d bytes", len(embeddingBytes))
-	}
-
-	embedding := make([]float32, len(embeddingBytes)/4)
-	for i := range embedding {
-		bits := binary.LittleEndian.Uint32(embeddingBytes[i*4 : (i+1)*4])
-		embedding[i] = math.Float32frombits(bits)
-	}
-
-	return embedding, nil
+	return db.vectorBackend.GetEmbedding(chunkID)
 }
 
 // GetChunkByLocation finds a chunk containing the given file path and line number.
@@ -297,24 +272,34 @@ func (db *DB) Clean(ctx context.Context) (*CleanStats, error) {
 		}
 	}
 
-	// Find orphaned embeddings (embeddings without chunks)
-	err = db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM vec_chunks
-		WHERE chunk_id NOT IN (SELECT id FROM chunks)
-	`).Scan(&stats.OrphanedEmbeddings)
+	// Get all valid chunk IDs
+	rows, err := db.QueryContext(ctx, "SELECT id FROM chunks")
 	if err != nil {
-		return nil, fmt.Errorf("count orphaned embeddings: %w", err)
+		return nil, fmt.Errorf("get chunk ids: %w", err)
+	}
+	defer rows.Close()
+
+	var validChunkIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan chunk id: %w", err)
+		}
+		validChunkIDs = append(validChunkIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate chunks: %w", err)
 	}
 
-	// Delete orphaned embeddings
-	if stats.OrphanedEmbeddings > 0 {
-		_, err = db.ExecContext(ctx, `
-			DELETE FROM vec_chunks
-			WHERE chunk_id NOT IN (SELECT id FROM chunks)
-		`)
-		if err != nil {
-			return nil, fmt.Errorf("delete orphaned embeddings: %w", err)
-		}
+	// Delete orphaned embeddings using the backend
+	stats.OrphanedEmbeddings, err = db.vectorBackend.DeleteOrphaned(validChunkIDs)
+	if err != nil {
+		return nil, fmt.Errorf("delete orphaned embeddings: %w", err)
+	}
+
+	// Sync backend if needed
+	if err := db.vectorBackend.Sync(); err != nil {
+		return nil, fmt.Errorf("sync vector backend: %w", err)
 	}
 
 	// Get database size before vacuum
@@ -351,14 +336,18 @@ func (db *DB) Clean(ctx context.Context) (*CleanStats, error) {
 func (db *DB) Reset(ctx context.Context, projectID int64) error {
 	// If projectID is 0, reset all data
 	if projectID == 0 {
-		// Delete all embeddings
-		_, err := db.ExecContext(ctx, "DELETE FROM vec_chunks")
-		if err != nil {
+		// Delete all embeddings using the backend
+		if err := db.vectorBackend.DeleteAll(); err != nil {
 			return fmt.Errorf("delete embeddings: %w", err)
 		}
 
+		// Sync backend
+		if err := db.vectorBackend.Sync(); err != nil {
+			return fmt.Errorf("sync vector backend: %w", err)
+		}
+
 		// Delete all chunks
-		_, err = db.ExecContext(ctx, "DELETE FROM chunks")
+		_, err := db.ExecContext(ctx, "DELETE FROM chunks")
 		if err != nil {
 			return fmt.Errorf("delete chunks: %w", err)
 		}
@@ -421,6 +410,11 @@ func (db *DB) Reset(ctx context.Context, projectID int64) error {
 		_ = chunkRows.Close()
 	}
 
+	// Sync backend after deletions
+	if err := db.vectorBackend.Sync(); err != nil {
+		return fmt.Errorf("sync vector backend: %w", err)
+	}
+
 	// Delete chunks for all files in this project
 	_, err = db.ExecContext(ctx, `
 		DELETE FROM chunks WHERE file_id IN (
@@ -469,12 +463,27 @@ func (db *DB) Stats() (map[string]int64, error) {
 		stats[name] = count
 	}
 
-	// Vector count
-	var vecCount int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM vec_chunks").Scan(&vecCount); err != nil {
+	// Vector count using the backend
+	vecCount, err := db.vectorBackend.Count()
+	if err != nil {
 		return nil, err
 	}
 	stats["embeddings"] = vecCount
 
 	return stats, nil
+}
+
+// Close closes the database and vector backend.
+func (db *DB) Close() error {
+	if db.vectorBackend != nil {
+		if err := db.vectorBackend.Sync(); err != nil {
+			// Log but continue closing
+			_ = err
+		}
+		if err := db.vectorBackend.Close(); err != nil {
+			// Log but continue closing
+			_ = err
+		}
+	}
+	return db.DB.Close()
 }
