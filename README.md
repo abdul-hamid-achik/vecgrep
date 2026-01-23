@@ -202,10 +202,19 @@ vecgrep similar 42 --lang go --exclude-same-file
 ### Check Status
 
 ```bash
-vecgrep status
+vecgrep status [options]
 ```
 
-Displays index statistics and configuration.
+Displays index statistics, configuration, and pending changes.
+
+Options:
+- `-f, --format` - Output format: `default`, `json`
+
+Examples:
+```bash
+vecgrep status                # Default text output
+vecgrep status --format json  # JSON output for scripting
+```
 
 ### Index Management
 

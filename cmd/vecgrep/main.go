@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -246,6 +247,9 @@ func init() {
 	similarCmd.Flags().String("file", "", "filter by file pattern (glob)")
 	similarCmd.Flags().Bool("exclude-same-file", false, "exclude results from the same file as the source")
 	similarCmd.Flags().StringP("text", "T", "", "find code similar to this text snippet")
+
+	// Status command flags
+	statusCmd.Flags().StringP("format", "f", "default", "output format (default, json)")
 
 	// Reset command flags
 	resetCmd.Flags().Bool("force", false, "skip confirmation prompt")
@@ -693,7 +697,28 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// StatusOutput represents the JSON output for the status command
+type StatusOutput struct {
+	ProjectRoot    string            `json:"project_root"`
+	Database       string            `json:"database"`
+	SqliteVec      string            `json:"sqlite_vec"`
+	EmbeddingModel string            `json:"embedding_model"`
+	Provider       string            `json:"provider"`
+	Stats          map[string]int64  `json:"stats"`
+	PendingChanges *PendingChanges   `json:"pending_changes,omitempty"`
+}
+
+// PendingChanges represents pending reindex changes
+type PendingChanges struct {
+	NewFiles      int `json:"new_files"`
+	ModifiedFiles int `json:"modified_files"`
+	DeletedFiles  int `json:"deleted_files"`
+	TotalPending  int `json:"total_pending"`
+}
+
 func runStatus(cmd *cobra.Command, args []string) error {
+	format, _ := cmd.Flags().GetString("format")
+
 	projectRoot, err := config.GetProjectRoot()
 	if err != nil {
 		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
@@ -722,6 +747,43 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	vecVersion, _ := database.VecVersion()
 
+	// Check for pending changes
+	indexerCfg := index.DefaultIndexerConfig()
+	indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, indexerCfg.IgnorePatterns...)
+	indexer := index.NewIndexer(database, nil, indexerCfg)
+
+	ctx := context.Background()
+	pending, pendingErr := indexer.GetPendingChanges(ctx, projectRoot)
+
+	// JSON output
+	if format == "json" {
+		output := StatusOutput{
+			ProjectRoot:    projectRoot,
+			Database:       cfg.DBPath,
+			SqliteVec:      vecVersion,
+			EmbeddingModel: cfg.Embedding.Model,
+			Provider:       cfg.Embedding.Provider,
+			Stats:          stats,
+		}
+
+		if pendingErr == nil {
+			output.PendingChanges = &PendingChanges{
+				NewFiles:      pending.NewFiles,
+				ModifiedFiles: pending.ModifiedFiles,
+				DeletedFiles:  pending.DeletedFiles,
+				TotalPending:  pending.TotalPending,
+			}
+		}
+
+		jsonBytes, err := json.MarshalIndent(output, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal JSON: %w", err)
+		}
+		fmt.Println(string(jsonBytes))
+		return nil
+	}
+
+	// Default text output
 	fmt.Printf("vecgrep status\n")
 	fmt.Printf("  Project root: %s\n", projectRoot)
 	fmt.Printf("  Database: %s\n", cfg.DBPath)
@@ -733,14 +795,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Chunks:     %d\n", stats["chunks"])
 	fmt.Printf("  Embeddings: %d\n", stats["embeddings"])
 
-	// Check for pending changes
-	indexerCfg := index.DefaultIndexerConfig()
-	indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, indexerCfg.IgnorePatterns...)
-	indexer := index.NewIndexer(database, nil, indexerCfg)
-
-	ctx := context.Background()
-	pending, err := indexer.GetPendingChanges(ctx, projectRoot)
-	if err == nil {
+	if pendingErr == nil {
 		fmt.Printf("\nReindex status:\n")
 		fmt.Printf("  New files:      %d\n", pending.NewFiles)
 		fmt.Printf("  Modified files: %d\n", pending.ModifiedFiles)
