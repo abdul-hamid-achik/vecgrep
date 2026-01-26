@@ -21,7 +21,7 @@ const (
 type Config struct {
 	// DataDir is the directory where vecgrep stores its data
 	DataDir string `mapstructure:"data_dir" yaml:"data_dir,omitempty"`
-	// DBPath is the path to the SQLite database file
+	// DBPath is the path to the database file (veclite)
 	DBPath string `mapstructure:"db_path" yaml:"db_path,omitempty"`
 
 	// Embedding configuration
@@ -39,9 +39,7 @@ type Config struct {
 
 // VectorConfig holds vector backend settings
 type VectorConfig struct {
-	// Backend is the vector storage backend: "sqlite-vec" (default) or "veclite"
-	Backend string `mapstructure:"backend" yaml:"backend,omitempty"`
-	// VecLite holds VecLite-specific configuration
+	// VecLite holds VecLite-specific configuration (HNSW parameters)
 	VecLite VecLiteConfig `mapstructure:"veclite" yaml:"veclite,omitempty"`
 }
 
@@ -126,7 +124,6 @@ func DefaultConfig() *Config {
 			MCPEnabled: true,
 		},
 		Vector: VectorConfig{
-			Backend: "sqlite-vec", // Default to sqlite-vec for backward compatibility
 			VecLite: VecLiteConfig{
 				M:              16,
 				EfConstruction: 200,

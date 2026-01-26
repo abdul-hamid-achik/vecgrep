@@ -3,7 +3,6 @@ package index
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -117,10 +116,9 @@ type IndexResult struct {
 func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...string) (*IndexResult, error) {
 	startTime := time.Now()
 
-	// Ensure project exists in database
-	projectID, err := idx.ensureProject(ctx, projectRoot)
+	absRoot, err := filepath.Abs(projectRoot)
 	if err != nil {
-		return nil, fmt.Errorf("ensure project: %w", err)
+		return nil, fmt.Errorf("abs path: %w", err)
 	}
 
 	// Build gitignore matcher
@@ -135,8 +133,8 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 		return nil, fmt.Errorf("collect files: %w", err)
 	}
 
-	// Filter files that need re-indexing
-	filesToIndex, skipped := idx.filterUnchangedFiles(ctx, projectID, files)
+	// Filter files that need re-indexing by checking veclite for existing hashes
+	filesToIndex, skipped := idx.filterUnchangedFiles(ctx, absRoot, files)
 
 	progress := Progress{
 		TotalFiles:   len(filesToIndex),
@@ -159,7 +157,7 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			idx.indexWorker(ctx, projectID, filesChan, resultsChan)
+			idx.indexWorker(ctx, absRoot, filesChan, resultsChan)
 		}()
 	}
 
@@ -199,9 +197,9 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 		}
 	}
 
-	// Update project stats
-	if err := idx.updateProjectStats(ctx, projectID, result); err != nil {
-		result.Errors = append(result.Errors, fmt.Errorf("update stats: %w", err))
+	// Sync the database
+	if err := idx.db.Sync(); err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("sync: %w", err))
 	}
 
 	result.Duration = time.Since(startTime)
@@ -224,7 +222,7 @@ type fileResult struct {
 }
 
 // indexWorker processes files from the channel.
-func (idx *Indexer) indexWorker(ctx context.Context, projectID int64, files <-chan fileInfo, results chan<- fileResult) {
+func (idx *Indexer) indexWorker(ctx context.Context, projectRoot string, files <-chan fileInfo, results chan<- fileResult) {
 	for file := range files {
 		select {
 		case <-ctx.Done():
@@ -233,7 +231,7 @@ func (idx *Indexer) indexWorker(ctx context.Context, projectID int64, files <-ch
 		default:
 		}
 
-		chunks, err := idx.indexFile(ctx, projectID, file)
+		chunks, err := idx.indexFile(ctx, projectRoot, file)
 		results <- fileResult{
 			path:          file.path,
 			chunksCreated: chunks,
@@ -243,7 +241,7 @@ func (idx *Indexer) indexWorker(ctx context.Context, projectID int64, files <-ch
 }
 
 // indexFile indexes a single file.
-func (idx *Indexer) indexFile(ctx context.Context, projectID int64, file fileInfo) (int, error) {
+func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file fileInfo) (int, error) {
 	// Read file content
 	content, err := os.ReadFile(file.path)
 	if err != nil {
@@ -258,26 +256,8 @@ func (idx *Indexer) indexFile(ctx context.Context, projectID int64, file fileInf
 	// Detect language
 	lang := DetectLanguage(file.path)
 
-	// Delete existing file entry if present (for re-indexing)
-	_, err = idx.db.Exec(`DELETE FROM files WHERE project_id = ? AND relative_path = ?`,
-		projectID, file.relativePath)
-	if err != nil {
-		return 0, fmt.Errorf("delete existing file: %w", err)
-	}
-
-	// Insert file record
-	result, err := idx.db.Exec(`
-		INSERT INTO files (project_id, path, relative_path, hash, size, language, indexed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		projectID, file.path, file.relativePath, file.hash, file.size, string(lang), time.Now())
-	if err != nil {
-		return 0, fmt.Errorf("insert file: %w", err)
-	}
-
-	fileID, err := result.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("get file ID: %w", err)
-	}
+	// Delete existing chunks for this file (for re-indexing)
+	_, _ = idx.db.DeleteFile(ctx, file.relativePath)
 
 	// Chunk the content
 	chunks := idx.chunker.ChunkFile(string(content), file.path)
@@ -306,19 +286,30 @@ func (idx *Indexer) indexFile(ctx context.Context, projectID int64, file fileInf
 			return totalChunks, fmt.Errorf("embed batch: %w", err)
 		}
 
-		// Insert chunks with embeddings
+		// Insert chunks with embeddings into veclite
 		for j, chunk := range batch {
 			if j >= len(embeddings) || embeddings[j] == nil {
 				continue
 			}
 
-			chunkID, err := idx.insertChunk(fileID, chunk)
-			if err != nil {
-				return totalChunks, fmt.Errorf("insert chunk: %w", err)
-			}
+			record := db.NewChunkRecord(
+				file.path,
+				file.relativePath,
+				file.hash,
+				file.size,
+				string(lang),
+				chunk.Content,
+				chunk.StartLine,
+				chunk.EndLine,
+				chunk.StartByte,
+				chunk.EndByte,
+				string(chunk.ChunkType),
+				chunk.SymbolName,
+				projectRoot,
+			)
 
-			if err := idx.db.InsertEmbedding(chunkID, embeddings[j]); err != nil {
-				return totalChunks, fmt.Errorf("insert embedding: %w", err)
+			if _, err := idx.db.InsertChunk(record, embeddings[j]); err != nil {
+				return totalChunks, fmt.Errorf("insert chunk: %w", err)
 			}
 
 			totalChunks++
@@ -326,52 +317,6 @@ func (idx *Indexer) indexFile(ctx context.Context, projectID int64, file fileInf
 	}
 
 	return totalChunks, nil
-}
-
-// insertChunk inserts a chunk into the database.
-func (idx *Indexer) insertChunk(fileID int64, chunk Chunk) (int64, error) {
-	result, err := idx.db.Exec(`
-		INSERT INTO chunks (file_id, content, start_line, end_line, start_byte, end_byte, chunk_type, symbol_name, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		fileID, chunk.Content, chunk.StartLine, chunk.EndLine, chunk.StartByte, chunk.EndByte,
-		string(chunk.ChunkType), chunk.SymbolName, time.Now())
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
-}
-
-// ensureProject creates or returns the project ID for the given root path.
-func (idx *Indexer) ensureProject(ctx context.Context, rootPath string) (int64, error) {
-	absPath, err := filepath.Abs(rootPath)
-	if err != nil {
-		return 0, fmt.Errorf("abs path: %w", err)
-	}
-
-	// Try to get existing project
-	var projectID int64
-	err = idx.db.QueryRow(`SELECT id FROM projects WHERE root_path = ?`, absPath).Scan(&projectID)
-	if err == nil {
-		// Update last_indexed_at
-		_, err = idx.db.Exec(`UPDATE projects SET last_indexed_at = ? WHERE id = ?`, time.Now(), projectID)
-		return projectID, err
-	}
-
-	if err != sql.ErrNoRows {
-		return 0, fmt.Errorf("query project: %w", err)
-	}
-
-	// Create new project
-	projectName := filepath.Base(absPath)
-	result, err := idx.db.Exec(`
-		INSERT INTO projects (name, root_path, created_at, updated_at, last_indexed_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		projectName, absPath, time.Now(), time.Now(), time.Now())
-	if err != nil {
-		return 0, fmt.Errorf("insert project: %w", err)
-	}
-
-	return result.LastInsertId()
 }
 
 // buildIgnoreMatcher builds a gitignore-style matcher for file filtering.
@@ -495,52 +440,27 @@ func (idx *Indexer) collectFiles(ctx context.Context, rootPath string, paths []s
 }
 
 // filterUnchangedFiles filters out files that haven't changed since last indexing.
-func (idx *Indexer) filterUnchangedFiles(ctx context.Context, projectID int64, files []fileInfo) ([]fileInfo, int) {
+func (idx *Indexer) filterUnchangedFiles(ctx context.Context, projectRoot string, files []fileInfo) ([]fileInfo, int) {
+	// Get existing file hashes from veclite
+	existingHashes, err := idx.db.GetFileHashes(projectRoot)
+	if err != nil {
+		// If we can't get hashes, index everything
+		return files, 0
+	}
+
 	var toIndex []fileInfo
 	var skipped int
 
 	for _, file := range files {
-		var existingHash string
-		err := idx.db.QueryRow(`
-			SELECT hash FROM files
-			WHERE project_id = ? AND relative_path = ?`,
-			projectID, file.relativePath).Scan(&existingHash)
-
-		if err == nil && existingHash == file.hash {
+		existingHash, exists := existingHashes[file.relativePath]
+		if exists && existingHash == file.hash {
 			skipped++
 			continue
 		}
-
 		toIndex = append(toIndex, file)
 	}
 
 	return toIndex, skipped
-}
-
-// updateProjectStats updates statistics for the project.
-func (idx *Indexer) updateProjectStats(ctx context.Context, projectID int64, result *IndexResult) error {
-	now := time.Now()
-
-	// Update or insert stats
-	stats := map[string]int64{
-		"files_indexed":  int64(result.FilesProcessed),
-		"files_skipped":  int64(result.FilesSkipped),
-		"chunks_created": int64(result.ChunksCreated),
-		"errors":         int64(len(result.Errors)),
-	}
-
-	for key, value := range stats {
-		_, err := idx.db.Exec(`
-			INSERT INTO stats (project_id, stat_key, stat_value, recorded_at)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(project_id, stat_key) DO UPDATE SET stat_value = ?, recorded_at = ?`,
-			projectID, key, value, now, value, now)
-		if err != nil {
-			return fmt.Errorf("update stat %s: %w", key, err)
-		}
-	}
-
-	return nil
 }
 
 // hashFile calculates SHA256 hash of a file.
@@ -574,15 +494,11 @@ func (idx *Indexer) GetPendingChanges(ctx context.Context, projectRoot string) (
 		return nil, fmt.Errorf("abs path: %w", err)
 	}
 
-	// Get project ID
-	var projectID int64
-	err = idx.db.QueryRow(`SELECT id FROM projects WHERE root_path = ?`, absPath).Scan(&projectID)
+	// Get existing file hashes from veclite
+	indexedFiles, err := idx.db.GetFileHashes(absPath)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// No project exists yet - everything is new
-			return &PendingChanges{}, nil
-		}
-		return nil, fmt.Errorf("query project: %w", err)
+		// No indexed files yet
+		return &PendingChanges{}, nil
 	}
 
 	// Build ignore matcher
@@ -601,25 +517,6 @@ func (idx *Indexer) GetPendingChanges(ctx context.Context, projectRoot string) (
 	currentFileMap := make(map[string]fileInfo)
 	for _, f := range currentFiles {
 		currentFileMap[f.relativePath] = f
-	}
-
-	// Get all indexed files from database
-	rows, err := idx.db.Query(`SELECT relative_path, hash FROM files WHERE project_id = ?`, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("query files: %w", err)
-	}
-	defer rows.Close()
-
-	indexedFiles := make(map[string]string) // relative_path -> hash
-	for rows.Next() {
-		var relPath, hash string
-		if err := rows.Scan(&relPath, &hash); err != nil {
-			return nil, fmt.Errorf("scan row: %w", err)
-		}
-		indexedFiles[relPath] = hash
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
 	pending := &PendingChanges{}
@@ -648,23 +545,14 @@ func (idx *Indexer) GetPendingChanges(ctx context.Context, projectRoot string) (
 
 // ReindexAll forces reindexing of all files in the project.
 func (idx *Indexer) ReindexAll(ctx context.Context, projectRoot string) (*IndexResult, error) {
-	// Get project ID
 	absPath, err := filepath.Abs(projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("abs path: %w", err)
 	}
 
-	var projectID int64
-	err = idx.db.QueryRow(`SELECT id FROM projects WHERE root_path = ?`, absPath).Scan(&projectID)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, fmt.Errorf("query project: %w", err)
-	}
-
-	// Clear existing data for this project
-	if projectID != 0 {
-		if _, err := idx.db.Exec(`DELETE FROM files WHERE project_id = ?`, projectID); err != nil {
-			return nil, fmt.Errorf("clear files: %w", err)
-		}
+	// Delete all existing data for this project
+	if err := idx.db.Reset(ctx, absPath); err != nil {
+		return nil, fmt.Errorf("reset project: %w", err)
 	}
 
 	// Perform full index

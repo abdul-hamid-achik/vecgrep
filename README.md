@@ -298,28 +298,15 @@ server:
   port: 8080
 
 vector:
-  backend: sqlite-vec           # or "veclite" for HNSW-based search
   veclite:
     m: 16                       # HNSW max connections per node
     ef_construction: 200        # Build quality (higher = better quality, slower build)
     ef_search: 100              # Search quality (higher = better recall, slower search)
 ```
 
-### Vector Backends
+### Vector Backend
 
-vecgrep supports two vector storage backends:
-
-| Backend | Description | Best For |
-|---------|-------------|----------|
-| `sqlite-vec` | SQLite extension with exact cosine similarity | Smaller codebases, exact results |
-| `veclite` | HNSW-based approximate nearest neighbor search | Larger codebases, faster queries |
-
-To switch backends, update your config and re-index:
-```bash
-# Edit .vecgrep/config.yaml to set vector.backend
-vecgrep reset --force
-vecgrep index
-```
+vecgrep uses veclite as its vector storage backend, providing HNSW-based approximate nearest neighbor search for fast and accurate semantic code search.
 
 ### Configuration Sources
 

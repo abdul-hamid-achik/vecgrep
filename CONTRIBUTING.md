@@ -143,7 +143,7 @@ refactor: extract vector backend interface
 cmd/vecgrep/       # CLI entry point
 internal/
   config/          # Configuration loading
-  db/              # Database layer (SQLite + sqlite-vec)
+  db/              # Database layer (veclite)
   embed/           # Embedding providers (Ollama, OpenAI)
   index/           # File indexer and chunker
   mcp/             # MCP server implementation
@@ -173,11 +173,12 @@ internal/
 2. Implement the handler
 3. Update README.md MCP section
 
-### Modifying Database Schema
+### Modifying the Data Model
 
-1. Edit `internal/db/schema.sql` and `internal/db/queries.sql`
-2. Run `task gen:sqlc` to regenerate code
-3. Update any affected code using the generated types
+1. Update the `ChunkRecord` struct in `internal/db/veclite_backend.go`
+2. Update payload construction in `InsertChunk()` and extraction in `recordToChunk()`
+3. Run tests to ensure compatibility
+4. Note: Existing indexes may need to be rebuilt after schema changes
 
 ## Code Generation
 
@@ -185,7 +186,6 @@ This project uses code generation. After modifying source files, run:
 
 ```bash
 task gen          # Generate all code
-task gen:sqlc     # Regenerate database code
 task gen:templ    # Regenerate templates
 task gen:css      # Rebuild Tailwind CSS
 ```

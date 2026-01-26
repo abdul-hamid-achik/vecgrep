@@ -4,10 +4,9 @@ go 1.25.5
 
 require (
 	github.com/a-h/templ v0.3.977
-	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/abdul-hamid-achik/veclite v0.2.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-chi/chi/v5 v5.2.2
-	github.com/mattn/go-sqlite3 v1.14.33
 	github.com/modelcontextprotocol/go-sdk v1.2.0
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	github.com/spf13/cobra v1.10.2
@@ -16,7 +15,6 @@ require (
 )
 
 require (
-	github.com/abdul-hamid-achik/veclite v0.2.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/google/jsonschema-go v0.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

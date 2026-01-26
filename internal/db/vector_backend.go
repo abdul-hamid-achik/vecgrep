@@ -1,13 +1,13 @@
 package db
 
 // VectorBackend is the interface for vector storage and search.
-// This allows swapping between different vector database implementations
-// (sqlite-vec, VecLite, etc.)
+// With the veclite-only architecture, this interface is primarily
+// for backwards compatibility and potential future backends.
 type VectorBackend interface {
 	// Init initializes the vector backend with the given dimensions.
 	Init(dimensions int) error
 
-	// InsertEmbedding inserts an embedding for a chunk.
+	// InsertEmbedding inserts an embedding for a chunk (legacy).
 	InsertEmbedding(chunkID int64, embedding []float32) error
 
 	// DeleteEmbedding removes an embedding for a chunk.
@@ -42,9 +42,6 @@ type VectorBackend interface {
 type VectorBackendType string
 
 const (
-	// VectorBackendSqliteVec uses sqlite-vec extension.
-	VectorBackendSqliteVec VectorBackendType = "sqlite-vec"
-
 	// VectorBackendVecLite uses VecLite as the vector backend.
 	VectorBackendVecLite VectorBackendType = "veclite"
 )

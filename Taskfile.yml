@@ -15,7 +15,7 @@ vars:
     -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date={{.BUILD_TIME}}
 
 env:
-  CGO_ENABLED: "1"
+  CGO_ENABLED: "0"
 
 tasks:
   default:
@@ -57,7 +57,6 @@ tasks:
         echo "  ─────────"
         command -v templ >/dev/null && echo "    ✓ templ" || echo "    ✗ templ (run: task setup:tools)"
         command -v air >/dev/null && echo "    ✓ air" || echo "    ✗ air (run: task setup:tools)"
-        command -v sqlc >/dev/null && echo "    ✓ sqlc" || echo "    ✗ sqlc (run: task setup:tools)"
         command -v goreleaser >/dev/null && echo "    ✓ goreleaser" || echo "    ○ goreleaser (optional: brew install goreleaser)"
         command -v golangci-lint >/dev/null && echo "    ✓ golangci-lint" || echo "    ○ golangci-lint (optional: brew install golangci-lint)"
         echo ""
@@ -153,11 +152,9 @@ tasks:
     cmds:
       - go install github.com/a-h/templ/cmd/templ@latest
       - go install github.com/air-verse/air@latest
-      - go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
     status:
       - command -v templ
       - command -v air
-      - command -v sqlc
 
   "setup:tailwind":
     desc: Check Tailwind CSS CLI is available via npx
@@ -171,16 +168,9 @@ tasks:
   # ════════════════════════════════════════════════════════════════════════════
 
   gen:
-    desc: Run all code generation (sqlc, templ, css)
+    desc: Run all code generation (templ, css)
     aliases: [generate]
-    deps: [gen:sqlc, gen:templ, gen:css]
-
-  "gen:sqlc":
-    desc: Generate Go code from SQL queries
-    aliases: [sqlc]
-    dir: internal/db
-    cmds:
-      - sqlc generate
+    deps: [gen:templ, gen:css]
 
   "gen:templ":
     desc: Generate Go code from templ files
@@ -382,7 +372,6 @@ tasks:
       - rm -rf tmp
       - rm -rf dist
       - rm -f coverage.out coverage.html
-      - rm -rf internal/db/generated
       - echo "  ✓ Cleaned"
 
   nuke:

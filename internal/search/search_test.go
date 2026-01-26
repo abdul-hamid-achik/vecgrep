@@ -2,7 +2,6 @@ package search
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
@@ -62,34 +61,23 @@ func (m *mockProvider) Ping(ctx context.Context) error {
 func setupTestDB(t *testing.T) *db.DB {
 	t.Helper()
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
 
-	database, err := db.Open(dbPath, 768)
+	database, err := db.OpenWithOptions(db.OpenOptions{
+		Dimensions: 768,
+		DataDir:    tmpDir,
+	})
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
 	return database
 }
 
-func setupTestData(t *testing.T, database *db.DB) int64 {
+func setupTestData(t *testing.T, database *db.DB) {
 	t.Helper()
 
-	// Create project
-	result, err := database.Exec(`INSERT INTO projects (name, root_path) VALUES (?, ?)`, "test", "/tmp/test")
-	if err != nil {
-		t.Fatalf("Insert project failed: %v", err)
-	}
-	projectID, _ := result.LastInsertId()
+	projectRoot := "/tmp/test"
 
-	// Create file
-	result, err = database.Exec(`INSERT INTO files (project_id, path, relative_path, hash, size, language) VALUES (?, ?, ?, ?, ?, ?)`,
-		projectID, "/tmp/test/main.go", "main.go", "abc123", 100, "go")
-	if err != nil {
-		t.Fatalf("Insert file failed: %v", err)
-	}
-	fileID, _ := result.LastInsertId()
-
-	// Create chunks
+	// Create chunks with embeddings
 	chunks := []struct {
 		content    string
 		startLine  int
@@ -102,25 +90,30 @@ func setupTestData(t *testing.T, database *db.DB) int64 {
 		{"type Config struct {\n\tHost string\n\tPort int\n}", 9, 12, "class", "Config"},
 	}
 
-	for _, c := range chunks {
-		result, err := database.Exec(`INSERT INTO chunks (file_id, content, start_line, end_line, start_byte, end_byte, chunk_type, symbol_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			fileID, c.content, c.startLine, c.endLine, 0, len(c.content), c.chunkType, c.symbolName)
-		if err != nil {
-			t.Fatalf("Insert chunk failed: %v", err)
-		}
-		chunkID, _ := result.LastInsertId()
-
+	for i, c := range chunks {
 		// Create embedding
 		embedding := make([]float32, 768)
-		for i := range embedding {
-			embedding[i] = float32(len(c.content)%100) / 100.0
+		for j := range embedding {
+			embedding[j] = float32(len(c.content)%100) / 100.0
 		}
-		if err := database.InsertEmbedding(chunkID, embedding); err != nil {
-			t.Fatalf("Insert embedding failed: %v", err)
+
+		chunk := db.NewChunkRecord(
+			"/tmp/test/main.go",
+			"main.go",
+			"abc123",
+			100,
+			"go",
+			c.content,
+			c.startLine, c.endLine, 0, len(c.content),
+			c.chunkType,
+			c.symbolName,
+			projectRoot,
+		)
+
+		if _, err := database.InsertChunk(chunk, embedding); err != nil {
+			t.Fatalf("Insert chunk %d failed: %v", i, err)
 		}
 	}
-
-	return projectID
 }
 
 func TestNewSearcher(t *testing.T) {

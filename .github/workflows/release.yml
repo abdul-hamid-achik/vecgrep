@@ -7,159 +7,9 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Install templ
-        run: go install github.com/a-h/templ/cmd/templ@latest
-
-      - name: Install Tailwind
-        run: npm install
-
-      - name: Generate templ code
-        run: templ generate
-
-      - name: Generate CSS
-        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
-
-      - name: Build
-        env:
-          CGO_ENABLED: 1
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          COMMIT=$(git rev-parse --short HEAD)
-          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          go build -ldflags "-s -w \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version=${VERSION} \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit=${COMMIT} \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date=${DATE}" \
-            -o vecgrep ./cmd/vecgrep
-
-      - name: Create archive
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          tar -czvf "vecgrep_${VERSION}_linux_amd64.tar.gz" vecgrep README.md LICENSE 2>/dev/null || tar -czvf "vecgrep_${VERSION}_linux_amd64.tar.gz" vecgrep README.md
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: vecgrep-linux-amd64
-          path: vecgrep_*.tar.gz
-
-  build-darwin-arm64:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Install templ
-        run: go install github.com/a-h/templ/cmd/templ@latest
-
-      - name: Install Tailwind
-        run: npm install
-
-      - name: Generate templ code
-        run: templ generate
-
-      - name: Generate CSS
-        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
-
-      - name: Build
-        env:
-          CGO_ENABLED: 1
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          COMMIT=$(git rev-parse --short HEAD)
-          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          go build -ldflags "-s -w \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version=${VERSION} \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit=${COMMIT} \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date=${DATE}" \
-            -o vecgrep ./cmd/vecgrep
-
-      - name: Create archive
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          tar -czvf "vecgrep_${VERSION}_darwin_arm64.tar.gz" vecgrep README.md LICENSE 2>/dev/null || tar -czvf "vecgrep_${VERSION}_darwin_arm64.tar.gz" vecgrep README.md
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: vecgrep-darwin-arm64
-          path: vecgrep_*.tar.gz
-
-  build-darwin-amd64:
-    runs-on: macos-14
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
-
-      - name: Install templ
-        run: go install github.com/a-h/templ/cmd/templ@latest
-
-      - name: Install Tailwind
-        run: npm install
-
-      - name: Generate templ code
-        run: templ generate
-
-      - name: Generate CSS
-        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
-
-      - name: Build
-        env:
-          CGO_ENABLED: 1
-          GOARCH: amd64
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          COMMIT=$(git rev-parse --short HEAD)
-          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          go build -ldflags "-s -w \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version=${VERSION} \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit=${COMMIT} \
-            -X github.com/abdul-hamid-achik/vecgrep/internal/version.Date=${DATE}" \
-            -o vecgrep ./cmd/vecgrep
-
-      - name: Create archive
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          tar -czvf "vecgrep_${VERSION}_darwin_amd64.tar.gz" vecgrep README.md LICENSE 2>/dev/null || tar -czvf "vecgrep_${VERSION}_darwin_amd64.tar.gz" vecgrep README.md
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: vecgrep-darwin-amd64
-          path: vecgrep_*.tar.gz
-
   release:
-    needs: [build-linux, build-darwin-arm64, build-darwin-amd64]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -167,95 +17,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          path: dist
-          merge-multiple: true
+          go-version: '1.25'
+          cache: true
 
-      - name: Generate checksums
-        run: |
-          cd dist
-          sha256sum *.tar.gz > checksums.txt
-          cat checksums.txt
+      - name: Install templ
+        run: go install github.com/a-h/templ/cmd/templ@latest
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Install Tailwind dependencies
+        run: npm install
+
+      - name: Generate templ code
+        run: templ generate
+
+      - name: Generate CSS
+        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
         with:
-          files: |
-            dist/*.tar.gz
-            dist/checksums.txt
-          generate_release_notes: true
+          version: latest
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update Homebrew formula
-        env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "HOMEBREW_TAP_TOKEN not set, skipping Homebrew update"
-            exit 0
-          fi
-
-          VERSION=${GITHUB_REF_NAME#v}
-
-          # Get checksums
-          LINUX_AMD64_SHA=$(grep "linux_amd64" dist/checksums.txt | awk '{print $1}')
-          DARWIN_AMD64_SHA=$(grep "darwin_amd64" dist/checksums.txt | awk '{print $1}')
-          DARWIN_ARM64_SHA=$(grep "darwin_arm64" dist/checksums.txt | awk '{print $1}')
-
-          # Create formula
-          cat > vecgrep.rb << 'FORMULA'
-          # typed: false
-          # frozen_string_literal: true
-
-          class Vecgrep < Formula
-            desc "Local-first semantic code search powered by embeddings"
-            homepage "https://github.com/abdul-hamid-achik/vecgrep"
-            license "MIT"
-          FORMULA
-
-          cat >> vecgrep.rb << EOF
-            version "${VERSION}"
-
-            on_macos do
-              if Hardware::CPU.arm?
-                url "https://github.com/abdul-hamid-achik/vecgrep/releases/download/v${VERSION}/vecgrep_${VERSION}_darwin_arm64.tar.gz"
-                sha256 "${DARWIN_ARM64_SHA}"
-              else
-                url "https://github.com/abdul-hamid-achik/vecgrep/releases/download/v${VERSION}/vecgrep_${VERSION}_darwin_amd64.tar.gz"
-                sha256 "${DARWIN_AMD64_SHA}"
-              end
-            end
-
-            on_linux do
-              if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-                url "https://github.com/abdul-hamid-achik/vecgrep/releases/download/v${VERSION}/vecgrep_${VERSION}_linux_amd64.tar.gz"
-                sha256 "${LINUX_AMD64_SHA}"
-              end
-            end
-
-            depends_on "ollama" => :optional
-
-            def install
-              bin.install "vecgrep"
-            end
-
-            test do
-              system "#{bin}/vecgrep", "--version"
-            end
-          end
-          EOF
-
-          cat vecgrep.rb
-
-          # Clone homebrew-tap and update formula
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/abdul-hamid-achik/homebrew-tap.git" tap
-          cp vecgrep.rb tap/Formula/
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/vecgrep.rb
-          git commit -m "Update vecgrep to ${VERSION}"
-          git push

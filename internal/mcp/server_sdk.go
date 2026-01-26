@@ -248,9 +248,6 @@ func (s *SDKServer) handleInit(ctx context.Context, req *sdkmcp.CallToolRequest,
 
 // activateProject opens the database and configures the server for the given project.
 func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*sdkmcp.CallToolResult, any, error) {
-	dataDir := filepath.Join(projectPath, config.DefaultDataDir)
-	dbPath := filepath.Join(dataDir, config.DefaultDBFile)
-
 	// Load config
 	cfg, err := config.Load(projectPath)
 	if err != nil {
@@ -265,12 +262,10 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 		_ = s.db.Close()
 	}
 
-	// Open database with configured vector backend
-	database, err := db.OpenWithBackend(db.OpenOptions{
-		DBPath:      dbPath,
-		Dimensions:  cfg.Embedding.Dimensions,
-		BackendType: db.VectorBackendType(cfg.Vector.Backend),
-		DataDir:     dataDir,
+	// Open database
+	database, err := db.OpenWithOptions(db.OpenOptions{
+		Dimensions: cfg.Embedding.Dimensions,
+		DataDir:    cfg.DataDir,
 	})
 	if err != nil {
 		return &sdkmcp.CallToolResult{
@@ -304,14 +299,14 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	s.searcher = search.NewSearcher(database, provider)
 	s.initialized = true
 
-	// Get sqlite-vec version
+	// Get vector backend info
 	vecVersion, _ := database.VecVersion()
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Activated vecgrep project: %s\n\n", projectPath))
 	sb.WriteString("**IMPORTANT:** Add `.vecgrep` to your `.gitignore` file.\n\n")
-	sb.WriteString(fmt.Sprintf("- Database: %s\n", dbPath))
-	sb.WriteString(fmt.Sprintf("- sqlite-vec: %s\n", vecVersion))
+	sb.WriteString(fmt.Sprintf("- Data dir: %s\n", cfg.DataDir))
+	sb.WriteString(fmt.Sprintf("- Vector backend: %s\n", vecVersion))
 	sb.WriteString(fmt.Sprintf("- Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model))
 
 	// Get stats

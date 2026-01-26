@@ -62,10 +62,12 @@ func setupTestIndexer(t *testing.T) (*Indexer, *db.DB, string) {
 
 	// Create temp directory for database
 	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
 
 	// Open database
-	database, err := db.Open(dbPath, 768)
+	database, err := db.OpenWithOptions(db.OpenOptions{
+		Dimensions: 768,
+		DataDir:    tmpDir,
+	})
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}

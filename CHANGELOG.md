@@ -5,12 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **BREAKING**: Migrated to pure veclite storage - all data (files, chunks, metadata) now stored in veclite
+- Removed SQLite entirely - no CGO required for any operations
+- Simplified database architecture - single data store instead of SQLite + veclite hybrid
+- Cross-compilation now works for all platforms (linux/darwin/windows on amd64/arm64)
+- Simplified release workflow - single GoReleaser job for all platforms
+
+### Removed
+- SQLite dependency and all related code
+- sqlite-vec backend (replaced by pure veclite)
+- sqlc code generation (no SQL needed)
+- CGO requirement from build process
+
+### Migration
+- **Existing users must re-index after upgrading:**
+  ```bash
+  vecgrep reset --force
+  vecgrep index
+  ```
+  The database format has changed and old indexes are not compatible.
+
 ## [0.3.1] - 2025-01-21
 
 ### Added
 - Hierarchical configuration system with multiple config sources
 - Global project registry for managing multiple projects
-- Pluggable vector backends (sqlite-vec, veclite with HNSW)
+- VecLite backend with HNSW indexing
 - Database migration support for schema upgrades
 - CHANGELOG.md with version history
 - CONTRIBUTING.md with contribution guidelines

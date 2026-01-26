@@ -45,7 +45,7 @@ ollama pull nomic-embed-text
 task              # List all available tasks
 task build        # Build the binary
 task test         # Run tests
-task gen          # Generate code (sqlc, templ, css)
+task gen          # Generate code (templ, css)
 task clean        # Remove build artifacts
 ```
 
@@ -82,7 +82,7 @@ vecgrep follows a layered architecture with clear separation of concerns:
 ┌───────────────┐                          ┌───────────────┐
 │   Embedding   │                          │   Database    │
 │ internal/embed│                          │  internal/db  │
-│(Ollama/OpenAI)│                          │ (SQLite+vec)  │
+│(Ollama/OpenAI)│                          │  (veclite)    │
 └───────────────┘                          └───────────────┘
 ```
 
@@ -128,19 +128,16 @@ Hierarchical configuration system with multiple sources:
 7. Built-in defaults
 
 ### `internal/db/`
-SQLite database layer with sqlc-generated code:
-- `schema.sql` - Database schema definition
-- `queries.sql` - SQL queries for sqlc
-- `db.go` - Database operations and connection management
-- `vector_backend.go` - Pluggable vector backend interface
-- `sqlite_vec_backend.go` - sqlite-vec implementation
-- `veclite_backend.go` - VecLite HNSW implementation
-- `generated/` - sqlc-generated Go code
+Pure veclite database layer (no SQLite, no CGO):
+- `db.go` - Database operations and wrapper
+- `vector_backend.go` - Vector backend interface
+- `veclite_backend.go` - VecLite HNSW implementation with full metadata storage
 
-**Tables:**
-- `files` - Indexed files with hash for change detection
-- `chunks` - Code chunks with content, type, and language
-- `embeddings` - Vector embeddings linked to chunks
+**Data Model:**
+All data is stored in veclite vector payloads:
+- File info: path, hash, size, language
+- Chunk info: content, lines, type, symbol name
+- Project info: root path, indexed timestamp
 
 ### `internal/embed/`
 Embedding provider implementations:
@@ -279,20 +276,22 @@ case "vecgrep_newtool":
 
 4. Update README.md MCP section
 
-### Modifying Database Schema
+### Modifying the Data Model
 
-1. Edit `internal/db/schema.sql` for table changes
+The database uses veclite with all metadata stored in vector payloads.
 
-2. Edit `internal/db/queries.sql` for new queries
+1. Update the `ChunkRecord` struct in `internal/db/veclite_backend.go`
 
-3. Run code generation:
+2. Update the payload construction in `InsertChunk()`
+
+3. Update the payload extraction in `recordToChunk()`
+
+4. Run tests to ensure compatibility:
 ```bash
-task gen:sqlc
+task test
 ```
 
-4. Update Go code using the new generated types
-
-5. Add migration logic if needed for existing databases
+5. Note: Existing indexes may need to be rebuilt after schema changes
 
 ---
 
@@ -368,12 +367,10 @@ task ship  # Runs full CI pipeline locally
 | Command | Regenerates |
 |---------|-------------|
 | `task gen` | All generated code |
-| `task gen:sqlc` | Database code from SQL |
 | `task gen:templ` | Go code from .templ files |
 | `task gen:css` | Tailwind CSS |
 
 Always run `task gen` after modifying:
-- `internal/db/*.sql`
 - `internal/web/templates/*.templ`
 - `assets/css/input.css`
 

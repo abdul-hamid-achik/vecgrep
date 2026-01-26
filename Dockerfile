@@ -15,18 +15,16 @@ COPY internal/web/templates ./internal/web/templates/
 RUN npx @tailwindcss/cli -i ./assets/css/input.css -o ./output.css --minify
 
 # =============================================================================
-# Stage 2: Build Go binary (Debian for sqlite-vec glibc compatibility)
+# Stage 2: Build Go binary (Alpine - no CGO needed)
 # =============================================================================
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.25-alpine AS builder
 
 # Build args for version info
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libc6-dev libsqlite3-dev \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache git
 
 RUN go install github.com/a-h/templ/cmd/templ@latest
 
@@ -40,7 +38,7 @@ COPY --from=tailwind /build/output.css ./internal/web/static/css/output.css
 
 RUN templ generate
 
-ENV CGO_ENABLED=1
+ENV CGO_ENABLED=0
 RUN go build -trimpath -ldflags="-s -w \
     -X github.com/abdul-hamid-achik/vecgrep/internal/version.Version=${VERSION} \
     -X github.com/abdul-hamid-achik/vecgrep/internal/version.Commit=${COMMIT} \
@@ -50,12 +48,10 @@ RUN go build -trimpath -ldflags="-s -w \
 # =============================================================================
 # Stage 3: Runtime (Alpine for minimal size)
 # =============================================================================
-FROM debian:bookworm-slim
+FROM alpine:3.21
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd -r -u 1000 -m vecgrep \
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -u 1000 vecgrep \
     && mkdir -p /data \
     && chown vecgrep:vecgrep /data
 

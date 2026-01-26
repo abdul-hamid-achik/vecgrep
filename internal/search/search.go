@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
@@ -41,10 +40,10 @@ type SearchOptions struct {
 
 // SimilarOptions configures similar code search behavior.
 type SimilarOptions struct {
-	SearchOptions         // Embed existing options: Limit, Language, ChunkType, FilePattern
-	ExcludeSameFile bool  // Exclude results from same file as source
-	ExcludeSourceID bool  // Exclude the source chunk itself (default: true when using By ID/Location)
-	SourceFileID    int64 // Internal: file ID of source chunk for same-file exclusion
+	SearchOptions          // Embed existing options: Limit, Language, ChunkType, FilePattern
+	ExcludeSameFile bool   // Exclude results from same file as source
+	ExcludeSourceID bool   // Exclude the source chunk itself (default: true when using By ID/Location)
+	SourceFilePath  string // Internal: file path of source chunk for same-file exclusion
 }
 
 // DefaultSearchOptions returns sensible defaults.
@@ -85,28 +84,25 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
-	// Search for similar vectors
-	// Request more results than needed to account for filtering
-	searchLimit := opts.Limit * 3
-	if searchLimit < 50 {
-		searchLimit = 50
+	// Search for similar vectors with filtering
+	filterOpts := db.FilterOptions{
+		Language:    opts.Language,
+		ChunkType:   opts.ChunkType,
+		FilePattern: opts.FilePattern,
 	}
 
-	searchResults, err := s.db.SearchEmbeddings(queryEmbedding, searchLimit)
+	searchResults, err := s.db.SearchWithFilter(queryEmbedding, opts.Limit, filterOpts)
 	if err != nil {
 		return nil, fmt.Errorf("search embeddings: %w", err)
 	}
 
-	// Hydrate results with chunk metadata
+	// Convert to Result format
 	results := make([]Result, 0, len(searchResults))
 	for _, sr := range searchResults {
-		result, err := s.hydrateResult(sr)
-		if err != nil {
-			continue // Skip results we can't hydrate
-		}
+		result := searchResultToResult(sr)
 
-		// Apply filters
-		if !s.matchesFilters(result, opts) {
+		// Apply minimum score filter
+		if opts.MinScore > 0 && result.Score < opts.MinScore {
 			continue
 		}
 
@@ -132,27 +128,33 @@ func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts Si
 		return nil, fmt.Errorf("get embedding for chunk %d: %w", chunkID, err)
 	}
 
-	// Get source chunk's file ID for same-file exclusion
-	if opts.ExcludeSameFile && opts.SourceFileID == 0 {
-		var fileID int64
-		err := s.db.QueryRow("SELECT file_id FROM chunks WHERE id = ?", chunkID).Scan(&fileID)
-		if err == nil {
-			opts.SourceFileID = fileID
+	// Get source chunk's file path for same-file exclusion
+	if opts.ExcludeSameFile && opts.SourceFilePath == "" {
+		chunk, err := s.db.Backend().GetChunkByLocation("", 0) // Will need to find by ID
+		if err == nil && chunk != nil {
+			opts.SourceFilePath = chunk.RelativePath
 		}
 	}
 
-	// Search for similar vectors (request more to account for filtering)
+	// Search for similar vectors
+	filterOpts := db.FilterOptions{
+		Language:    opts.Language,
+		ChunkType:   opts.ChunkType,
+		FilePattern: opts.FilePattern,
+	}
+
+	// Request more results to account for filtering
 	searchLimit := opts.Limit * 3
 	if searchLimit < 50 {
 		searchLimit = 50
 	}
 
-	searchResults, err := s.db.SearchEmbeddings(embedding, searchLimit)
+	searchResults, err := s.db.SearchWithFilter(embedding, searchLimit, filterOpts)
 	if err != nil {
 		return nil, fmt.Errorf("search embeddings: %w", err)
 	}
 
-	// Hydrate results with chunk metadata
+	// Convert to Result format
 	results := make([]Result, 0, len(searchResults))
 	for _, sr := range searchResults {
 		// Exclude source chunk by default
@@ -160,18 +162,15 @@ func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts Si
 			continue
 		}
 
-		result, err := s.hydrateResult(sr)
-		if err != nil {
-			continue
-		}
+		result := searchResultToResult(sr)
 
 		// Exclude same file if requested
-		if opts.ExcludeSameFile && result.FileID == opts.SourceFileID {
+		if opts.ExcludeSameFile && result.RelativePath == opts.SourceFilePath {
 			continue
 		}
 
-		// Apply standard filters
-		if !s.matchesFilters(result, opts.SearchOptions) {
+		// Apply minimum score filter
+		if opts.MinScore > 0 && result.Score < opts.MinScore {
 			continue
 		}
 
@@ -187,16 +186,18 @@ func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts Si
 
 // SearchSimilarByLocation finds code similar to the chunk at the given file:line location.
 func (s *Searcher) SearchSimilarByLocation(ctx context.Context, filePath string, line int, opts SimilarOptions) ([]Result, error) {
-	// Resolve file:line to chunk ID
-	chunkID, err := s.db.GetChunkByLocation(filePath, line)
+	// Resolve file:line to chunk
+	chunk, err := s.db.GetChunkByLocation(filePath, line)
 	if err != nil {
 		return nil, fmt.Errorf("resolve location %s:%d: %w", filePath, line, err)
 	}
 
 	// Enable source exclusion by default for location-based search
 	opts.ExcludeSourceID = true
+	opts.SourceFilePath = chunk.RelativePath
 
-	return s.SearchSimilarByID(ctx, chunkID, opts)
+	// Use the chunk's ID
+	return s.SearchSimilarByID(ctx, int64(chunk.ID), opts)
 }
 
 // SearchSimilarByText finds code similar to the given text snippet.
@@ -209,33 +210,31 @@ func (s *Searcher) SearchSimilarByText(ctx context.Context, text string, opts Si
 		opts.Limit = DefaultSearchOptions().Limit
 	}
 
-	// Generate embedding for the text (requires Ollama)
+	// Generate embedding for the text
 	embedding, err := s.provider.Embed(ctx, text)
 	if err != nil {
 		return nil, fmt.Errorf("embed text: %w", err)
 	}
 
 	// Search for similar vectors
-	searchLimit := opts.Limit * 3
-	if searchLimit < 50 {
-		searchLimit = 50
+	filterOpts := db.FilterOptions{
+		Language:    opts.Language,
+		ChunkType:   opts.ChunkType,
+		FilePattern: opts.FilePattern,
 	}
 
-	searchResults, err := s.db.SearchEmbeddings(embedding, searchLimit)
+	searchResults, err := s.db.SearchWithFilter(embedding, opts.Limit, filterOpts)
 	if err != nil {
 		return nil, fmt.Errorf("search embeddings: %w", err)
 	}
 
-	// Hydrate results with chunk metadata
+	// Convert to Result format
 	results := make([]Result, 0, len(searchResults))
 	for _, sr := range searchResults {
-		result, err := s.hydrateResult(sr)
-		if err != nil {
-			continue
-		}
+		result := searchResultToResult(sr)
 
-		// Apply standard filters
-		if !s.matchesFilters(result, opts.SearchOptions) {
+		// Apply minimum score filter
+		if opts.MinScore > 0 && result.Score < opts.MinScore {
 			continue
 		}
 
@@ -249,61 +248,27 @@ func (s *Searcher) SearchSimilarByText(ctx context.Context, text string, opts Si
 	return results, nil
 }
 
-// hydrateResult fetches full metadata for a search result.
-func (s *Searcher) hydrateResult(sr db.SearchResult) (Result, error) {
-	var result Result
-	result.ChunkID = sr.ChunkID
-	result.Distance = sr.Distance
-	result.Score = 1 - sr.Distance // Convert distance to similarity score
-
-	// Fetch chunk data
-	err := s.db.QueryRow(`
-		SELECT c.file_id, c.content, c.start_line, c.end_line, c.chunk_type, c.symbol_name,
-		       f.path, f.relative_path, f.language
-		FROM chunks c
-		JOIN files f ON c.file_id = f.id
-		WHERE c.id = ?`, sr.ChunkID).Scan(
-		&result.FileID, &result.Content, &result.StartLine, &result.EndLine,
-		&result.ChunkType, &result.SymbolName,
-		&result.FilePath, &result.RelativePath, &result.Language,
-	)
-	if err != nil {
-		return result, fmt.Errorf("fetch chunk metadata: %w", err)
+// searchResultToResult converts a db.SearchResult to search.Result.
+func searchResultToResult(sr db.SearchResult) Result {
+	result := Result{
+		ChunkID:  sr.ChunkID,
+		Distance: sr.Distance,
+		Score:    1 - sr.Distance, // Convert distance to similarity score
 	}
 
-	return result, nil
-}
-
-// matchesFilters checks if a result matches the search options filters.
-func (s *Searcher) matchesFilters(result Result, opts SearchOptions) bool {
-	// Check minimum score
-	if opts.MinScore > 0 && result.Score < opts.MinScore {
-		return false
+	// Extract metadata from chunk payload
+	if sr.Chunk != nil {
+		result.FilePath = sr.Chunk.FilePath
+		result.RelativePath = sr.Chunk.RelativePath
+		result.Content = sr.Chunk.Content
+		result.StartLine = sr.Chunk.StartLine
+		result.EndLine = sr.Chunk.EndLine
+		result.ChunkType = sr.Chunk.ChunkType
+		result.SymbolName = sr.Chunk.SymbolName
+		result.Language = sr.Chunk.Language
 	}
 
-	// Filter by language
-	if opts.Language != "" && !strings.EqualFold(result.Language, opts.Language) {
-		return false
-	}
-
-	// Filter by chunk type
-	if opts.ChunkType != "" && !strings.EqualFold(result.ChunkType, opts.ChunkType) {
-		return false
-	}
-
-	// Filter by file pattern
-	if opts.FilePattern != "" {
-		matched, err := filepath.Match(opts.FilePattern, result.RelativePath)
-		if err != nil || !matched {
-			// Also try matching against the base name
-			matched, _ = filepath.Match(opts.FilePattern, filepath.Base(result.RelativePath))
-			if !matched {
-				return false
-			}
-		}
-	}
-
-	return true
+	return result
 }
 
 // OutputFormat specifies the output format for search results.
@@ -397,55 +362,24 @@ func formatCompact(results []Result) string {
 func (s *Searcher) GetIndexStats(ctx context.Context) (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
 
-	// Get database stats
-	dbStats, err := s.db.Stats()
+	// Get detailed stats from the database
+	detailedStats, err := s.db.GetDetailedStats("")
 	if err != nil {
-		return nil, fmt.Errorf("get db stats: %w", err)
+		return nil, fmt.Errorf("get stats: %w", err)
 	}
 
-	for k, v := range dbStats {
-		stats[k] = v
-	}
+	stats["total_files"] = detailedStats.TotalFiles
+	stats["total_chunks"] = detailedStats.TotalChunks
+	stats["projects"] = detailedStats.TotalProjects
+	stats["files"] = detailedStats.TotalFiles
+	stats["chunks"] = detailedStats.TotalChunks
+	stats["embeddings"] = detailedStats.TotalChunks
 
-	// Get additional info
-	var totalFiles int64
-	var totalChunks int64
+	// Language distribution
+	stats["languages"] = detailedStats.Languages
 
-	s.db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&totalFiles)
-	s.db.QueryRow(`SELECT COUNT(*) FROM chunks`).Scan(&totalChunks)
-
-	stats["total_files"] = totalFiles
-	stats["total_chunks"] = totalChunks
-
-	// Get languages distribution
-	rows, err := s.db.Query(`SELECT language, COUNT(*) as count FROM files GROUP BY language ORDER BY count DESC`)
-	if err == nil {
-		defer rows.Close()
-		langStats := make(map[string]int64)
-		for rows.Next() {
-			var lang string
-			var count int64
-			if rows.Scan(&lang, &count) == nil {
-				langStats[lang] = count
-			}
-		}
-		stats["languages"] = langStats
-	}
-
-	// Get chunk types distribution
-	rows, err = s.db.Query(`SELECT chunk_type, COUNT(*) as count FROM chunks GROUP BY chunk_type ORDER BY count DESC`)
-	if err == nil {
-		defer rows.Close()
-		typeStats := make(map[string]int64)
-		for rows.Next() {
-			var chunkType string
-			var count int64
-			if rows.Scan(&chunkType, &count) == nil {
-				typeStats[chunkType] = count
-			}
-		}
-		stats["chunk_types"] = typeStats
-	}
+	// Chunk type distribution
+	stats["chunk_types"] = detailedStats.ChunkTypes
 
 	// Get embedding model info
 	stats["embedding_model"] = s.provider.Model()
@@ -456,28 +390,26 @@ func (s *Searcher) GetIndexStats(ctx context.Context) (map[string]interface{}, e
 
 // SearchByFile returns all chunks for a specific file.
 func (s *Searcher) SearchByFile(ctx context.Context, filePath string) ([]Result, error) {
-	rows, err := s.db.Query(`
-		SELECT c.id, c.file_id, c.content, c.start_line, c.end_line, c.chunk_type, c.symbol_name,
-		       f.path, f.relative_path, f.language
-		FROM chunks c
-		JOIN files f ON c.file_id = f.id
-		WHERE f.relative_path = ? OR f.path = ?
-		ORDER BY c.start_line`, filePath, filePath)
+	chunks, err := s.db.GetChunksByFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("query chunks: %w", err)
+		return nil, fmt.Errorf("get chunks: %w", err)
 	}
-	defer rows.Close()
 
-	var results []Result
-	for rows.Next() {
-		var r Result
-		if err := rows.Scan(&r.ChunkID, &r.FileID, &r.Content, &r.StartLine, &r.EndLine,
-			&r.ChunkType, &r.SymbolName, &r.FilePath, &r.RelativePath, &r.Language); err != nil {
-			continue
-		}
-		r.Score = 1.0 // Direct file match
-		r.Distance = 0.0
-		results = append(results, r)
+	results := make([]Result, 0, len(chunks))
+	for _, c := range chunks {
+		results = append(results, Result{
+			ChunkID:      int64(c.ID),
+			FilePath:     c.FilePath,
+			RelativePath: c.RelativePath,
+			Content:      c.Content,
+			StartLine:    c.StartLine,
+			EndLine:      c.EndLine,
+			ChunkType:    c.ChunkType,
+			SymbolName:   c.SymbolName,
+			Language:     c.Language,
+			Score:        1.0, // Direct file match
+			Distance:     0.0,
+		})
 	}
 
 	return results, nil

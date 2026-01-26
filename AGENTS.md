@@ -23,9 +23,8 @@ internal/
     config.go       # Core config types and loading
     resolution.go   # Multi-level config resolution
     global.go       # Global project registry (~/.vecgrep/)
-  db/               # SQLite database with sqlc-generated code
-    vector_backend.go      # Pluggable vector backend interface
-    sqlite_vec_backend.go  # sqlite-vec implementation
+  db/               # Pure veclite vector database (no SQL)
+    vector_backend.go      # Vector backend interface
     veclite_backend.go     # VecLite HNSW implementation
   embed/            # Embedding providers (Ollama, OpenAI)
   index/            # File indexer and chunker
@@ -48,19 +47,18 @@ task dev          # Hot reload development (air + CSS watch)
 task check        # Run fmt, lint, test (use before commits)
 task build        # Build binary to ./bin/vecgrep
 task test         # Run tests
-task gen          # Generate code (sqlc, templ, CSS)
+task gen          # Generate code (templ, CSS)
 ```
 
 ## Prerequisites
 
-1. **Go 1.25+** with CGO enabled
+1. **Go 1.25+**
 2. **Ollama** running locally with `nomic-embed-text` model
-3. **Dev tools**: templ, air, sqlc (installed via `task setup:tools`)
+3. **Dev tools**: templ, air (installed via `task setup:tools`)
 
 ## Code Generation
 
 This project uses code generation. Always run `task gen` after modifying:
-- `internal/db/*.sql` - regenerates sqlc code
 - `internal/web/templates/*.templ` - regenerates Go template code
 - `assets/css/input.css` or templates - rebuilds Tailwind CSS
 
@@ -80,8 +78,8 @@ Tests that require Ollama are skipped if it's not running.
 ### Embedding Flow
 1. Files are chunked by `internal/index/chunker.go` (language-aware)
 2. Chunks are embedded via `internal/embed/ollama.go`
-3. Embeddings stored in SQLite with `internal/db/db.go`
-4. Search uses cosine similarity in `internal/search/search.go`
+3. Embeddings and metadata stored in veclite via `internal/db/db.go`
+4. Search uses vector similarity in `internal/search/search.go`
 
 ### MCP Server
 The MCP implementation in `internal/mcp/server_sdk.go` provides:
@@ -117,10 +115,11 @@ See `internal/config/resolution.go` for the full resolution logic.
 1. Add tool definition and handler in `internal/mcp/server_sdk.go`
 2. Update README.md MCP section
 
-### Modifying the database schema
-1. Edit SQL in `internal/db/schema.sql` and `internal/db/queries.sql`
-2. Run `task gen:sqlc`
-3. Update code using the generated types
+### Modifying the data model
+1. Update the `ChunkRecord` struct in `internal/db/veclite_backend.go`
+2. Update payload construction in `InsertChunk()` and extraction in `recordToChunk()`
+3. Run tests to ensure compatibility
+4. Note: Existing indexes may need to be rebuilt after schema changes
 
 ### Modifying web templates
 1. Edit `.templ` files in `internal/web/templates/`
@@ -144,7 +143,7 @@ Return errors up the call stack; let the CLI handle user-facing messages.
 Access config via the `config.Load()` function. Don't hardcode paths.
 
 ### Database
-Use the sqlc-generated functions in `internal/db/`. Don't write raw SQL in Go code.
+Use the methods in `internal/db/db.go`. All data is stored in veclite vector payloads.
 
 ### Embedding Provider
 The `embed.Provider` interface allows for multiple provider implementations:
