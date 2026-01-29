@@ -149,6 +149,8 @@ func TestSearch_Basic(t *testing.T) {
 	provider := newMockProvider(768)
 	searcher := NewSearcher(database, provider)
 
+	// Default hybrid mode - should find results based on vector similarity
+	// with text matching providing a boost for exact matches
 	results, err := searcher.Search(context.Background(), "error handling", DefaultSearchOptions())
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)

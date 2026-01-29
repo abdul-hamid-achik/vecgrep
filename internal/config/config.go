@@ -30,11 +30,24 @@ type Config struct {
 	// Indexing configuration
 	Indexing IndexingConfig `mapstructure:"indexing" yaml:"indexing,omitempty"`
 
+	// Search configuration
+	Search SearchConfig `mapstructure:"search" yaml:"search,omitempty"`
+
 	// Server configuration
 	Server ServerConfig `mapstructure:"server" yaml:"server,omitempty"`
 
 	// Vector configuration
 	Vector VectorConfig `mapstructure:"vector" yaml:"vector,omitempty"`
+}
+
+// SearchConfig holds search-related settings
+type SearchConfig struct {
+	// DefaultMode is the default search mode: "semantic", "keyword", or "hybrid"
+	DefaultMode string `mapstructure:"default_mode" yaml:"default_mode,omitempty"`
+	// VectorWeight is the weight for vector similarity in hybrid search (0-1)
+	VectorWeight float32 `mapstructure:"vector_weight" yaml:"vector_weight,omitempty"`
+	// TextWeight is the weight for text matching in hybrid search (0-1)
+	TextWeight float32 `mapstructure:"text_weight" yaml:"text_weight,omitempty"`
 }
 
 // VectorConfig holds vector backend settings
@@ -117,6 +130,11 @@ func DefaultConfig() *Config {
 				"yarn.lock",
 			},
 			MaxFileSize: 1024 * 1024, // 1MB
+		},
+		Search: SearchConfig{
+			DefaultMode:  "hybrid", // Default to hybrid search
+			VectorWeight: 0.7,      // 70% vector similarity
+			TextWeight:   0.3,      // 30% text matching
 		},
 		Server: ServerConfig{
 			Host:       "localhost",

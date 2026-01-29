@@ -230,8 +230,14 @@ func init() {
 	searchCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
 	searchCmd.Flags().StringP("format", "f", "default", "output format (default, json, compact)")
 	searchCmd.Flags().StringP("lang", "l", "", "filter by programming language")
+	searchCmd.Flags().StringSlice("languages", nil, "filter by multiple languages (comma-separated)")
 	searchCmd.Flags().StringP("type", "t", "", "filter by chunk type (function, class, block)")
+	searchCmd.Flags().StringSlice("types", nil, "filter by multiple chunk types (comma-separated)")
 	searchCmd.Flags().String("file", "", "filter by file pattern (glob)")
+	searchCmd.Flags().String("dir", "", "filter by directory prefix")
+	searchCmd.Flags().String("lines", "", "filter by line range (e.g., '1-100')")
+	searchCmd.Flags().StringP("mode", "m", "hybrid", "search mode: semantic, keyword, or hybrid")
+	searchCmd.Flags().Bool("explain", false, "show search diagnostics")
 
 	// Serve command flags
 	serveCmd.Flags().IntP("port", "p", 8080, "server port")
@@ -243,8 +249,12 @@ func init() {
 	similarCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
 	similarCmd.Flags().StringP("format", "f", "default", "output format (default, json, compact)")
 	similarCmd.Flags().StringP("lang", "l", "", "filter by programming language")
+	similarCmd.Flags().StringSlice("languages", nil, "filter by multiple languages (comma-separated)")
 	similarCmd.Flags().StringP("type", "t", "", "filter by chunk type (function, class, block)")
+	similarCmd.Flags().StringSlice("types", nil, "filter by multiple chunk types (comma-separated)")
 	similarCmd.Flags().String("file", "", "filter by file pattern (glob)")
+	similarCmd.Flags().String("dir", "", "filter by directory prefix")
+	similarCmd.Flags().String("lines", "", "filter by line range (e.g., '1-100')")
 	similarCmd.Flags().Bool("exclude-same-file", false, "exclude results from the same file as the source")
 	similarCmd.Flags().StringP("text", "T", "", "find code similar to this text snippet")
 
@@ -550,29 +560,105 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	format, _ := cmd.Flags().GetString("format")
 	lang, _ := cmd.Flags().GetString("lang")
+	languages, _ := cmd.Flags().GetStringSlice("languages")
 	chunkType, _ := cmd.Flags().GetString("type")
+	chunkTypes, _ := cmd.Flags().GetStringSlice("types")
 	filePattern, _ := cmd.Flags().GetString("file")
+	directory, _ := cmd.Flags().GetString("dir")
+	linesRange, _ := cmd.Flags().GetString("lines")
+	modeStr, _ := cmd.Flags().GetString("mode")
+	explain, _ := cmd.Flags().GetBool("explain")
+
+	// Parse line range
+	var minLine, maxLine int
+	if linesRange != "" {
+		minLine, maxLine = parseLineRange(linesRange)
+	}
+
+	// Parse search mode
+	mode := parseSearchMode(modeStr, cfg.Search.DefaultMode)
 
 	// Create searcher
 	searcher := search.NewSearcher(database, provider)
 
 	// Build search options
 	opts := search.SearchOptions{
-		Limit:       limit,
-		Language:    lang,
-		ChunkType:   chunkType,
-		FilePattern: filePattern,
-		ProjectRoot: projectRoot,
+		Limit:        limit,
+		Language:     lang,
+		Languages:    languages,
+		ChunkType:    chunkType,
+		ChunkTypes:   chunkTypes,
+		FilePattern:  filePattern,
+		Directory:    directory,
+		MinLine:      minLine,
+		MaxLine:      maxLine,
+		ProjectRoot:  projectRoot,
+		Mode:         mode,
+		VectorWeight: cfg.Search.VectorWeight,
+		TextWeight:   cfg.Search.TextWeight,
+		Explain:      explain,
 	}
 
 	// Perform search
 	ctx := context.Background()
-	results, err := searcher.Search(ctx, query, opts)
-	if err != nil {
-		return fmt.Errorf("search failed: %w", err)
+
+	if explain {
+		results, explanation, err := searcher.SearchWithExplain(ctx, query, opts)
+		if err != nil {
+			return fmt.Errorf("search failed: %w", err)
+		}
+
+		// Print explanation
+		fmt.Printf("Search Diagnostics:\n")
+		fmt.Printf("  Index type: %s\n", explanation.IndexType)
+		fmt.Printf("  Nodes visited: %d\n", explanation.NodesVisited)
+		fmt.Printf("  Duration: %v\n", explanation.Duration)
+		fmt.Printf("  Mode: %s\n", explanation.Mode)
+		fmt.Println()
+
+		// Print results
+		printSearchResults(results, format)
+	} else {
+		results, err := searcher.Search(ctx, query, opts)
+		if err != nil {
+			return fmt.Errorf("search failed: %w", err)
+		}
+		printSearchResults(results, format)
 	}
 
-	// Format and print results
+	return nil
+}
+
+// parseLineRange parses a line range string like "1-100" into min and max values.
+func parseLineRange(rangeStr string) (int, int) {
+	parts := strings.Split(rangeStr, "-")
+	if len(parts) != 2 {
+		return 0, 0
+	}
+	min, _ := strconv.Atoi(parts[0])
+	max, _ := strconv.Atoi(parts[1])
+	return min, max
+}
+
+// parseSearchMode converts a mode string to SearchMode type.
+func parseSearchMode(modeStr, defaultMode string) search.SearchMode {
+	if modeStr == "" {
+		modeStr = defaultMode
+	}
+	switch strings.ToLower(modeStr) {
+	case "semantic":
+		return search.SearchModeSemantic
+	case "keyword":
+		return search.SearchModeKeyword
+	case "hybrid":
+		return search.SearchModeHybrid
+	default:
+		return search.SearchModeHybrid
+	}
+}
+
+// printSearchResults formats and prints search results.
+func printSearchResults(results []search.Result, format string) {
 	var outputFormat search.OutputFormat
 	switch format {
 	case "json":
@@ -584,8 +670,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Print(search.FormatResults(results, outputFormat))
-
-	return nil
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -944,9 +1028,19 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	format, _ := cmd.Flags().GetString("format")
 	lang, _ := cmd.Flags().GetString("lang")
+	languages, _ := cmd.Flags().GetStringSlice("languages")
 	chunkType, _ := cmd.Flags().GetString("type")
+	chunkTypes, _ := cmd.Flags().GetStringSlice("types")
 	filePattern, _ := cmd.Flags().GetString("file")
+	directory, _ := cmd.Flags().GetString("dir")
+	linesRange, _ := cmd.Flags().GetString("lines")
 	excludeSameFile, _ := cmd.Flags().GetBool("exclude-same-file")
+
+	// Parse line range
+	var minLine, maxLine int
+	if linesRange != "" {
+		minLine, maxLine = parseLineRange(linesRange)
+	}
 
 	// Validate input: either text flag or positional argument required
 	if textSnippet == "" && len(args) == 0 {
@@ -989,8 +1083,13 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 		SearchOptions: search.SearchOptions{
 			Limit:       limit,
 			Language:    lang,
+			Languages:   languages,
 			ChunkType:   chunkType,
+			ChunkTypes:  chunkTypes,
 			FilePattern: filePattern,
+			Directory:   directory,
+			MinLine:     minLine,
+			MaxLine:     maxLine,
 			ProjectRoot: projectRoot,
 		},
 		ExcludeSameFile: excludeSameFile,
@@ -1031,17 +1130,7 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 	}
 
 	// Format and print results
-	var outputFormat search.OutputFormat
-	switch format {
-	case "json":
-		outputFormat = search.FormatJSON
-	case "compact":
-		outputFormat = search.FormatCompact
-	default:
-		outputFormat = search.FormatDefault
-	}
-
-	fmt.Print(search.FormatResults(results, outputFormat))
+	printSearchResults(results, format)
 
 	return nil
 }

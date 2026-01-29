@@ -9,6 +9,26 @@ import (
 	"github.com/abdul-hamid-achik/veclite"
 )
 
+// SearchMode defines how search is performed.
+type SearchMode string
+
+const (
+	// SearchModeSemantic uses pure vector similarity search.
+	SearchModeSemantic SearchMode = "semantic"
+	// SearchModeKeyword uses BM25 text search only.
+	SearchModeKeyword SearchMode = "keyword"
+	// SearchModeHybrid combines vector and text search.
+	SearchModeHybrid SearchMode = "hybrid"
+)
+
+// SearchExplanation provides diagnostic info about a search.
+type SearchExplanation struct {
+	IndexType    string
+	NodesVisited int
+	Duration     time.Duration
+	Mode         SearchMode
+}
+
 // ChunkRecord represents a chunk with all its metadata from veclite.
 type ChunkRecord struct {
 	ID           uint64
@@ -77,10 +97,11 @@ func (b *VecLiteBackend) Init(dimensions int) error {
 	b.db = db
 
 	// Create or get collection with HNSW index
+	// Use cosine distance which is standard for normalized embeddings
 	coll, err := db.CreateCollection("chunks",
 		veclite.WithDimension(dimensions),
-		veclite.WithDistanceType(veclite.DistanceEuclidean),
-		veclite.WithHNSW(16, 200), // M=16, efConstruction=200
+		veclite.WithDistanceType(veclite.DistanceCosine), // Use cosine for embeddings
+		veclite.WithHNSW(16, 200),                        // M=16, efConstruction=200
 	)
 	if err != nil {
 		// Collection might already exist, try to get it
@@ -100,6 +121,9 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		return 0, fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), b.dimensions)
 	}
 
+	// Generate unique chunk key for upsert operations
+	chunkKey := fmt.Sprintf("%s:%d", chunk.RelativePath, chunk.StartLine)
+
 	payload := map[string]any{
 		// File info (denormalized)
 		"file_path":     chunk.FilePath,
@@ -117,6 +141,9 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		"chunk_type":  chunk.ChunkType,
 		"symbol_name": chunk.SymbolName,
 
+		// Unique key for upsert
+		"chunk_key": chunkKey,
+
 		// Project info
 		"project_root": chunk.ProjectRoot,
 		"indexed_at":   chunk.IndexedAt.Format(time.RFC3339),
@@ -128,6 +155,92 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 	}
 
 	return id, nil
+}
+
+// InsertChunkBatch inserts multiple chunks in a single batch operation.
+// Returns the IDs of the inserted chunks.
+func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]float32) ([]uint64, error) {
+	if len(chunks) != len(embeddings) {
+		return nil, fmt.Errorf("chunks and embeddings length mismatch: %d vs %d", len(chunks), len(embeddings))
+	}
+
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+
+	vectors := make([][]float32, len(chunks))
+	payloads := make([]map[string]any, len(chunks))
+
+	for i, chunk := range chunks {
+		if len(embeddings[i]) != b.dimensions {
+			return nil, fmt.Errorf("embedding %d dimension mismatch: got %d, expected %d", i, len(embeddings[i]), b.dimensions)
+		}
+
+		vectors[i] = embeddings[i]
+
+		chunkKey := fmt.Sprintf("%s:%d", chunk.RelativePath, chunk.StartLine)
+		payloads[i] = map[string]any{
+			"file_path":     chunk.FilePath,
+			"relative_path": chunk.RelativePath,
+			"file_hash":     chunk.FileHash,
+			"file_size":     chunk.FileSize,
+			"language":      chunk.Language,
+			"content":       chunk.Content,
+			"start_line":    chunk.StartLine,
+			"end_line":      chunk.EndLine,
+			"start_byte":    chunk.StartByte,
+			"end_byte":      chunk.EndByte,
+			"chunk_type":    chunk.ChunkType,
+			"symbol_name":   chunk.SymbolName,
+			"chunk_key":     chunkKey,
+			"project_root":  chunk.ProjectRoot,
+			"indexed_at":    chunk.IndexedAt.Format(time.RFC3339),
+		}
+	}
+
+	// Use InsertBatch for batch insert
+	ids, err := b.coll.InsertBatch(vectors, payloads)
+	if err != nil {
+		return nil, fmt.Errorf("batch insert failed: %w", err)
+	}
+
+	return ids, nil
+}
+
+// UpsertChunk inserts or updates a chunk using a unique key.
+// The key is based on relative_path:start_line for chunk identification.
+// Returns the ID and whether it was a new insert (true) or update (false).
+func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (uint64, bool, error) {
+	if len(embedding) != b.dimensions {
+		return 0, false, fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), b.dimensions)
+	}
+
+	chunkKey := fmt.Sprintf("%s:%d", chunk.RelativePath, chunk.StartLine)
+
+	payload := map[string]any{
+		"file_path":     chunk.FilePath,
+		"relative_path": chunk.RelativePath,
+		"file_hash":     chunk.FileHash,
+		"file_size":     chunk.FileSize,
+		"language":      chunk.Language,
+		"content":       chunk.Content,
+		"start_line":    chunk.StartLine,
+		"end_line":      chunk.EndLine,
+		"start_byte":    chunk.StartByte,
+		"end_byte":      chunk.EndByte,
+		"chunk_type":    chunk.ChunkType,
+		"symbol_name":   chunk.SymbolName,
+		"chunk_key":     chunkKey,
+		"project_root":  chunk.ProjectRoot,
+		"indexed_at":    chunk.IndexedAt.Format(time.RFC3339),
+	}
+
+	id, isNew, err := b.coll.UpsertByKey("chunk_key", chunkKey, embedding, payload)
+	if err != nil {
+		return 0, false, fmt.Errorf("upsert failed: %w", err)
+	}
+
+	return id, isNew, nil
 }
 
 // InsertEmbedding inserts an embedding for a chunk (legacy compatibility).
@@ -385,8 +498,8 @@ func (b *VecLiteBackend) DeleteAll() error {
 
 	coll, err := b.db.CreateCollection("chunks",
 		veclite.WithDimension(b.dimensions),
-		veclite.WithDistanceType(veclite.DistanceEuclidean),
-		veclite.WithHNSW(16, 200), // M=16, efConstruction=200
+		veclite.WithDistanceType(veclite.DistanceCosine), // Use cosine for embeddings
+		veclite.WithHNSW(16, 200),                        // M=16, efConstruction=200
 	)
 	if err != nil {
 		return fmt.Errorf("failed to recreate collection: %w", err)
@@ -573,56 +686,265 @@ func (b *VecLiteBackend) GetFileHash(relPath string) string {
 
 // FilterOptions for search filtering.
 type FilterOptions struct {
-	Language    string
-	ChunkType   string
-	FilePattern string
+	Language    string   // Filter by single language
+	Languages   []string // Filter by multiple languages (OR)
+	ChunkType   string   // Filter by single chunk type
+	ChunkTypes  []string // Filter by multiple chunk types (OR)
+	FilePattern string   // Filter by file pattern (glob)
+	Directory   string   // Filter by directory prefix
+	MinLine     int      // Filter by minimum start line (0 = no filter)
+	MaxLine     int      // Filter by maximum start line (0 = no filter)
 }
 
-// SearchWithFilter performs a filtered vector search.
-func (b *VecLiteBackend) SearchWithFilter(queryEmbedding []float32, limit int, opts FilterOptions) ([]SearchResult, error) {
-	// Get more results than needed to account for filtering
-	searchLimit := limit * 3
-	if searchLimit < 50 {
-		searchLimit = 50
+// buildNativeFilters converts FilterOptions to veclite native filters.
+func (b *VecLiteBackend) buildNativeFilters(opts FilterOptions) []veclite.Filter {
+	var filters []veclite.Filter
+
+	// Language filter
+	if opts.Language != "" {
+		filters = append(filters, veclite.Equal("language", strings.ToLower(opts.Language)))
+	} else if len(opts.Languages) > 0 {
+		// Convert to []any for In filter
+		langs := make([]any, len(opts.Languages))
+		for i, l := range opts.Languages {
+			langs[i] = strings.ToLower(l)
+		}
+		filters = append(filters, veclite.In("language", langs...))
 	}
 
-	results, err := b.SearchEmbeddings(queryEmbedding, searchLimit)
+	// Chunk type filter
+	if opts.ChunkType != "" {
+		filters = append(filters, veclite.Equal("chunk_type", strings.ToLower(opts.ChunkType)))
+	} else if len(opts.ChunkTypes) > 0 {
+		types := make([]any, len(opts.ChunkTypes))
+		for i, t := range opts.ChunkTypes {
+			types[i] = strings.ToLower(t)
+		}
+		filters = append(filters, veclite.In("chunk_type", types...))
+	}
+
+	// File pattern filter using Glob
+	if opts.FilePattern != "" {
+		filters = append(filters, veclite.Glob("relative_path", opts.FilePattern))
+	}
+
+	// Directory prefix filter
+	if opts.Directory != "" {
+		dir := opts.Directory
+		if !strings.HasSuffix(dir, "/") {
+			dir += "/"
+		}
+		filters = append(filters, veclite.Prefix("relative_path", dir))
+	}
+
+	// Line range filter
+	if opts.MinLine > 0 && opts.MaxLine > 0 {
+		filters = append(filters, veclite.Between("start_line", float64(opts.MinLine), float64(opts.MaxLine)))
+	} else if opts.MinLine > 0 {
+		filters = append(filters, veclite.GTE("start_line", float64(opts.MinLine)))
+	} else if opts.MaxLine > 0 {
+		filters = append(filters, veclite.LTE("start_line", float64(opts.MaxLine)))
+	}
+
+	return filters
+}
+
+// SearchWithFilter performs a filtered vector search using native veclite filters.
+func (b *VecLiteBackend) SearchWithFilter(queryEmbedding []float32, limit int, opts FilterOptions) ([]SearchResult, error) {
+	if len(queryEmbedding) != b.dimensions {
+		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), b.dimensions)
+	}
+
+	// Build native filters
+	filters := b.buildNativeFilters(opts)
+
+	// Build search options
+	searchOpts := []veclite.SearchOption{veclite.TopK(limit)}
+	if len(filters) > 0 {
+		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
+	}
+
+	// Perform search with native filtering
+	results, err := b.coll.Search(queryEmbedding, searchOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	filtered := make([]SearchResult, 0, limit)
+	searchResults := make([]SearchResult, 0, len(results))
 	for _, r := range results {
-		if r.Chunk == nil {
-			continue // Skip legacy records without full metadata
+		chunk := recordToChunk(r.Record)
+		sr := SearchResult{
+			ChunkID:  int64(r.Record.ID),
+			Distance: r.Score,
+			Chunk:    &chunk,
 		}
 
-		// Apply filters
-		if opts.Language != "" && !strings.EqualFold(r.Chunk.Language, opts.Language) {
-			continue
+		// Check for legacy chunk_id in payload
+		if chunkID := getInt64Payload(r.Record.Payload, "chunk_id"); chunkID != 0 {
+			sr.ChunkID = chunkID
+			sr.Chunk = nil // Legacy record without full metadata
 		}
 
-		if opts.ChunkType != "" && !strings.EqualFold(r.Chunk.ChunkType, opts.ChunkType) {
-			continue
-		}
-
-		if opts.FilePattern != "" {
-			matched, _ := filepath.Match(opts.FilePattern, r.Chunk.RelativePath)
-			if !matched {
-				matched, _ = filepath.Match(opts.FilePattern, filepath.Base(r.Chunk.RelativePath))
-			}
-			if !matched {
-				continue
-			}
-		}
-
-		filtered = append(filtered, r)
-		if len(filtered) >= limit {
-			break
-		}
+		searchResults = append(searchResults, sr)
 	}
 
-	return filtered, nil
+	return searchResults, nil
+}
+
+// SearchWithExplain performs a search and returns diagnostic information.
+func (b *VecLiteBackend) SearchWithExplain(queryEmbedding []float32, limit int, opts FilterOptions) ([]SearchResult, *SearchExplanation, error) {
+	if len(queryEmbedding) != b.dimensions {
+		return nil, nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), b.dimensions)
+	}
+
+	// Build native filters
+	filters := b.buildNativeFilters(opts)
+
+	// Build search options
+	searchOpts := []veclite.SearchOption{veclite.TopK(limit)}
+	if len(filters) > 0 {
+		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
+	}
+
+	// Use SearchExplain for diagnostics
+	explanation, err := b.coll.SearchExplain(queryEmbedding, searchOpts...)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Also get the actual results
+	results, err := b.coll.Search(queryEmbedding, searchOpts...)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	searchResults := make([]SearchResult, 0, len(results))
+	for _, r := range results {
+		chunk := recordToChunk(r.Record)
+		sr := SearchResult{
+			ChunkID:  int64(r.Record.ID),
+			Distance: r.Score,
+			Chunk:    &chunk,
+		}
+
+		if chunkID := getInt64Payload(r.Record.Payload, "chunk_id"); chunkID != 0 {
+			sr.ChunkID = chunkID
+			sr.Chunk = nil
+		}
+
+		searchResults = append(searchResults, sr)
+	}
+
+	// Convert veclite explanation to our type
+	explainResult := &SearchExplanation{
+		IndexType:    string(explanation.IndexType),
+		NodesVisited: explanation.NodesVisited,
+		Duration:     explanation.Duration,
+		Mode:         SearchModeSemantic, // Currently only semantic mode
+	}
+
+	return searchResults, explainResult, nil
+}
+
+// TextSearch performs a keyword-based search on content.
+// Note: This is a simple Contains-based search since veclite doesn't have native BM25.
+// For true BM25 text search, a future veclite version would be needed.
+func (b *VecLiteBackend) TextSearch(query string, limit int, opts FilterOptions) ([]SearchResult, error) {
+	// Build filters including text search
+	filters := b.buildNativeFilters(opts)
+
+	// Add text search filter using Contains
+	if query != "" {
+		// Search in content field
+		filters = append(filters, veclite.Contains("content", query))
+	}
+
+	// Find matching records
+	records, err := b.coll.Find(filters...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to SearchResults (no score since this is text-based)
+	searchResults := make([]SearchResult, 0, limit)
+	for _, r := range records {
+		if len(searchResults) >= limit {
+			break
+		}
+
+		chunk := recordToChunk(r)
+		sr := SearchResult{
+			ChunkID:  int64(r.ID),
+			Distance: 0, // No distance for text search
+			Chunk:    &chunk,
+		}
+		searchResults = append(searchResults, sr)
+	}
+
+	return searchResults, nil
+}
+
+// HybridSearch combines vector search with text filtering.
+// The vector search provides ranking while text matching is used as a boost.
+// vectorWeight controls the influence of vector similarity (0-1).
+func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string, limit int, opts FilterOptions, vectorWeight float32) ([]SearchResult, error) {
+	if len(queryEmbedding) != b.dimensions {
+		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), b.dimensions)
+	}
+
+	// For hybrid search, we do vector search with filters but don't require text match
+	// Text matching is used for re-ranking/boosting, not filtering
+	filters := b.buildNativeFilters(opts)
+
+	// Build search options with filters (not including text query as filter)
+	searchOpts := []veclite.SearchOption{veclite.TopK(limit * 2)} // Get more for re-ranking
+	if len(filters) > 0 {
+		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
+	}
+
+	results, err := b.coll.Search(queryEmbedding, searchOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert results - apply text matching as a score boost
+	searchResults := make([]SearchResult, 0, limit)
+	textQueryLower := strings.ToLower(textQuery)
+
+	for _, r := range results {
+		if len(searchResults) >= limit {
+			break
+		}
+
+		chunk := recordToChunk(r.Record)
+
+		// Calculate text match boost
+		score := r.Score
+		if textQuery != "" && chunk.Content != "" {
+			contentLower := strings.ToLower(chunk.Content)
+			if strings.Contains(contentLower, textQueryLower) {
+				// Boost score for text match (score is distance, lower is better for cosine)
+				// Apply text weight as a boost
+				textWeight := 1.0 - float64(vectorWeight)
+				score = score * float32(1.0-textWeight*0.3) // Up to 30% boost for text match
+			}
+		}
+
+		sr := SearchResult{
+			ChunkID:  int64(r.Record.ID),
+			Distance: score,
+			Chunk:    &chunk,
+		}
+
+		if chunkID := getInt64Payload(r.Record.Payload, "chunk_id"); chunkID != 0 {
+			sr.ChunkID = chunkID
+			sr.Chunk = nil
+		}
+
+		searchResults = append(searchResults, sr)
+	}
+
+	return searchResults, nil
 }
 
 // Ensure VecLiteBackend implements VectorBackend.

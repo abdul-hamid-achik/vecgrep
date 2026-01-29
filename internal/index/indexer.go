@@ -240,7 +240,7 @@ func (idx *Indexer) indexWorker(ctx context.Context, projectRoot string, files <
 	}
 }
 
-// indexFile indexes a single file.
+// indexFile indexes a single file using batch operations for efficiency.
 func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file fileInfo) (int, error) {
 	// Read file content
 	content, err := os.ReadFile(file.path)
@@ -265,7 +265,7 @@ func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file file
 		return 0, nil
 	}
 
-	// Process chunks in batches for embedding
+	// Process chunks in batches for embedding and insert
 	var totalChunks int
 	for i := 0; i < len(chunks); i += idx.config.BatchSize {
 		end := i + idx.config.BatchSize
@@ -280,13 +280,16 @@ func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file file
 			texts[j] = chunk.Content
 		}
 
-		// Generate embeddings
+		// Generate embeddings in batch
 		embeddings, err := idx.provider.EmbedBatch(ctx, texts)
 		if err != nil {
 			return totalChunks, fmt.Errorf("embed batch: %w", err)
 		}
 
-		// Insert chunks with embeddings into veclite
+		// Build chunk records for batch insert
+		records := make([]db.ChunkRecord, 0, len(batch))
+		validEmbeddings := make([][]float32, 0, len(batch))
+
 		for j, chunk := range batch {
 			if j >= len(embeddings) || embeddings[j] == nil {
 				continue
@@ -308,11 +311,17 @@ func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file file
 				projectRoot,
 			)
 
-			if _, err := idx.db.InsertChunk(record, embeddings[j]); err != nil {
-				return totalChunks, fmt.Errorf("insert chunk: %w", err)
-			}
+			records = append(records, record)
+			validEmbeddings = append(validEmbeddings, embeddings[j])
+		}
 
-			totalChunks++
+		// Use batch insert for efficiency
+		if len(records) > 0 {
+			ids, err := idx.db.InsertChunkBatch(records, validEmbeddings)
+			if err != nil {
+				return totalChunks, fmt.Errorf("batch insert: %w", err)
+			}
+			totalChunks += len(ids)
 		}
 	}
 

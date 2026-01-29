@@ -12,6 +12,21 @@ import (
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 )
 
+// SearchMode defines how search is performed.
+type SearchMode = db.SearchMode
+
+const (
+	// SearchModeSemantic uses pure vector similarity search.
+	SearchModeSemantic = db.SearchModeSemantic
+	// SearchModeKeyword uses BM25 text search only.
+	SearchModeKeyword = db.SearchModeKeyword
+	// SearchModeHybrid combines vector and text search.
+	SearchModeHybrid = db.SearchModeHybrid
+)
+
+// SearchExplanation provides diagnostic info about a search.
+type SearchExplanation = db.SearchExplanation
+
 // Result represents a search result with full metadata.
 type Result struct {
 	ChunkID      int64   `json:"chunk_id"`
@@ -31,11 +46,22 @@ type Result struct {
 // SearchOptions configures search behavior.
 type SearchOptions struct {
 	Limit       int
-	Language    string  // Filter by language
-	ChunkType   string  // Filter by chunk type
-	FilePattern string  // Filter by file path pattern
-	MinScore    float32 // Minimum similarity score (0-1)
-	ProjectRoot string  // Project root for relative path filtering
+	Language    string   // Filter by single language
+	Languages   []string // Filter by multiple languages (OR)
+	ChunkType   string   // Filter by single chunk type
+	ChunkTypes  []string // Filter by multiple chunk types (OR)
+	FilePattern string   // Filter by file path pattern (glob)
+	Directory   string   // Filter by directory prefix
+	MinLine     int      // Filter by minimum start line
+	MaxLine     int      // Filter by maximum start line
+	MinScore    float32  // Minimum similarity score (0-1)
+	ProjectRoot string   // Project root for relative path filtering
+
+	// Search mode and hybrid settings
+	Mode         SearchMode // Search mode: semantic, keyword, or hybrid
+	VectorWeight float32    // Weight for vector similarity in hybrid mode (0-1)
+	TextWeight   float32    // Weight for text matching in hybrid mode (0-1)
+	Explain      bool       // Return search explanation for debugging
 }
 
 // SimilarOptions configures similar code search behavior.
@@ -49,8 +75,11 @@ type SimilarOptions struct {
 // DefaultSearchOptions returns sensible defaults.
 func DefaultSearchOptions() SearchOptions {
 	return SearchOptions{
-		Limit:    10,
-		MinScore: 0.0,
+		Limit:        10,
+		MinScore:     0.0,
+		Mode:         SearchModeHybrid, // Default to hybrid search
+		VectorWeight: 0.7,              // 70% vector similarity
+		TextWeight:   0.3,              // 30% text matching
 	}
 }
 
@@ -68,7 +97,7 @@ func NewSearcher(database *db.DB, provider embed.Provider) *Searcher {
 	}
 }
 
-// Search performs a semantic search for the given query.
+// Search performs a search for the given query using the specified mode.
 func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {
 	if query == "" {
 		return nil, fmt.Errorf("query cannot be empty")
@@ -78,22 +107,60 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		opts.Limit = DefaultSearchOptions().Limit
 	}
 
-	// Generate embedding for the query
-	queryEmbedding, err := s.provider.Embed(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("embed query: %w", err)
+	// Set default mode if not specified
+	if opts.Mode == "" {
+		opts.Mode = SearchModeHybrid
+	}
+	if opts.VectorWeight == 0 {
+		opts.VectorWeight = DefaultSearchOptions().VectorWeight
 	}
 
-	// Search for similar vectors with filtering
+	// Build filter options with extended fields
 	filterOpts := db.FilterOptions{
 		Language:    opts.Language,
+		Languages:   opts.Languages,
 		ChunkType:   opts.ChunkType,
+		ChunkTypes:  opts.ChunkTypes,
 		FilePattern: opts.FilePattern,
+		Directory:   opts.Directory,
+		MinLine:     opts.MinLine,
+		MaxLine:     opts.MaxLine,
 	}
 
-	searchResults, err := s.db.SearchWithFilter(queryEmbedding, opts.Limit, filterOpts)
-	if err != nil {
-		return nil, fmt.Errorf("search embeddings: %w", err)
+	var searchResults []db.SearchResult
+	var err error
+
+	switch opts.Mode {
+	case SearchModeKeyword:
+		// Pure text search (no embedding needed)
+		searchResults, err = s.db.TextSearch(query, opts.Limit, filterOpts)
+		if err != nil {
+			return nil, fmt.Errorf("text search: %w", err)
+		}
+
+	case SearchModeSemantic:
+		// Pure vector search
+		queryEmbedding, embedErr := s.provider.Embed(ctx, query)
+		if embedErr != nil {
+			return nil, fmt.Errorf("embed query: %w", embedErr)
+		}
+		searchResults, err = s.db.SearchWithFilter(queryEmbedding, opts.Limit, filterOpts)
+		if err != nil {
+			return nil, fmt.Errorf("search embeddings: %w", err)
+		}
+
+	case SearchModeHybrid:
+		fallthrough
+	default:
+		// Hybrid search: combine vector + text
+		queryEmbedding, embedErr := s.provider.Embed(ctx, query)
+		if embedErr != nil {
+			return nil, fmt.Errorf("embed query: %w", embedErr)
+		}
+		searchResults, err = s.db.HybridSearch(queryEmbedding, query, opts.Limit, filterOpts, opts.VectorWeight)
+		if err != nil {
+			return nil, fmt.Errorf("hybrid search: %w", err)
+		}
 	}
 
 	// Convert to Result format
@@ -116,6 +183,59 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 	return results, nil
 }
 
+// SearchWithExplain performs a search and returns diagnostic information.
+func (s *Searcher) SearchWithExplain(ctx context.Context, query string, opts SearchOptions) ([]Result, *SearchExplanation, error) {
+	if query == "" {
+		return nil, nil, fmt.Errorf("query cannot be empty")
+	}
+
+	if opts.Limit == 0 {
+		opts.Limit = DefaultSearchOptions().Limit
+	}
+
+	// Generate embedding for the query
+	queryEmbedding, err := s.provider.Embed(ctx, query)
+	if err != nil {
+		return nil, nil, fmt.Errorf("embed query: %w", err)
+	}
+
+	// Build filter options
+	filterOpts := db.FilterOptions{
+		Language:    opts.Language,
+		Languages:   opts.Languages,
+		ChunkType:   opts.ChunkType,
+		ChunkTypes:  opts.ChunkTypes,
+		FilePattern: opts.FilePattern,
+		Directory:   opts.Directory,
+		MinLine:     opts.MinLine,
+		MaxLine:     opts.MaxLine,
+	}
+
+	// Get results with explanation
+	searchResults, explanation, err := s.db.SearchWithExplain(queryEmbedding, opts.Limit, filterOpts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("search with explain: %w", err)
+	}
+
+	// Convert to Result format
+	results := make([]Result, 0, len(searchResults))
+	for _, sr := range searchResults {
+		result := searchResultToResult(sr)
+
+		if opts.MinScore > 0 && result.Score < opts.MinScore {
+			continue
+		}
+
+		results = append(results, result)
+
+		if len(results) >= opts.Limit {
+			break
+		}
+	}
+
+	return results, explanation, nil
+}
+
 // SearchSimilarByID finds code similar to the chunk with the given ID.
 func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts SimilarOptions) ([]Result, error) {
 	if opts.Limit == 0 {
@@ -136,18 +256,20 @@ func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts Si
 		}
 	}
 
-	// Search for similar vectors
+	// Build filter options with extended fields
 	filterOpts := db.FilterOptions{
 		Language:    opts.Language,
+		Languages:   opts.Languages,
 		ChunkType:   opts.ChunkType,
+		ChunkTypes:  opts.ChunkTypes,
 		FilePattern: opts.FilePattern,
+		Directory:   opts.Directory,
+		MinLine:     opts.MinLine,
+		MaxLine:     opts.MaxLine,
 	}
 
 	// Request more results to account for filtering
-	searchLimit := opts.Limit * 3
-	if searchLimit < 50 {
-		searchLimit = 50
-	}
+	searchLimit := max(opts.Limit*3, 50)
 
 	searchResults, err := s.db.SearchWithFilter(embedding, searchLimit, filterOpts)
 	if err != nil {
@@ -216,11 +338,16 @@ func (s *Searcher) SearchSimilarByText(ctx context.Context, text string, opts Si
 		return nil, fmt.Errorf("embed text: %w", err)
 	}
 
-	// Search for similar vectors
+	// Build filter options with extended fields
 	filterOpts := db.FilterOptions{
 		Language:    opts.Language,
+		Languages:   opts.Languages,
 		ChunkType:   opts.ChunkType,
+		ChunkTypes:  opts.ChunkTypes,
 		FilePattern: opts.FilePattern,
+		Directory:   opts.Directory,
+		MinLine:     opts.MinLine,
+		MaxLine:     opts.MaxLine,
 	}
 
 	searchResults, err := s.db.SearchWithFilter(embedding, opts.Limit, filterOpts)

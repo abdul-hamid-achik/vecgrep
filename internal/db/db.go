@@ -59,6 +59,18 @@ func (db *DB) InsertChunk(chunk ChunkRecord, embedding []float32) (uint64, error
 	return db.backend.InsertChunk(chunk, embedding)
 }
 
+// InsertChunkBatch inserts multiple chunks in a single batch operation.
+// This is more efficient than individual inserts for bulk indexing.
+func (db *DB) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]float32) ([]uint64, error) {
+	return db.backend.InsertChunkBatch(chunks, embeddings)
+}
+
+// UpsertChunk inserts or updates a chunk using a unique key.
+// Returns the ID and whether it was a new insert (true) or update (false).
+func (db *DB) UpsertChunk(chunk ChunkRecord, embedding []float32) (uint64, bool, error) {
+	return db.backend.UpsertChunk(chunk, embedding)
+}
+
 // InsertEmbedding inserts an embedding (legacy compatibility).
 // Deprecated: Use InsertChunk for full metadata storage.
 func (db *DB) InsertEmbedding(chunkID int64, embedding []float32) error {
@@ -75,9 +87,25 @@ func (db *DB) SearchEmbeddings(queryEmbedding []float32, limit int) ([]SearchRes
 	return db.backend.SearchEmbeddings(queryEmbedding, limit)
 }
 
-// SearchWithFilter performs a filtered vector search.
+// SearchWithFilter performs a filtered vector search using native veclite filters.
 func (db *DB) SearchWithFilter(queryEmbedding []float32, limit int, opts FilterOptions) ([]SearchResult, error) {
 	return db.backend.SearchWithFilter(queryEmbedding, limit, opts)
+}
+
+// SearchWithExplain performs a search and returns diagnostic information.
+func (db *DB) SearchWithExplain(queryEmbedding []float32, limit int, opts FilterOptions) ([]SearchResult, *SearchExplanation, error) {
+	return db.backend.SearchWithExplain(queryEmbedding, limit, opts)
+}
+
+// TextSearch performs a keyword-based search on content.
+func (db *DB) TextSearch(query string, limit int, opts FilterOptions) ([]SearchResult, error) {
+	return db.backend.TextSearch(query, limit, opts)
+}
+
+// HybridSearch combines vector search with text filtering.
+// vectorWeight controls the influence of vector similarity (0-1).
+func (db *DB) HybridSearch(queryEmbedding []float32, textQuery string, limit int, opts FilterOptions, vectorWeight float32) ([]SearchResult, error) {
+	return db.backend.HybridSearch(queryEmbedding, textQuery, limit, opts, vectorWeight)
 }
 
 // VecVersion returns the vector backend version info.

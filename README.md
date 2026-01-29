@@ -6,14 +6,18 @@ vecgrep indexes your codebase and enables natural language search using vector e
 
 ## Features
 
-- **Semantic Search** - Find code by meaning, not just keywords
+- **Hybrid Search** - Combine semantic (vector) and keyword search for best results
+- **Three Search Modes** - Choose between semantic, keyword, or hybrid search
 - **Local-First** - All embeddings generated locally via Ollama
 - **OpenAI Support** - Optional cloud embeddings via OpenAI API
 - **Incremental Indexing** - Only re-index changed files
+- **Batch Operations** - Efficient bulk indexing with batch inserts
 - **Language-Aware Chunking** - Intelligent code splitting by functions, classes, and blocks
+- **Rich Filtering** - Filter by language, chunk type, directory, file pattern, and line range
 - **MCP Support** - Model Context Protocol server for AI assistant integration
 - **Web Interface** - Browser-based search UI with syntax highlighting
 - **Similar Code Finder** - Find semantically similar code across your codebase
+- **Search Diagnostics** - Explain mode for debugging and optimizing searches
 
 ## Installation
 
@@ -124,18 +128,65 @@ Options:
 vecgrep search <query> [options]
 ```
 
-Options:
-- `-n, --limit N` - Maximum results (default: 10)
-- `-f, --format` - Output format: `default`, `json`, `compact`
-- `-l, --lang` - Filter by language (e.g., `go`, `python`)
-- `-t, --type` - Filter by chunk type: `function`, `class`, `block`
-- `--file` - Filter by file pattern (glob)
+**Search Modes:**
 
-Examples:
+| Mode | Description |
+|------|-------------|
+| `hybrid` | Combines vector similarity with text matching (default) |
+| `semantic` | Pure vector similarity search |
+| `keyword` | Text-based search using pattern matching |
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-n, --limit N` | Maximum results (default: 10) |
+| `-f, --format` | Output format: `default`, `json`, `compact` |
+| `-m, --mode` | Search mode: `hybrid`, `semantic`, `keyword` |
+| `--explain` | Show search diagnostics (index type, nodes visited, duration) |
+| `-l, --lang` | Filter by single language |
+| `--languages` | Filter by multiple languages (comma-separated) |
+| `-t, --type` | Filter by chunk type: `function`, `class`, `block` |
+| `--types` | Filter by multiple chunk types (comma-separated) |
+| `--file` | Filter by file pattern (glob) |
+| `--dir` | Filter by directory prefix |
+| `--lines` | Filter by line range (e.g., `1-100`) |
+
+**Examples:**
+
 ```bash
+# Default hybrid search
 vecgrep search "database connection pooling"
-vecgrep search "authentication middleware" -l go -n 5
-vecgrep search "error handling" --file "**/*_test.go"
+
+# Semantic-only search (vector similarity)
+vecgrep search --mode=semantic "error handling patterns"
+
+# Keyword search (text matching)
+vecgrep search --mode=keyword "SELECT FROM users"
+
+# Search with diagnostics
+vecgrep search --explain "authentication middleware"
+
+# Filter by language
+vecgrep search "error handling" -l go -n 5
+
+# Filter by multiple languages
+vecgrep search "memory management" --languages=go,rust
+
+# Filter by directory
+vecgrep search "config loading" --dir=internal/
+
+# Filter by file pattern
+vecgrep search "test helpers" --file="**/*_test.go"
+
+# Filter by chunk types
+vecgrep search "handlers" --types=function,method
+
+# Filter by line range
+vecgrep search "imports" --lines=1-50
+
+# JSON output for scripting
+vecgrep search "API endpoints" --format=json
 ```
 
 ### Web Interface
@@ -170,21 +221,29 @@ vecgrep similar <target> [options]
 
 Find code semantically similar to an existing chunk, file location, or text snippet.
 
-Targets:
+**Targets:**
 - `42` - Chunk ID (numeric)
 - `main.go:15` - File:line location
 - `--text "code"` - Inline text snippet
 
-Options:
-- `-n, --limit N` - Maximum results (default: 10)
-- `-f, --format` - Output format: `default`, `json`, `compact`
-- `-l, --lang` - Filter by language
-- `-t, --type` - Filter by chunk type
-- `--file` - Filter by file pattern (glob)
-- `--exclude-same-file` - Exclude results from the same file
-- `-T, --text` - Find similar to text snippet
+**Options:**
 
-Examples:
+| Flag | Description |
+|------|-------------|
+| `-n, --limit N` | Maximum results (default: 10) |
+| `-f, --format` | Output format: `default`, `json`, `compact` |
+| `-l, --lang` | Filter by single language |
+| `--languages` | Filter by multiple languages |
+| `-t, --type` | Filter by chunk type |
+| `--types` | Filter by multiple chunk types |
+| `--file` | Filter by file pattern (glob) |
+| `--dir` | Filter by directory prefix |
+| `--lines` | Filter by line range |
+| `--exclude-same-file` | Exclude results from the same file |
+| `-T, --text` | Find similar to text snippet |
+
+**Examples:**
+
 ```bash
 # Find code similar to chunk ID 42
 vecgrep similar 42
@@ -197,6 +256,9 @@ vecgrep similar --text "func NewSearcher"
 
 # Find similar Go code, excluding same file
 vecgrep similar 42 --lang go --exclude-same-file
+
+# Find similar code in specific directory
+vecgrep similar --text "error handling" --dir=internal/
 ```
 
 ### Check Status
@@ -293,6 +355,11 @@ indexing:
     - "*.min.css"
     - "*.lock"
 
+search:
+  default_mode: hybrid          # Default search mode: semantic, keyword, or hybrid
+  vector_weight: 0.7            # Weight for vector similarity in hybrid mode (0-1)
+  text_weight: 0.3              # Weight for text matching in hybrid mode (0-1)
+
 server:
   host: localhost
   port: 8080
@@ -306,7 +373,11 @@ vector:
 
 ### Vector Backend
 
-vecgrep uses veclite as its vector storage backend, providing HNSW-based approximate nearest neighbor search for fast and accurate semantic code search.
+vecgrep uses veclite as its vector storage backend with:
+- **Cosine distance** for normalized embedding similarity
+- **HNSW indexing** for fast approximate nearest neighbor search
+- **Native filtering** with support for glob patterns, prefix matching, range queries
+- **Batch operations** for efficient bulk indexing
 
 ### Configuration Sources
 
@@ -352,13 +423,30 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 | Tool | Description |
 |------|-------------|
 | `vecgrep_init` | Initialize vecgrep in a directory (creates `.vecgrep` folder) |
-| `vecgrep_search` | Semantic search across the indexed codebase |
+| `vecgrep_search` | Search with semantic, keyword, or hybrid mode. Supports rich filtering and explain mode. |
 | `vecgrep_index` | Index or re-index files in the project |
 | `vecgrep_status` | Get index statistics (files, chunks, languages) |
 | `vecgrep_similar` | Find code similar to a chunk ID, file:line location, or text snippet |
 | `vecgrep_delete` | Delete a file and its chunks from the index |
 | `vecgrep_clean` | Remove orphaned data and optimize the database |
 | `vecgrep_reset` | Reset the project database (requires confirmation) |
+
+**Search Tool Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query` | string | Search query (required) |
+| `limit` | int | Maximum results |
+| `mode` | string | Search mode: `semantic`, `keyword`, or `hybrid` |
+| `explain` | bool | Return search diagnostics |
+| `language` | string | Filter by single language |
+| `languages` | array | Filter by multiple languages |
+| `chunk_type` | string | Filter by single chunk type |
+| `chunk_types` | array | Filter by multiple chunk types |
+| `file_pattern` | string | Filter by file pattern (glob) |
+| `directory` | string | Filter by directory prefix |
+| `min_line` | int | Filter by minimum start line |
+| `max_line` | int | Filter by maximum start line |
 
 **Note:** In uninitialized directories, only `vecgrep_init` is available. After initialization, all tools become available.
 
@@ -447,6 +535,23 @@ Volumes:
 ```bash
 docker compose exec app vecgrep index /workspace
 docker compose exec app vecgrep search "your query"
+```
+
+## Upgrading
+
+### Breaking Changes in v2.0
+
+Version 2.0 includes significant improvements that require re-indexing:
+
+- **Cosine distance** replaces Euclidean for better embedding similarity
+- **Native filtering** during search instead of post-filtering
+- **Batch operations** for faster indexing
+
+After upgrading, re-index your codebase:
+
+```bash
+vecgrep reset --force
+vecgrep index
 ```
 
 ## Development

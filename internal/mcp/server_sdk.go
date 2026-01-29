@@ -28,11 +28,18 @@ type InitInput struct {
 
 // SearchInput is the input for vecgrep_search.
 type SearchInput struct {
-	Query       string `json:"query" jsonschema:"The search query. Can be natural language description of what you're looking for."`
-	Limit       int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return."`
-	Language    string `json:"language,omitempty" jsonschema:"Filter results by programming language."`
-	ChunkType   string `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
-	FilePattern string `json:"file_pattern,omitempty" jsonschema:"Filter results by file path pattern (glob)."`
+	Query       string   `json:"query" jsonschema:"The search query. Can be natural language description of what you're looking for."`
+	Limit       int      `json:"limit,omitempty" jsonschema:"Maximum number of results to return."`
+	Language    string   `json:"language,omitempty" jsonschema:"Filter results by programming language."`
+	Languages   []string `json:"languages,omitempty" jsonschema:"Filter results by multiple languages (OR)."`
+	ChunkType   string   `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
+	ChunkTypes  []string `json:"chunk_types,omitempty" jsonschema:"Filter results by multiple chunk types (OR)."`
+	FilePattern string   `json:"file_pattern,omitempty" jsonschema:"Filter results by file path pattern (glob)."`
+	Directory   string   `json:"directory,omitempty" jsonschema:"Filter results by directory prefix."`
+	MinLine     int      `json:"min_line,omitempty" jsonschema:"Filter by minimum start line."`
+	MaxLine     int      `json:"max_line,omitempty" jsonschema:"Filter by maximum start line."`
+	Mode        string   `json:"mode,omitempty" jsonschema:"Search mode: 'semantic' (vector only), 'keyword' (text only), or 'hybrid' (combined, default)."`
+	Explain     bool     `json:"explain,omitempty" jsonschema:"Return search diagnostics including timing and index info."`
 }
 
 // IndexInput is the input for vecgrep_index.
@@ -46,14 +53,19 @@ type StatusInput struct{}
 
 // SimilarInput is the input for vecgrep_similar.
 type SimilarInput struct {
-	ChunkID         int64  `json:"chunk_id,omitempty" jsonschema:"Find code similar to this chunk ID."`
-	FileLocation    string `json:"file_location,omitempty" jsonschema:"Find code similar to the chunk at this file:line location (e.g., 'search.go:50')."`
-	Text            string `json:"text,omitempty" jsonschema:"Find code similar to this text snippet."`
-	Limit           int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return."`
-	Language        string `json:"language,omitempty" jsonschema:"Filter results by programming language."`
-	ChunkType       string `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
-	FilePattern     string `json:"file_pattern,omitempty" jsonschema:"Filter results by file path pattern (glob)."`
-	ExcludeSameFile bool   `json:"exclude_same_file,omitempty" jsonschema:"Exclude results from the same file as the source."`
+	ChunkID         int64    `json:"chunk_id,omitempty" jsonschema:"Find code similar to this chunk ID."`
+	FileLocation    string   `json:"file_location,omitempty" jsonschema:"Find code similar to the chunk at this file:line location (e.g., 'search.go:50')."`
+	Text            string   `json:"text,omitempty" jsonschema:"Find code similar to this text snippet."`
+	Limit           int      `json:"limit,omitempty" jsonschema:"Maximum number of results to return."`
+	Language        string   `json:"language,omitempty" jsonschema:"Filter results by programming language."`
+	Languages       []string `json:"languages,omitempty" jsonschema:"Filter results by multiple languages (OR)."`
+	ChunkType       string   `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
+	ChunkTypes      []string `json:"chunk_types,omitempty" jsonschema:"Filter results by multiple chunk types (OR)."`
+	FilePattern     string   `json:"file_pattern,omitempty" jsonschema:"Filter results by file path pattern (glob)."`
+	Directory       string   `json:"directory,omitempty" jsonschema:"Filter results by directory prefix."`
+	MinLine         int      `json:"min_line,omitempty" jsonschema:"Filter by minimum start line."`
+	MaxLine         int      `json:"max_line,omitempty" jsonschema:"Filter by maximum start line."`
+	ExcludeSameFile bool     `json:"exclude_same_file,omitempty" jsonschema:"Exclude results from the same file as the source."`
 }
 
 // DeleteInput is the input for vecgrep_delete.
@@ -117,7 +129,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_search",
-		Description: "Perform semantic search across the indexed codebase. Auto-detects the project from current directory. Returns code chunks semantically similar to the query.",
+		Description: "Perform semantic search across the indexed codebase. Auto-detects the project from current directory. Supports three search modes: 'semantic' (vector similarity), 'keyword' (text matching), or 'hybrid' (combined, default). Returns code chunks ranked by relevance.",
 	}, s.handleSearch)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -386,7 +398,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		}, nil, nil
 	}
 
-	// Check Ollama
+	// Check embedding provider
 	if errResult := s.checkProvider(ctx); errResult != nil {
 		return errResult, nil, nil
 	}
@@ -401,36 +413,91 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	opts := search.DefaultSearchOptions()
 	opts.ProjectRoot = s.projectRoot
 
+	// Apply input options
 	if input.Limit > 0 {
 		opts.Limit = input.Limit
 	}
 	if input.Language != "" {
 		opts.Language = input.Language
 	}
+	if len(input.Languages) > 0 {
+		opts.Languages = input.Languages
+	}
 	if input.ChunkType != "" {
 		opts.ChunkType = input.ChunkType
+	}
+	if len(input.ChunkTypes) > 0 {
+		opts.ChunkTypes = input.ChunkTypes
 	}
 	if input.FilePattern != "" {
 		opts.FilePattern = input.FilePattern
 	}
-
-	// Perform search
-	results, err := s.searcher.Search(ctx, input.Query, opts)
-	if err != nil {
-		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
-			IsError: true,
-		}, nil, nil
+	if input.Directory != "" {
+		opts.Directory = input.Directory
+	}
+	if input.MinLine > 0 {
+		opts.MinLine = input.MinLine
+	}
+	if input.MaxLine > 0 {
+		opts.MaxLine = input.MaxLine
 	}
 
-	// Format results
-	if len(results) == 0 {
-		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "No results found."}},
-		}, nil, nil
+	// Parse search mode
+	switch strings.ToLower(input.Mode) {
+	case "semantic":
+		opts.Mode = search.SearchModeSemantic
+	case "keyword":
+		opts.Mode = search.SearchModeKeyword
+	case "hybrid", "":
+		opts.Mode = search.SearchModeHybrid
+	default:
+		opts.Mode = search.SearchModeHybrid
 	}
 
 	var sb strings.Builder
+
+	// Perform search with or without explanation
+	if input.Explain {
+		results, explanation, err := s.searcher.SearchWithExplain(ctx, input.Query, opts)
+		if err != nil {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
+				IsError: true,
+			}, nil, nil
+		}
+
+		// Add explanation to output
+		sb.WriteString("**Search Diagnostics:**\n")
+		sb.WriteString(fmt.Sprintf("- Index type: %s\n", explanation.IndexType))
+		sb.WriteString(fmt.Sprintf("- Nodes visited: %d\n", explanation.NodesVisited))
+		sb.WriteString(fmt.Sprintf("- Duration: %v\n", explanation.Duration))
+		sb.WriteString(fmt.Sprintf("- Mode: %s\n\n", explanation.Mode))
+
+		formatSearchResults(&sb, results)
+	} else {
+		results, err := s.searcher.Search(ctx, input.Query, opts)
+		if err != nil {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
+				IsError: true,
+			}, nil, nil
+		}
+
+		formatSearchResults(&sb, results)
+	}
+
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+	}, nil, nil
+}
+
+// formatSearchResults formats search results into markdown.
+func formatSearchResults(sb *strings.Builder, results []search.Result) {
+	if len(results) == 0 {
+		sb.WriteString("No results found.")
+		return
+	}
+
 	sb.WriteString(fmt.Sprintf("Found %d results:\n\n", len(results)))
 
 	for i, r := range results {
@@ -450,10 +517,6 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		sb.WriteString(r.Content)
 		sb.WriteString("\n```\n\n")
 	}
-
-	return &sdkmcp.CallToolResult{
-		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
-	}, nil, nil
 }
 
 // handleIndex handles the vecgrep_index tool.
@@ -607,13 +670,18 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 		}, nil, nil
 	}
 
-	// Build similar options
+	// Build similar options with extended fields
 	opts := search.SimilarOptions{
 		SearchOptions: search.SearchOptions{
 			Limit:       input.Limit,
 			Language:    input.Language,
+			Languages:   input.Languages,
 			ChunkType:   input.ChunkType,
+			ChunkTypes:  input.ChunkTypes,
 			FilePattern: input.FilePattern,
+			Directory:   input.Directory,
+			MinLine:     input.MinLine,
+			MaxLine:     input.MaxLine,
 			ProjectRoot: s.projectRoot,
 		},
 		ExcludeSameFile: input.ExcludeSameFile,
