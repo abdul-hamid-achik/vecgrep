@@ -315,18 +315,18 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	vecVersion, _ := database.VecVersion()
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Activated vecgrep project: %s\n\n", projectPath))
+	fmt.Fprintf(&sb, "Activated vecgrep project: %s\n\n", projectPath)
 	sb.WriteString("**IMPORTANT:** Add `.vecgrep` to your `.gitignore` file.\n\n")
-	sb.WriteString(fmt.Sprintf("- Data dir: %s\n", cfg.DataDir))
-	sb.WriteString(fmt.Sprintf("- Vector backend: %s\n", vecVersion))
-	sb.WriteString(fmt.Sprintf("- Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model))
+	fmt.Fprintf(&sb, "- Data dir: %s\n", cfg.DataDir)
+	fmt.Fprintf(&sb, "- Vector backend: %s\n", vecVersion)
+	fmt.Fprintf(&sb, "- Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model)
 
 	// Get stats
 	stats, err := s.searcher.GetIndexStats(ctx)
 	if err == nil {
 		if totalFiles, ok := stats["total_files"].(int64); ok && totalFiles > 0 {
 			totalChunks, _ := stats["total_chunks"].(int64)
-			sb.WriteString(fmt.Sprintf("\nIndex stats: %d files, %d chunks\n", totalFiles, totalChunks))
+			fmt.Fprintf(&sb, "\nIndex stats: %d files, %d chunks\n", totalFiles, totalChunks)
 		} else {
 			sb.WriteString("\nNext step: Run vecgrep_index to index your codebase.")
 		}
@@ -341,8 +341,8 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 
 	pending, pendingErr := indexer.GetPendingChanges(ctx, projectPath)
 	if pendingErr == nil && pending.TotalPending > 0 {
-		sb.WriteString(fmt.Sprintf("\n**Reindex needed:** %d files changed (%d new, %d modified, %d deleted)\n",
-			pending.TotalPending, pending.NewFiles, pending.ModifiedFiles, pending.DeletedFiles))
+		fmt.Fprintf(&sb, "\n**Reindex needed:** %d files changed (%d new, %d modified, %d deleted)\n",
+			pending.TotalPending, pending.NewFiles, pending.ModifiedFiles, pending.DeletedFiles)
 		sb.WriteString("Run vecgrep_index to update the index.\n")
 	}
 
@@ -380,7 +380,7 @@ func (s *SDKServer) checkProvider(ctx context.Context) *sdkmcp.CallToolResult {
 		} else {
 			sb.WriteString("Verify your embedding provider is configured correctly.\n")
 		}
-		sb.WriteString(fmt.Sprintf("\nError: %v", err))
+		fmt.Fprintf(&sb, "\nError: %v", err)
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
 			IsError: true,
@@ -468,10 +468,10 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 
 		// Add explanation to output
 		sb.WriteString("**Search Diagnostics:**\n")
-		sb.WriteString(fmt.Sprintf("- Index type: %s\n", explanation.IndexType))
-		sb.WriteString(fmt.Sprintf("- Nodes visited: %d\n", explanation.NodesVisited))
-		sb.WriteString(fmt.Sprintf("- Duration: %v\n", explanation.Duration))
-		sb.WriteString(fmt.Sprintf("- Mode: %s\n\n", explanation.Mode))
+		fmt.Fprintf(&sb, "- Index type: %s\n", explanation.IndexType)
+		fmt.Fprintf(&sb, "- Nodes visited: %d\n", explanation.NodesVisited)
+		fmt.Fprintf(&sb, "- Duration: %v\n", explanation.Duration)
+		fmt.Fprintf(&sb, "- Mode: %s\n\n", explanation.Mode)
 
 		formatSearchResults(&sb, results)
 	} else {
@@ -498,16 +498,16 @@ func formatSearchResults(sb *strings.Builder, results []search.Result) {
 		return
 	}
 
-	sb.WriteString(fmt.Sprintf("Found %d results:\n\n", len(results)))
+	fmt.Fprintf(sb, "Found %d results:\n\n", len(results))
 
 	for i, r := range results {
-		sb.WriteString(fmt.Sprintf("### Result %d (score: %.2f)\n", i+1, r.Score))
-		sb.WriteString(fmt.Sprintf("**File:** %s (lines %d-%d)\n", r.RelativePath, r.StartLine, r.EndLine))
+		fmt.Fprintf(sb, "### Result %d (score: %.2f)\n", i+1, r.Score)
+		fmt.Fprintf(sb, "**File:** %s (lines %d-%d)\n", r.RelativePath, r.StartLine, r.EndLine)
 		if r.SymbolName != "" {
-			sb.WriteString(fmt.Sprintf("**Symbol:** %s\n", r.SymbolName))
+			fmt.Fprintf(sb, "**Symbol:** %s\n", r.SymbolName)
 		}
 		if r.Language != "" && r.Language != "unknown" {
-			sb.WriteString(fmt.Sprintf("**Language:** %s\n", r.Language))
+			fmt.Fprintf(sb, "**Language:** %s\n", r.Language)
 		}
 		sb.WriteString("\n```")
 		if r.Language != "" && r.Language != "unknown" {
@@ -556,15 +556,15 @@ func (s *SDKServer) handleIndex(ctx context.Context, req *sdkmcp.CallToolRequest
 	// Format result
 	var sb strings.Builder
 	sb.WriteString("Indexing complete:\n")
-	sb.WriteString(fmt.Sprintf("- Files processed: %d\n", result.FilesProcessed))
-	sb.WriteString(fmt.Sprintf("- Files skipped (unchanged): %d\n", result.FilesSkipped))
-	sb.WriteString(fmt.Sprintf("- Chunks created: %d\n", result.ChunksCreated))
-	sb.WriteString(fmt.Sprintf("- Duration: %s\n", result.Duration))
+	fmt.Fprintf(&sb, "- Files processed: %d\n", result.FilesProcessed)
+	fmt.Fprintf(&sb, "- Files skipped (unchanged): %d\n", result.FilesSkipped)
+	fmt.Fprintf(&sb, "- Chunks created: %d\n", result.ChunksCreated)
+	fmt.Fprintf(&sb, "- Duration: %s\n", result.Duration)
 
 	if len(result.Errors) > 0 {
-		sb.WriteString(fmt.Sprintf("\nWarnings/Errors: %d\n", len(result.Errors)))
+		fmt.Fprintf(&sb, "\nWarnings/Errors: %d\n", len(result.Errors))
 		for _, e := range result.Errors {
-			sb.WriteString(fmt.Sprintf("  - %v\n", e))
+			fmt.Fprintf(&sb, "  - %v\n", e)
 		}
 	}
 
@@ -595,15 +595,15 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 	sb.WriteString("Index Statistics:\n\n")
 
 	if totalFiles, ok := stats["total_files"].(int64); ok {
-		sb.WriteString(fmt.Sprintf("Total files: %d\n", totalFiles))
+		fmt.Fprintf(&sb, "Total files: %d\n", totalFiles)
 	}
 	if totalChunks, ok := stats["total_chunks"].(int64); ok {
-		sb.WriteString(fmt.Sprintf("Total chunks: %d\n", totalChunks))
+		fmt.Fprintf(&sb, "Total chunks: %d\n", totalChunks)
 	}
 	if langStats, ok := stats["languages"].(map[string]int64); ok {
 		sb.WriteString("\nBy language:\n")
 		for lang, count := range langStats {
-			sb.WriteString(fmt.Sprintf("  %s: %d\n", lang, count))
+			fmt.Fprintf(&sb, "  %s: %d\n", lang, count)
 		}
 	}
 
@@ -617,9 +617,9 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 		pending, pendingErr := indexer.GetPendingChanges(ctx, s.projectRoot)
 		if pendingErr == nil {
 			sb.WriteString("\nReindex status:\n")
-			sb.WriteString(fmt.Sprintf("  New files: %d\n", pending.NewFiles))
-			sb.WriteString(fmt.Sprintf("  Modified files: %d\n", pending.ModifiedFiles))
-			sb.WriteString(fmt.Sprintf("  Deleted files: %d\n", pending.DeletedFiles))
+			fmt.Fprintf(&sb, "  New files: %d\n", pending.NewFiles)
+			fmt.Fprintf(&sb, "  Modified files: %d\n", pending.ModifiedFiles)
+			fmt.Fprintf(&sb, "  Deleted files: %d\n", pending.DeletedFiles)
 			if pending.TotalPending > 0 {
 				sb.WriteString("\n**Action needed:** Run vecgrep_index to update the index.\n")
 			}
@@ -733,16 +733,16 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Found %d similar code chunks:\n\n", len(results)))
+	fmt.Fprintf(&sb, "Found %d similar code chunks:\n\n", len(results))
 
 	for i, r := range results {
-		sb.WriteString(fmt.Sprintf("### Result %d (score: %.2f)\n", i+1, r.Score))
-		sb.WriteString(fmt.Sprintf("**File:** %s (lines %d-%d)\n", r.RelativePath, r.StartLine, r.EndLine))
+		fmt.Fprintf(&sb, "### Result %d (score: %.2f)\n", i+1, r.Score)
+		fmt.Fprintf(&sb, "**File:** %s (lines %d-%d)\n", r.RelativePath, r.StartLine, r.EndLine)
 		if r.SymbolName != "" {
-			sb.WriteString(fmt.Sprintf("**Symbol:** %s\n", r.SymbolName))
+			fmt.Fprintf(&sb, "**Symbol:** %s\n", r.SymbolName)
 		}
 		if r.Language != "" && r.Language != "unknown" {
-			sb.WriteString(fmt.Sprintf("**Language:** %s\n", r.Language))
+			fmt.Fprintf(&sb, "**Language:** %s\n", r.Language)
 		}
 		sb.WriteString("\n```")
 		if r.Language != "" && r.Language != "unknown" {
@@ -806,10 +806,10 @@ func (s *SDKServer) handleClean(ctx context.Context, req *sdkmcp.CallToolRequest
 
 	var sb strings.Builder
 	sb.WriteString("Database cleanup complete:\n")
-	sb.WriteString(fmt.Sprintf("- Orphaned chunks removed: %d\n", stats.OrphanedChunks))
-	sb.WriteString(fmt.Sprintf("- Orphaned embeddings removed: %d\n", stats.OrphanedEmbeddings))
+	fmt.Fprintf(&sb, "- Orphaned chunks removed: %d\n", stats.OrphanedChunks)
+	fmt.Fprintf(&sb, "- Orphaned embeddings removed: %d\n", stats.OrphanedEmbeddings)
 	if stats.VacuumedBytes > 0 {
-		sb.WriteString(fmt.Sprintf("- Space reclaimed: %d bytes\n", stats.VacuumedBytes))
+		fmt.Fprintf(&sb, "- Space reclaimed: %d bytes\n", stats.VacuumedBytes)
 	} else {
 		sb.WriteString("- Database already optimized\n")
 	}
