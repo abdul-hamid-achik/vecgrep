@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/a-h/templ v0.3.977
-	github.com/abdul-hamid-achik/veclite v0.2.0
+	github.com/abdul-hamid-achik/veclite v0.4.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/modelcontextprotocol/go-sdk v1.2.0
