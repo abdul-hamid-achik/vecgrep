@@ -57,13 +57,13 @@ func setupTestStore(t *testing.T) (*MemoryStore, func()) {
 
 	store, err := NewMemoryStore(cfg, &mockProvider{})
 	if err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		t.Fatalf("Failed to create store: %v", err)
 	}
 
 	cleanup := func() {
-		store.Close()
-		os.RemoveAll(tmpDir)
+		_ = store.Close()
+		_ = os.RemoveAll(tmpDir)
 	}
 
 	return store, cleanup
@@ -149,9 +149,9 @@ func TestForgetByTags(t *testing.T) {
 	ctx := context.Background()
 
 	// Remember notes with different tags
-	store.Remember(ctx, "Memory with tag1", RememberOptions{Tags: []string{"tag1"}})
-	store.Remember(ctx, "Memory with tag2", RememberOptions{Tags: []string{"tag2"}})
-	store.Remember(ctx, "Memory with tag1 and tag2", RememberOptions{Tags: []string{"tag1", "tag2"}})
+	_, _ = store.Remember(ctx, "Memory with tag1", RememberOptions{Tags: []string{"tag1"}})
+	_, _ = store.Remember(ctx, "Memory with tag2", RememberOptions{Tags: []string{"tag2"}})
+	_, _ = store.Remember(ctx, "Memory with tag1 and tag2", RememberOptions{Tags: []string{"tag1", "tag2"}})
 
 	// Forget by tag1
 	deleted, err := store.Forget(ctx, ForgetOptions{Tags: []string{"tag1"}})
@@ -176,9 +176,9 @@ func TestStats(t *testing.T) {
 	ctx := context.Background()
 
 	// Remember some notes
-	store.Remember(ctx, "Memory 1", RememberOptions{Tags: []string{"work"}})
-	store.Remember(ctx, "Memory 2", RememberOptions{Tags: []string{"personal"}})
-	store.Remember(ctx, "Memory 3", RememberOptions{Tags: []string{"work", "important"}})
+	_, _ = store.Remember(ctx, "Memory 1", RememberOptions{Tags: []string{"work"}})
+	_, _ = store.Remember(ctx, "Memory 2", RememberOptions{Tags: []string{"personal"}})
+	_, _ = store.Remember(ctx, "Memory 3", RememberOptions{Tags: []string{"work", "important"}})
 
 	// Get stats
 	stats, err := store.Stats(ctx)
@@ -249,9 +249,9 @@ func TestTagFiltering(t *testing.T) {
 	ctx := context.Background()
 
 	// Remember notes with different tags
-	store.Remember(ctx, "Work meeting notes", RememberOptions{Tags: []string{"work", "meeting"}})
-	store.Remember(ctx, "Personal todo", RememberOptions{Tags: []string{"personal"}})
-	store.Remember(ctx, "Work project plan", RememberOptions{Tags: []string{"work", "project"}})
+	_, _ = store.Remember(ctx, "Work meeting notes", RememberOptions{Tags: []string{"work", "meeting"}})
+	_, _ = store.Remember(ctx, "Personal todo", RememberOptions{Tags: []string{"personal"}})
+	_, _ = store.Remember(ctx, "Work project plan", RememberOptions{Tags: []string{"work", "project"}})
 
 	// Recall with tag filter
 	memories, err := store.Recall(ctx, "notes", RecallOptions{
@@ -284,9 +284,9 @@ func TestMinImportanceFiltering(t *testing.T) {
 	ctx := context.Background()
 
 	// Remember notes with different importance
-	store.Remember(ctx, "Low importance note", RememberOptions{Importance: 0.2})
-	store.Remember(ctx, "Medium importance note", RememberOptions{Importance: 0.5})
-	store.Remember(ctx, "High importance note", RememberOptions{Importance: 0.9})
+	_, _ = store.Remember(ctx, "Low importance note", RememberOptions{Importance: 0.2})
+	_, _ = store.Remember(ctx, "Medium importance note", RememberOptions{Importance: 0.5})
+	_, _ = store.Remember(ctx, "High importance note", RememberOptions{Importance: 0.9})
 
 	// Recall with min importance filter
 	memories, err := store.Recall(ctx, "note", RecallOptions{
@@ -312,7 +312,7 @@ func TestDefaultImportance(t *testing.T) {
 	ctx := context.Background()
 
 	// Remember without specifying importance
-	store.Remember(ctx, "Default importance note", RememberOptions{})
+	_, _ = store.Remember(ctx, "Default importance note", RememberOptions{})
 
 	memories, err := store.Recall(ctx, "Default", RecallOptions{Limit: 1})
 	if err != nil {
@@ -361,14 +361,14 @@ func TestImportanceBoundaries(t *testing.T) {
 	ctx := context.Background()
 
 	// Test negative importance (should default to 0.5)
-	store.Remember(ctx, "Negative importance", RememberOptions{Importance: -0.5})
+	_, _ = store.Remember(ctx, "Negative importance", RememberOptions{Importance: -0.5})
 	memories, _ := store.Recall(ctx, "Negative", RecallOptions{Limit: 1})
 	if len(memories) > 0 && memories[0].Importance != 0.5 {
 		t.Errorf("Negative importance should default to 0.5, got %f", memories[0].Importance)
 	}
 
 	// Test importance > 1.0 (should cap at 1.0)
-	store.Remember(ctx, "Over one importance", RememberOptions{Importance: 1.5})
+	_, _ = store.Remember(ctx, "Over one importance", RememberOptions{Importance: 1.5})
 	memories, _ = store.Recall(ctx, "Over one", RecallOptions{Limit: 1})
 	if len(memories) > 0 && memories[0].Importance > 1.0 {
 		t.Errorf("Importance > 1.0 should cap at 1.0, got %f", memories[0].Importance)
@@ -382,7 +382,7 @@ func TestForgetExpired(t *testing.T) {
 	ctx := context.Background()
 
 	// Store a memory without expiration
-	store.Remember(ctx, "Permanent memory", RememberOptions{})
+	_, _ = store.Remember(ctx, "Permanent memory", RememberOptions{})
 
 	// ForgetExpired should not delete non-expired memories
 	deleted, err := store.ForgetExpired(ctx)
@@ -407,8 +407,8 @@ func TestForgetByAge(t *testing.T) {
 	ctx := context.Background()
 
 	// Store memories
-	store.Remember(ctx, "Memory 1", RememberOptions{})
-	store.Remember(ctx, "Memory 2", RememberOptions{})
+	_, _ = store.Remember(ctx, "Memory 1", RememberOptions{})
+	_, _ = store.Remember(ctx, "Memory 2", RememberOptions{})
 
 	// Delete memories older than 0 hours should delete none (they're brand new)
 	// Note: This tests the edge case where OlderThanHours is set but no memories match
@@ -470,7 +470,7 @@ func TestSpecialCharactersInTags(t *testing.T) {
 	ctx := context.Background()
 
 	// Test tags with special characters (commas are tricky since we join with commas)
-	store.Remember(ctx, "Memory with special tags", RememberOptions{
+	_, _ = store.Remember(ctx, "Memory with special tags", RememberOptions{
 		Tags: []string{"tag-with-dash", "tag_with_underscore", "tag.with.dots"},
 	})
 
@@ -517,7 +517,7 @@ func TestRecallLimitEdgeCases(t *testing.T) {
 
 	// Store multiple memories
 	for i := 0; i < 5; i++ {
-		store.Remember(ctx, fmt.Sprintf("Memory number %d", i), RememberOptions{})
+		_, _ = store.Remember(ctx, fmt.Sprintf("Memory number %d", i), RememberOptions{})
 	}
 
 	// Test limit of 0 (should default to 10)
@@ -555,7 +555,7 @@ func TestForgetWithNoParameters(t *testing.T) {
 	ctx := context.Background()
 
 	// Store a memory
-	store.Remember(ctx, "Test memory", RememberOptions{})
+	_, _ = store.Remember(ctx, "Test memory", RememberOptions{})
 
 	// Forget with no parameters should delete nothing
 	deleted, err := store.Forget(ctx, ForgetOptions{})
@@ -580,9 +580,9 @@ func TestMultipleTagsRecall(t *testing.T) {
 	ctx := context.Background()
 
 	// Store memories with overlapping tags
-	store.Remember(ctx, "Work meeting", RememberOptions{Tags: []string{"work", "meeting"}})
-	store.Remember(ctx, "Personal meeting", RememberOptions{Tags: []string{"personal", "meeting"}})
-	store.Remember(ctx, "Work project", RememberOptions{Tags: []string{"work", "project"}})
+	_, _ = store.Remember(ctx, "Work meeting", RememberOptions{Tags: []string{"work", "meeting"}})
+	_, _ = store.Remember(ctx, "Personal meeting", RememberOptions{Tags: []string{"personal", "meeting"}})
+	_, _ = store.Remember(ctx, "Work project", RememberOptions{Tags: []string{"work", "project"}})
 
 	// Filter by multiple tags (should require all tags - AND logic)
 	memories, err := store.Recall(ctx, "meeting", RecallOptions{

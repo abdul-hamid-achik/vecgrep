@@ -87,7 +87,7 @@ func NewMemoryStore(cfg *Config, provider embed.Provider) (*MemoryStore, error) 
 		// Collection might already exist
 		coll, err = db.GetCollection("memories")
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("failed to create/get memories collection: %w", err)
 		}
 	}
