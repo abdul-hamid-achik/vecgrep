@@ -207,6 +207,55 @@ var projectsRemoveCmd = &cobra.Command{
 	RunE:  runProjectsRemove,
 }
 
+var profileCmd = &cobra.Command{
+	Use:   "profile",
+	Short: "Manage search profiles",
+	Long: `Manage search profiles for different content sources.
+
+Profiles allow you to search different types of content:
+- Code files in your project (default)
+- Notes from noted CLI
+- Custom sources
+
+Subcommands:
+  list    List all configured profiles
+  add     Add a new profile
+  remove  Remove a profile
+  show    Show profile details`,
+}
+
+var profileListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all configured profiles",
+	RunE:  runProfileList,
+}
+
+var profileAddCmd = &cobra.Command{
+	Use:   "add <name>",
+	Short: "Add a new profile",
+	Long: `Add a new search profile.
+
+Examples:
+  vecgrep profile add notes --type noted
+  vecgrep profile add docs --type files --path ./docs`,
+	Args: cobra.ExactArgs(1),
+	RunE: runProfileAdd,
+}
+
+var profileRemoveCmd = &cobra.Command{
+	Use:   "remove <name>",
+	Short: "Remove a profile",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runProfileRemove,
+}
+
+var profileShowCmd = &cobra.Command{
+	Use:   "show <name>",
+	Short: "Show profile details",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runProfileShow,
+}
+
 func init() {
 	// Set version template
 	rootCmd.SetVersionTemplate("vecgrep version {{.Version}}\n")
@@ -238,6 +287,9 @@ func init() {
 	searchCmd.Flags().String("lines", "", "filter by line range (e.g., '1-100')")
 	searchCmd.Flags().StringP("mode", "m", "hybrid", "search mode: semantic, keyword, or hybrid")
 	searchCmd.Flags().Bool("explain", false, "show search diagnostics")
+	searchCmd.Flags().StringP("profile", "P", "", "search a specific profile")
+	searchCmd.Flags().StringSlice("profiles", nil, "search multiple profiles (comma-separated)")
+	searchCmd.Flags().Bool("all-profiles", false, "search all configured profiles")
 
 	// Serve command flags
 	serveCmd.Flags().IntP("port", "p", 8080, "server port")
@@ -279,6 +331,15 @@ func init() {
 	projectsCmd.AddCommand(projectsAddCmd)
 	projectsCmd.AddCommand(projectsRemoveCmd)
 
+	// Add profile subcommands
+	profileAddCmd.Flags().String("type", "files", "source type: files, noted")
+	profileAddCmd.Flags().String("path", "", "path for files source type")
+	profileAddCmd.Flags().String("description", "", "profile description")
+	profileCmd.AddCommand(profileListCmd)
+	profileCmd.AddCommand(profileAddCmd)
+	profileCmd.AddCommand(profileRemoveCmd)
+	profileCmd.AddCommand(profileShowCmd)
+
 	// Init command flags for global/local mode
 	initCmd.Flags().Bool("global", false, "register project in ~/.vecgrep/ instead of creating local .vecgrep/")
 	initCmd.Flags().Bool("local", false, "create local .vecgrep/ directory (default behavior)")
@@ -297,6 +358,7 @@ func init() {
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(projectsCmd)
+	rootCmd.AddCommand(profileCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -1388,6 +1450,130 @@ func runProjectsRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Project '%s' removed from global config.\n", name)
 	fmt.Println("Note: Project data directory was not deleted. Remove it manually if needed.")
+
+	return nil
+}
+
+func runProfileList(cmd *cobra.Command, args []string) error {
+	profiles, err := config.ListProfiles()
+	if err != nil {
+		return fmt.Errorf("failed to list profiles: %w", err)
+	}
+
+	if len(profiles) == 0 {
+		fmt.Println("No profiles configured.")
+		fmt.Println("Use 'vecgrep profile add <name>' to add a profile.")
+		return nil
+	}
+
+	fmt.Printf("Configured profiles (%d):\n\n", len(profiles))
+	for _, name := range profiles {
+		profile, err := config.GetProfile(name)
+		if err != nil {
+			fmt.Printf("  %s (error: %v)\n", name, err)
+			continue
+		}
+		fmt.Printf("  %s\n", name)
+		fmt.Printf("    Type: %s\n", profile.Source.Type)
+		if profile.Description != "" {
+			fmt.Printf("    Description: %s\n", profile.Description)
+		}
+		if profile.Source.Path != "" {
+			fmt.Printf("    Path: %s\n", profile.Source.Path)
+		}
+		fmt.Println()
+	}
+
+	return nil
+}
+
+func runProfileAdd(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	sourceType, _ := cmd.Flags().GetString("type")
+	path, _ := cmd.Flags().GetString("path")
+	description, _ := cmd.Flags().GetString("description")
+
+	var profile config.Profile
+
+	switch sourceType {
+	case "files":
+		if path == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("failed to get current directory: %w", err)
+			}
+			path = cwd
+		}
+		profile = config.DefaultFilesProfile(name, path)
+	case "noted":
+		profile = config.DefaultNotedProfile()
+		profile.Name = name
+	default:
+		return fmt.Errorf("unsupported source type: %s (use 'files' or 'noted')", sourceType)
+	}
+
+	if description != "" {
+		profile.Description = description
+	}
+
+	if err := config.AddProfile(profile); err != nil {
+		return fmt.Errorf("failed to add profile: %w", err)
+	}
+
+	fmt.Printf("Profile '%s' added successfully.\n", name)
+	fmt.Printf("  Type: %s\n", profile.Source.Type)
+	if profile.Source.Path != "" {
+		fmt.Printf("  Path: %s\n", profile.Source.Path)
+	}
+	fmt.Println()
+	fmt.Printf("Search with: vecgrep search --profile %s <query>\n", name)
+
+	return nil
+}
+
+func runProfileRemove(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	if err := config.DeleteProfile(name); err != nil {
+		return fmt.Errorf("failed to remove profile: %w", err)
+	}
+
+	fmt.Printf("Profile '%s' removed.\n", name)
+	return nil
+}
+
+func runProfileShow(cmd *cobra.Command, args []string) error {
+	name := args[0]
+
+	profile, err := config.GetProfile(name)
+	if err != nil {
+		return fmt.Errorf("failed to get profile: %w", err)
+	}
+
+	fmt.Printf("Profile: %s\n\n", profile.Name)
+	if profile.Description != "" {
+		fmt.Printf("Description: %s\n", profile.Description)
+	}
+	fmt.Printf("Source Type: %s\n", profile.Source.Type)
+	if profile.Source.Path != "" {
+		fmt.Printf("Source Path: %s\n", profile.Source.Path)
+	}
+	if profile.Source.BinaryPath != "" {
+		fmt.Printf("Binary Path: %s\n", profile.Source.BinaryPath)
+	}
+	if profile.Source.PollInterval > 0 {
+		fmt.Printf("Poll Interval: %ds\n", profile.Source.PollInterval)
+	}
+	if profile.DataDir != "" {
+		fmt.Printf("Data Dir: %s\n", profile.DataDir)
+	}
+
+	fmt.Printf("\nIndexing Settings:\n")
+	fmt.Printf("  Chunk Size: %d\n", profile.Indexing.ChunkSize)
+	fmt.Printf("  Chunk Overlap: %d\n", profile.Indexing.ChunkOverlap)
+	if len(profile.Indexing.IgnorePatterns) > 0 {
+		fmt.Printf("  Ignore Patterns: %v\n", profile.Indexing.IgnorePatterns)
+	}
 
 	return nil
 }

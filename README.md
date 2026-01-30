@@ -18,6 +18,12 @@ vecgrep indexes your codebase and enables natural language search using vector e
 - **Web Interface** - Browser-based search UI with syntax highlighting
 - **Similar Code Finder** - Find semantically similar code across your codebase
 - **Search Diagnostics** - Explain mode for debugging and optimizing searches
+- **Embedding Cache** - Cache query embeddings for faster repeated searches
+- **Multi-Profile Search** - Search across code, notes, and other content sources
+- **Batch Search** - Search multiple queries in parallel via MCP
+- **Codebase Overview** - Get high-level insights about your codebase structure
+- **Related Files** - Find imports, tests, and files that depend on a given file
+- **Context Lines** - Include surrounding code in search results
 
 ## Installation
 
@@ -151,6 +157,9 @@ vecgrep search <query> [options]
 | `--file` | Filter by file pattern (glob) |
 | `--dir` | Filter by directory prefix |
 | `--lines` | Filter by line range (e.g., `1-100`) |
+| `-P, --profile` | Search a specific profile |
+| `--profiles` | Search multiple profiles (comma-separated) |
+| `--all-profiles` | Search all configured profiles |
 
 **Examples:**
 
@@ -312,6 +321,39 @@ vecgrep reset [--force]
 Options:
 - `--force` - Skip confirmation prompt
 
+### Search Profiles
+
+Profiles allow you to search across different content sources (code, notes, documentation) with separate indexes.
+
+```bash
+# List all configured profiles
+vecgrep profile list
+
+# Add a new profile
+vecgrep profile add notes --source noted --description "Personal notes"
+
+# Remove a profile
+vecgrep profile remove notes
+
+# Show profile details
+vecgrep profile show notes
+```
+
+**Searching with profiles:**
+
+```bash
+# Search a specific profile
+vecgrep search "meeting notes" --profile notes
+
+# Search multiple profiles
+vecgrep search "API design" --profiles code,notes
+
+# Search all configured profiles
+vecgrep search "authentication" --all-profiles
+```
+
+Profiles are configured in `~/.config/vecgrep/profiles.yaml`.
+
 ### Shell Completion
 
 Generate shell completion scripts:
@@ -423,13 +465,16 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 | Tool | Description |
 |------|-------------|
 | `vecgrep_init` | Initialize vecgrep in a directory (creates `.vecgrep` folder) |
-| `vecgrep_search` | Search with semantic, keyword, or hybrid mode. Supports rich filtering and explain mode. |
+| `vecgrep_search` | Search with semantic, keyword, or hybrid mode. Supports rich filtering, explain mode, and context lines. |
 | `vecgrep_index` | Index or re-index files in the project |
 | `vecgrep_status` | Get index statistics (files, chunks, languages) |
 | `vecgrep_similar` | Find code similar to a chunk ID, file:line location, or text snippet |
 | `vecgrep_delete` | Delete a file and its chunks from the index |
 | `vecgrep_clean` | Remove orphaned data and optimize the database |
 | `vecgrep_reset` | Reset the project database (requires confirmation) |
+| `vecgrep_overview` | Get high-level codebase structure, languages, and entry points |
+| `vecgrep_batch_search` | Search multiple queries in parallel with optional deduplication |
+| `vecgrep_related_files` | Find related files (imports, tests, files that import a given file) |
 
 ### Memory Tools
 
@@ -484,6 +529,7 @@ Global agent memory for storing and recalling notes across sessions. Memory is s
 | `limit` | int | Maximum results |
 | `mode` | string | Search mode: `semantic`, `keyword`, or `hybrid` |
 | `explain` | bool | Return search diagnostics |
+| `context_lines` | int | Lines to include before/after each result |
 | `language` | string | Filter by single language |
 | `languages` | array | Filter by multiple languages |
 | `chunk_type` | string | Filter by single chunk type |
@@ -492,6 +538,29 @@ Global agent memory for storing and recalling notes across sessions. Memory is s
 | `directory` | string | Filter by directory prefix |
 | `min_line` | int | Filter by minimum start line |
 | `max_line` | int | Filter by maximum start line |
+
+**Overview Tool Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `include_structure` | bool | Include directory structure (default: true) |
+| `include_entry_points` | bool | Include main/index entry points (default: true) |
+
+**Batch Search Tool Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `queries` | array | List of search queries (required) |
+| `limit_per_query` | int | Maximum results per query (default: 3) |
+| `deduplicate` | bool | Remove duplicate results across queries (default: true) |
+
+**Related Files Tool Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `file` | string | Path to the file (required) |
+| `relationship` | string | Type: `imports`, `imported_by`, `tests`, or `all` (default: all) |
+| `limit` | int | Maximum results (default: 10) |
 
 **Note:** In uninitialized directories, only `vecgrep_init` is available. After initialization, all code search tools become available. Memory tools are always available (they use a global store).
 

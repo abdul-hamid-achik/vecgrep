@@ -24,24 +24,25 @@ import (
 
 // InitInput is the input for vecgrep_init.
 type InitInput struct {
-	Path  string `json:"path" jsonschema:"REQUIRED - Full absolute path to the project directory. Get this from the current working directory the user is in."`
+	Path  string `json:"path" jsonschema:"Full absolute path to the project directory. Get this from the current working directory the user is in."`
 	Force bool   `json:"force,omitempty" jsonschema:"Overwrite existing configuration if present."`
 }
 
 // SearchInput is the input for vecgrep_search.
 type SearchInput struct {
-	Query       string   `json:"query" jsonschema:"The search query. Can be natural language description of what you're looking for."`
-	Limit       int      `json:"limit,omitempty" jsonschema:"Maximum number of results to return."`
-	Language    string   `json:"language,omitempty" jsonschema:"Filter results by programming language."`
-	Languages   []string `json:"languages,omitempty" jsonschema:"Filter results by multiple languages (OR)."`
-	ChunkType   string   `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
-	ChunkTypes  []string `json:"chunk_types,omitempty" jsonschema:"Filter results by multiple chunk types (OR)."`
-	FilePattern string   `json:"file_pattern,omitempty" jsonschema:"Filter results by file path pattern (glob)."`
-	Directory   string   `json:"directory,omitempty" jsonschema:"Filter results by directory prefix."`
-	MinLine     int      `json:"min_line,omitempty" jsonschema:"Filter by minimum start line."`
-	MaxLine     int      `json:"max_line,omitempty" jsonschema:"Filter by maximum start line."`
-	Mode        string   `json:"mode,omitempty" jsonschema:"Search mode: 'semantic' (vector only), 'keyword' (text only), or 'hybrid' (combined, default)."`
-	Explain     bool     `json:"explain,omitempty" jsonschema:"Return search diagnostics including timing and index info."`
+	Query        string   `json:"query" jsonschema:"The search query. Can be natural language description of what you're looking for."`
+	Limit        int      `json:"limit,omitempty" jsonschema:"Maximum number of results to return."`
+	Language     string   `json:"language,omitempty" jsonschema:"Filter results by programming language."`
+	Languages    []string `json:"languages,omitempty" jsonschema:"Filter results by multiple languages (OR)."`
+	ChunkType    string   `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
+	ChunkTypes   []string `json:"chunk_types,omitempty" jsonschema:"Filter results by multiple chunk types (OR)."`
+	FilePattern  string   `json:"file_pattern,omitempty" jsonschema:"Filter results by file path pattern (glob)."`
+	Directory    string   `json:"directory,omitempty" jsonschema:"Filter results by directory prefix."`
+	MinLine      int      `json:"min_line,omitempty" jsonschema:"Filter by minimum start line."`
+	MaxLine      int      `json:"max_line,omitempty" jsonschema:"Filter by maximum start line."`
+	Mode         string   `json:"mode,omitempty" jsonschema:"Search mode: 'semantic' (vector only), 'keyword' (text only), or 'hybrid' (combined, default)."`
+	Explain      bool     `json:"explain,omitempty" jsonschema:"Return search diagnostics including timing and index info."`
+	ContextLines int      `json:"context_lines,omitempty" jsonschema:"Number of lines to include before and after each result (default: 0)."`
 }
 
 // IndexInput is the input for vecgrep_index.
@@ -81,6 +82,30 @@ type CleanInput struct{}
 // ResetInput is the input for vecgrep_reset.
 type ResetInput struct {
 	Confirm string `json:"confirm" jsonschema:"Type 'yes' to confirm the reset operation."`
+}
+
+// OverviewInput is the input for vecgrep_overview.
+type OverviewInput struct {
+	IncludeStructure    bool `json:"include_structure,omitempty" jsonschema:"Include directory structure in output (default: true)."`
+	IncludeEntryPoints  bool `json:"include_entry_points,omitempty" jsonschema:"Include entry point files in output (default: true)."`
+	MaxDirectoryDepth   int  `json:"max_directory_depth,omitempty" jsonschema:"Maximum directory depth to show (default: 3)."`
+	IncludeKeyFiles     bool `json:"include_key_files,omitempty" jsonschema:"Include key files like README, config (default: true)."`
+}
+
+// BatchSearchInput is the input for vecgrep_batch_search.
+type BatchSearchInput struct {
+	Queries       []string `json:"queries" jsonschema:"List of queries to search for."`
+	LimitPerQuery int      `json:"limit_per_query,omitempty" jsonschema:"Maximum results per query (default: 3)."`
+	Deduplicate   bool     `json:"deduplicate,omitempty" jsonschema:"Remove duplicate results across queries (default: true)."`
+	Language      string   `json:"language,omitempty" jsonschema:"Filter results by programming language."`
+	ChunkType     string   `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
+}
+
+// RelatedFilesInput is the input for vecgrep_related_files.
+type RelatedFilesInput struct {
+	File         string `json:"file" jsonschema:"Path to the file to find related files for."`
+	Relationship string `json:"relationship,omitempty" jsonschema:"Type of relationship: 'imports', 'imported_by', 'tests', 'all' (default: 'all')."`
+	Limit        int    `json:"limit,omitempty" jsonschema:"Maximum number of related files to return (default: 10)."`
 }
 
 // SDKServer wraps the official MCP SDK server.
@@ -168,6 +193,21 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Name:        "vecgrep_reset",
 		Description: "Reset the project database by clearing all indexed files, chunks, and embeddings. Requires confirmation.",
 	}, s.handleReset)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_overview",
+		Description: "Get high-level overview of the codebase structure including languages, directory structure, entry points, and key files.",
+	}, s.handleOverview)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_batch_search",
+		Description: "Search multiple queries in parallel. Returns results grouped by query with optional deduplication.",
+	}, s.handleBatchSearch)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_related_files",
+		Description: "Find files related to a given file (imports, tests, configs). Useful for understanding code dependencies.",
+	}, s.handleRelatedFiles)
 
 	// Memory tools (global, not project-specific)
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -543,6 +583,13 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		fmt.Fprintf(&sb, "- Duration: %v\n", explanation.Duration)
 		fmt.Fprintf(&sb, "- Mode: %s\n\n", explanation.Mode)
 
+		// Expand context lines if requested
+		if input.ContextLines > 0 {
+			for i := range results {
+				results[i].Content = expandContextLines(s.projectRoot, results[i], input.ContextLines)
+			}
+		}
+
 		formatSearchResults(&sb, results)
 	} else {
 		results, err := s.searcher.Search(ctx, input.Query, opts)
@@ -551,6 +598,13 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
 				IsError: true,
 			}, nil, nil
+		}
+
+		// Expand context lines if requested
+		if input.ContextLines > 0 {
+			for i := range results {
+				results[i].Content = expandContextLines(s.projectRoot, results[i], input.ContextLines)
+			}
 		}
 
 		formatSearchResults(&sb, results)

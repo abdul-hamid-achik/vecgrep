@@ -2,26 +2,26 @@ package mcp
 
 // MemoryRememberInput is the input for memory_remember.
 type MemoryRememberInput struct {
-	Content    string   `json:"content" jsonschema:"required,description=The content to remember. This can be any text you want to store for later recall."`
-	Importance float64  `json:"importance,omitempty" jsonschema:"description=Importance level from 0.0 to 1.0. Higher importance memories are prioritized in recall. Default is 0.5."`
-	Tags       []string `json:"tags,omitempty" jsonschema:"description=Categorization tags for filtering and organizing memories."`
-	TTLHours   int      `json:"ttl_hours,omitempty" jsonschema:"description=Time to live in hours. Memory expires after this duration. 0 means no expiration."`
+	Content    string   `json:"content" jsonschema:"The content to remember. This can be any text you want to store for later recall."`
+	Importance float64  `json:"importance,omitempty" jsonschema:"Importance level from 0.0 to 1.0. Higher importance memories are prioritized in recall. Default is 0.5."`
+	Tags       []string `json:"tags,omitempty" jsonschema:"Categorization tags for filtering and organizing memories."`
+	TTLHours   int      `json:"ttl_hours,omitempty" jsonschema:"Time to live in hours. Memory expires after this duration. 0 means no expiration."`
 }
 
 // MemoryRecallInput is the input for memory_recall.
 type MemoryRecallInput struct {
-	Query         string   `json:"query" jsonschema:"required,description=Natural language search query to find relevant memories."`
-	Limit         int      `json:"limit,omitempty" jsonschema:"description=Maximum number of results to return. Default is 10."`
-	Tags          []string `json:"tags,omitempty" jsonschema:"description=Filter results to only include memories with these tags."`
-	MinImportance float64  `json:"min_importance,omitempty" jsonschema:"description=Minimum importance threshold. Only return memories with importance >= this value."`
+	Query         string   `json:"query" jsonschema:"Natural language search query to find relevant memories."`
+	Limit         int      `json:"limit,omitempty" jsonschema:"Maximum number of results to return. Default is 10."`
+	Tags          []string `json:"tags,omitempty" jsonschema:"Filter results to only include memories with these tags."`
+	MinImportance float64  `json:"min_importance,omitempty" jsonschema:"Minimum importance threshold. Only return memories with importance >= this value."`
 }
 
 // MemoryForgetInput is the input for memory_forget.
 type MemoryForgetInput struct {
-	ID             uint64   `json:"id,omitempty" jsonschema:"description=Delete a specific memory by its ID."`
-	Tags           []string `json:"tags,omitempty" jsonschema:"description=Delete all memories that have any of these tags."`
-	OlderThanHours int      `json:"older_than_hours,omitempty" jsonschema:"description=Delete memories older than this many hours."`
-	Confirm        string   `json:"confirm,omitempty" jsonschema:"description=Set to 'yes' to confirm bulk deletion (required when deleting by tags or age)."`
+	ID             uint64   `json:"id,omitempty" jsonschema:"Delete a specific memory by its ID."`
+	Tags           []string `json:"tags,omitempty" jsonschema:"Delete all memories that have any of these tags."`
+	OlderThanHours int      `json:"older_than_hours,omitempty" jsonschema:"Delete memories older than this many hours."`
+	Confirm        string   `json:"confirm,omitempty" jsonschema:"Set to yes to confirm bulk deletion (required when deleting by tags or age)."`
 }
 
 // MemoryStatsInput is the input for memory_stats (no parameters).
