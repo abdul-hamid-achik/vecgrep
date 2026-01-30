@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
+	"github.com/abdul-hamid-achik/vecgrep/internal/memory"
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
 	"github.com/abdul-hamid-achik/vecgrep/internal/version"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -89,6 +91,11 @@ type SDKServer struct {
 	projectRoot string
 	searcher    *search.Searcher
 	initialized bool
+
+	// Memory store (lazy initialized)
+	memoryStore   *memory.MemoryStore
+	memoryInitMu  sync.Mutex
+	memoryInitErr error
 }
 
 // SDKServerConfig contains configuration for the SDK-based MCP server.
@@ -162,6 +169,27 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Description: "Reset the project database by clearing all indexed files, chunks, and embeddings. Requires confirmation.",
 	}, s.handleReset)
 
+	// Memory tools (global, not project-specific)
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "memory_remember",
+		Description: "Store a memory with optional importance, tags, and TTL. Memories are stored globally and persist across sessions.",
+	}, s.handleMemoryRemember)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "memory_recall",
+		Description: "Search memories semantically. Returns memories ranked by relevance to your query.",
+	}, s.handleMemoryRecall)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "memory_forget",
+		Description: "Delete memories by ID, tags, or age. Bulk deletion requires confirmation.",
+	}, s.handleMemoryForget)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "memory_stats",
+		Description: "Get memory store statistics including total count, tags, and age distribution.",
+	}, s.handleMemoryStats)
+
 	return s
 }
 
@@ -185,6 +213,48 @@ func (s *SDKServer) ensureInitialized(ctx context.Context) error {
 	// Auto-activate the detected project
 	_, _, err = s.activateProject(ctx, projectRoot)
 	return err
+}
+
+// ensureMemoryInitialized initializes the memory store on first use.
+func (s *SDKServer) ensureMemoryInitialized(ctx context.Context) error {
+	s.memoryInitMu.Lock()
+	defer s.memoryInitMu.Unlock()
+
+	// Already initialized
+	if s.memoryStore != nil {
+		return nil
+	}
+
+	// Previous initialization failed
+	if s.memoryInitErr != nil {
+		return s.memoryInitErr
+	}
+
+	// Load memory config
+	cfg := memory.DefaultConfig()
+
+	// Create embedding provider for memory
+	provider := embed.NewOllamaProvider(embed.OllamaConfig{
+		URL:        cfg.OllamaURL,
+		Model:      cfg.EmbeddingModel,
+		Dimensions: cfg.EmbeddingDimensions,
+	})
+
+	// Check if provider is available
+	if err := provider.Ping(ctx); err != nil {
+		s.memoryInitErr = fmt.Errorf("embedding provider not available: %w. Ensure Ollama is running with nomic-embed-text model", err)
+		return s.memoryInitErr
+	}
+
+	// Create memory store
+	store, err := memory.NewMemoryStore(cfg, provider)
+	if err != nil {
+		s.memoryInitErr = fmt.Errorf("failed to initialize memory store: %w", err)
+		return s.memoryInitErr
+	}
+
+	s.memoryStore = store
+	return nil
 }
 
 // handleInit handles the vecgrep_init tool.

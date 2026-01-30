@@ -418,7 +418,7 @@ These flags work with all commands:
 
 vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/) for AI assistant integration.
 
-### Available Tools
+### Code Search Tools
 
 | Tool | Description |
 |------|-------------|
@@ -430,6 +430,51 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 | `vecgrep_delete` | Delete a file and its chunks from the index |
 | `vecgrep_clean` | Remove orphaned data and optimize the database |
 | `vecgrep_reset` | Reset the project database (requires confirmation) |
+
+### Memory Tools
+
+Global agent memory for storing and recalling notes across sessions. Memory is stored at `~/.vecai/memory/memory.veclite`.
+
+| Tool | Description |
+|------|-------------|
+| `memory_remember` | Store a memory with optional importance, tags, and TTL |
+| `memory_recall` | Search memories semantically with filtering options |
+| `memory_forget` | Delete memories by ID, tags, or age |
+| `memory_stats` | Get memory store statistics |
+
+**memory_remember Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `content` | string | Yes | The content to remember |
+| `importance` | float | No | Priority level 0.0-1.0 (default: 0.5) |
+| `tags` | array | No | Categorization tags for filtering |
+| `ttl_hours` | int | No | Expiration in hours (0 = never expires) |
+
+**memory_recall Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | Yes | Natural language search query |
+| `limit` | int | No | Maximum results (default: 10) |
+| `tags` | array | No | Filter by tags |
+| `min_importance` | float | No | Minimum importance threshold |
+
+**memory_forget Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | uint64 | No | Delete specific memory by ID |
+| `tags` | array | No | Delete memories with these tags |
+| `older_than_hours` | int | No | Delete memories older than this |
+| `confirm` | string | No | Set to "yes" for bulk deletion |
+
+**Memory Environment Variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `VECAI_OLLAMA_URL` | Ollama API URL for memory embeddings |
+| `VECAI_EMBEDDING_MODEL` | Embedding model (default: nomic-embed-text) |
 
 **Search Tool Parameters:**
 
@@ -448,7 +493,7 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 | `min_line` | int | Filter by minimum start line |
 | `max_line` | int | Filter by maximum start line |
 
-**Note:** In uninitialized directories, only `vecgrep_init` is available. After initialization, all tools become available.
+**Note:** In uninitialized directories, only `vecgrep_init` is available. After initialization, all code search tools become available. Memory tools are always available (they use a global store).
 
 ### Claude Code (CLI)
 
