@@ -234,8 +234,8 @@ func TestCachedProvider_ClearCache(t *testing.T) {
 	cached := WithCache(mock, 100).(*CachedProvider)
 	ctx := context.Background()
 
-	cached.Embed(ctx, "test1")
-	cached.Embed(ctx, "test2")
+	_, _ = cached.Embed(ctx, "test1")
+	_, _ = cached.Embed(ctx, "test2")
 	cached.ClearCache()
 
 	if cached.CacheSize() != 0 {
@@ -244,7 +244,7 @@ func TestCachedProvider_ClearCache(t *testing.T) {
 
 	// After clear, should call provider again
 	mock.embedCalls = 0
-	cached.Embed(ctx, "test1")
+	_, _ = cached.Embed(ctx, "test1")
 	if mock.embedCalls != 1 {
 		t.Error("should call provider after cache clear")
 	}
