@@ -64,7 +64,7 @@ func TestWithCache(t *testing.T) {
 	}
 
 	// Should implement Provider interface
-	var _ Provider = cached
+	_ = Provider(cached)
 }
 
 func TestWithCacheAndTTL(t *testing.T) {
@@ -168,7 +168,7 @@ func TestCachedProvider_EmbedBatchPartialCache(t *testing.T) {
 	ctx := context.Background()
 
 	// Cache one query
-	cached.Embed(ctx, "query1")
+	_, _ = cached.Embed(ctx, "query1")
 	mock.embedCalls = 0 // Reset
 
 	// Batch with mix of cached and uncached
@@ -221,8 +221,8 @@ func TestCachedProvider_CacheSize(t *testing.T) {
 		t.Errorf("initial CacheSize() = %d, want 0", cached.CacheSize())
 	}
 
-	cached.Embed(ctx, "test1")
-	cached.Embed(ctx, "test2")
+	_, _ = cached.Embed(ctx, "test1")
+	_, _ = cached.Embed(ctx, "test2")
 
 	if cached.CacheSize() != 2 {
 		t.Errorf("CacheSize() = %d, want 2", cached.CacheSize())

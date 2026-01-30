@@ -23,24 +23,12 @@ func (s *SDKServer) handleOverview(ctx context.Context, req *sdkmcp.CallToolRequ
 		}, nil, nil
 	}
 
-	// Set defaults
-	includeStructure := true
-	if input.IncludeStructure == false && input.IncludeEntryPoints == false && input.IncludeKeyFiles == false {
-		// All false means no input was provided, use defaults
-		includeStructure = true
-	} else if input.IncludeStructure {
-		includeStructure = true
-	}
-
-	includeEntryPoints := true
-	if input.IncludeEntryPoints {
-		includeEntryPoints = true
-	}
-
-	includeKeyFiles := true
-	if input.IncludeKeyFiles {
-		includeKeyFiles = true
-	}
+	// Set defaults: if all are false, treat as "use defaults" (all true)
+	// Otherwise, use the explicit values from input
+	allFalse := !input.IncludeStructure && !input.IncludeEntryPoints && !input.IncludeKeyFiles
+	includeStructure := allFalse || input.IncludeStructure
+	includeEntryPoints := allFalse || input.IncludeEntryPoints
+	includeKeyFiles := allFalse || input.IncludeKeyFiles
 
 	maxDepth := input.MaxDirectoryDepth
 	if maxDepth <= 0 {
@@ -302,11 +290,8 @@ func (s *SDKServer) handleBatchSearch(ctx context.Context, req *sdkmcp.CallToolR
 		limitPerQuery = 3
 	}
 
-	deduplicate := true // Default to true
-	if input.Deduplicate == false {
-		// Explicit false means don't deduplicate
-		deduplicate = false
-	}
+	// Deduplicate defaults to true unless explicitly set to false
+	deduplicate := input.Deduplicate == nil || *input.Deduplicate
 
 	// Search for each query in parallel
 	type queryResult struct {

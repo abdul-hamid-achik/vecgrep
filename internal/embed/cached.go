@@ -116,7 +116,7 @@ func (c *CachedProvider) Cache() *EmbeddingCache {
 	return c.cache
 }
 
-// CacheStats returns statistics about the cache.
+// CacheSize returns the number of entries in the cache.
 func (c *CachedProvider) CacheSize() int {
 	return c.cache.Size()
 }

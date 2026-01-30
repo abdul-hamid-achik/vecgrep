@@ -96,7 +96,7 @@ type OverviewInput struct {
 type BatchSearchInput struct {
 	Queries       []string `json:"queries" jsonschema:"List of queries to search for."`
 	LimitPerQuery int      `json:"limit_per_query,omitempty" jsonschema:"Maximum results per query (default: 3)."`
-	Deduplicate   bool     `json:"deduplicate,omitempty" jsonschema:"Remove duplicate results across queries (default: true)."`
+	Deduplicate   *bool    `json:"deduplicate,omitempty" jsonschema:"Remove duplicate results across queries (default: true)."`
 	Language      string   `json:"language,omitempty" jsonschema:"Filter results by programming language."`
 	ChunkType     string   `json:"chunk_type,omitempty" jsonschema:"Filter results by chunk type."`
 }
