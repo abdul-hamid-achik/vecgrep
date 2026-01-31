@@ -415,7 +415,7 @@ vector:
 
 ### Vector Backend
 
-vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.10.0 as its vector storage backend with:
+vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.11.0 as its vector storage backend with:
 - **Cosine similarity** - Returns scores from 0.0 (orthogonal) to 1.0 (identical)
 - **HNSW indexing** - Fast approximate nearest neighbor search
 - **Native filtering** - Glob patterns, prefix matching, range queries

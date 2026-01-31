@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/a-h/templ v0.3.977
-	github.com/abdul-hamid-achik/veclite v0.10.0
+	github.com/abdul-hamid-achik/veclite v0.11.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/modelcontextprotocol/go-sdk v1.2.0
@@ -15,6 +15,7 @@ require (
 )
 
 require (
+	github.com/daulet/tokenizers v1.24.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/google/jsonschema-go v0.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -25,6 +26,7 @@ require (
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
+	github.com/yalue/onnxruntime_go v1.25.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
