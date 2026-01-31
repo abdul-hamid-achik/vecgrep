@@ -53,6 +53,7 @@ tmp/
 
 # vecgrep data directories (project-specific)
 .vecgrep/
+.vecai/
 
 # Logs
 *.log

@@ -654,29 +654,6 @@ docker compose exec app vecgrep search "your query"
 
 ## Upgrading
 
-### v2.1 - veclite v0.10.0 Upgrade
-
-This release upgrades to veclite v0.10.0 and fixes the match score calculation.
-
-**Changes:**
-- **Fixed match scores** - Search results now display correct similarity percentages (e.g., 85%) instead of showing 0.00% for all results
-- **veclite v0.10.0** - Upgraded vector backend with improved cosine similarity handling
-
-**Technical Details:**
-
-The score calculation was corrected from `1 - Distance` to just `Distance`. veclite's cosine similarity returns values where 1.0 = identical vectors and 0.0 = orthogonal vectors. The previous formula inverted this, causing perfect matches to display as 0%.
-
-**Upgrade Steps:**
-
-```bash
-# Pull latest code and rebuild
-git pull
-task build
-
-# Re-index to apply changes (recommended)
-vecgrep index --full
-```
-
 ### Breaking Changes in v2.0
 
 Version 2.0 includes significant improvements that require re-indexing:
