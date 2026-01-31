@@ -380,7 +380,7 @@ func searchResultToResult(sr db.SearchResult) Result {
 	result := Result{
 		ChunkID:  sr.ChunkID,
 		Distance: sr.Distance,
-		Score:    1 - sr.Distance, // Convert distance to similarity score
+		Score:    sr.Distance, // For cosine, Distance is already the similarity score
 	}
 
 	// Extract metadata from chunk payload
