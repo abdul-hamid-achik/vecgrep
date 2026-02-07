@@ -116,6 +116,25 @@ tasks:
         echo "    git push origin main"
         echo ""
 
+  release:tag:
+    desc: Create an annotated release tag (vX.Y.Z) after CI passes
+    cmds:
+      - |
+        if [ -z "{{.TAG}}" ]; then
+          echo "Usage: task release:tag TAG=vX.Y.Z"
+          exit 1
+        fi
+        case "{{.TAG}}" in
+          v*) ;;
+          *)
+            echo "Tag must start with 'v' (e.g. v1.2.3)"
+            exit 1
+            ;;
+        esac
+      - git tag -a "{{.TAG}}" -m "Release {{.TAG}}"
+      - |
+        echo "Tag {{.TAG}} created. Push with: git push origin {{.TAG}}"
+
   # ════════════════════════════════════════════════════════════════════════════
   # SETUP
   # ════════════════════════════════════════════════════════════════════════════
