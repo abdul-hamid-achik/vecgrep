@@ -152,7 +152,7 @@ func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
 	component.Render(r.Context(), w)
 }
 
-// Search handles search requests (for HTMX).
+// Search handles search requests (for HTMX and direct access).
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -216,6 +216,21 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// If not an HTMX request, render full page (for bookmarks/refreshes)
+	if r.Header.Get("HX-Request") == "" {
+		languages, chunkTypes := h.getIndexedFilters(r.Context())
+		component := templates.Index(templates.IndexData{
+			Query:      query,
+			Results:    templateResults,
+			Languages:  languages,
+			ChunkTypes: chunkTypes,
+		})
+		component.Render(r.Context(), w)
+		return
+	}
+
+	// HTMX request: return fragment only
 	templates.SearchResults(templateResults).Render(r.Context(), w)
 }
 
@@ -352,7 +367,7 @@ func (h *Handler) Similar(w http.ResponseWriter, r *http.Request) {
 	component.Render(r.Context(), w)
 }
 
-// SimilarSearch handles similar code search requests (for HTMX).
+// SimilarSearch handles similar code search requests (for HTMX and direct access).
 func (h *Handler) SimilarSearch(w http.ResponseWriter, r *http.Request) {
 	chunkIDStr := r.URL.Query().Get("chunk_id")
 	fileLoc := r.URL.Query().Get("file_loc")
@@ -462,6 +477,23 @@ func (h *Handler) SimilarSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// If not an HTMX request, render full page (for bookmarks/refreshes)
+	if r.Header.Get("HX-Request") == "" {
+		languages, chunkTypes := h.getIndexedFilters(r.Context())
+		component := templates.Similar(templates.SimilarData{
+			ChunkID:    chunkIDStr,
+			FileLoc:    fileLoc,
+			Text:       text,
+			Results:    templateResults,
+			Languages:  languages,
+			ChunkTypes: chunkTypes,
+		})
+		component.Render(r.Context(), w)
+		return
+	}
+
+	// HTMX request: return fragment only
 	templates.SearchResults(templateResults).Render(r.Context(), w)
 }
 

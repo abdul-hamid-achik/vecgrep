@@ -257,7 +257,10 @@ templ Layout(title string) {
 					const root = container || document;
 					root.querySelectorAll('pre code[class*="language-"]').forEach(block => {
 						if (!block.classList.contains('prism-highlighted')) {
-							Prism.highlightElement(block);
+							// Guard against Prism not being loaded
+							if (window.Prism && Prism.highlightElement) {
+								Prism.highlightElement(block);
+							}
 							block.classList.add('prism-highlighted');
 						}
 					});

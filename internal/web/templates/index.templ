@@ -269,7 +269,7 @@ templ StatusPage(stats map[string]interface{}, languages []LanguageOption, chunk
 			<h1 class="text-2xl font-bold" style="color: var(--nord8);">Index Status</h1>
 			<!-- Overview cards -->
 			<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-				for _, key := range []string{"total_chunks", "total_files", "total_projects"} {
+				for _, key := range []string{"total_chunks", "total_files", "projects"} {
 					if value, ok := stats[key]; ok {
 						<div class="card p-4 text-center">
 							<dt class="text-sm" style="color: var(--nord3);">{ statusLabel(key) }</dt>
@@ -329,7 +329,7 @@ func statusLabel(key string) string {
 		return "Total Chunks"
 	case "total_files":
 		return "Total Files"
-	case "total_projects":
+	case "projects":
 		return "Projects"
 	default:
 		return key
