@@ -250,7 +250,7 @@ func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts Si
 
 	// Get source chunk's file path for same-file exclusion
 	if opts.ExcludeSameFile && opts.SourceFilePath == "" {
-		chunk, err := s.db.Backend().GetChunkByLocation("", 0) // Will need to find by ID
+		chunk, err := s.db.Backend().GetChunkByID(chunkID)
 		if err == nil && chunk != nil {
 			opts.SourceFilePath = chunk.RelativePath
 		}

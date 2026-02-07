@@ -9,6 +9,10 @@ templ Layout(title string) {
 			<title>{ title } - vecgrep</title>
 			<link rel="stylesheet" href="/static/css/output.css"/>
 			<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+			<!-- Prism.js for syntax highlighting (Nord theme) -->
+			<link rel="stylesheet" href="https://unpkg.com/prism-themes@1.9.0/themes/prism-nord.css"/>
+			<script src="https://unpkg.com/prismjs@1.29.0/prism.js" data-manual></script>
+			<script src="https://unpkg.com/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
 			<style>
 				/* Nord color scheme */
 				:root {
@@ -57,6 +61,17 @@ templ Layout(title string) {
 				.btn:hover {
 					background-color: var(--nord9);
 				}
+				.btn-secondary {
+					background-color: var(--nord2);
+					color: var(--nord4);
+				}
+				.btn-secondary:hover {
+					background-color: var(--nord3);
+				}
+				.btn-secondary.active {
+					background-color: var(--nord10);
+					color: var(--nord6);
+				}
 				.badge {
 					background-color: var(--nord2);
 					color: var(--nord4);
@@ -64,8 +79,8 @@ templ Layout(title string) {
 					border-radius: 4px;
 					font-size: 12px;
 				}
-				.badge-lang { background-color: var(--nord10); }
-				.badge-type { background-color: var(--nord15); }
+				.badge-lang { background-color: var(--nord10); color: var(--nord6); }
+				.badge-type { background-color: var(--nord15); color: var(--nord6); }
 				.badge-score { background-color: var(--nord14); color: var(--nord0); }
 				pre {
 					background-color: var(--nord0);
@@ -73,10 +88,15 @@ templ Layout(title string) {
 					border-radius: 6px;
 					padding: 16px;
 					overflow-x: auto;
+					position: relative;
 				}
 				code {
 					font-family: 'JetBrains Mono', 'Fira Code', monospace;
 					font-size: 14px;
+				}
+				/* Override Prism background to match Nord */
+				pre[class*="language-"], code[class*="language-"] {
+					background: var(--nord0) !important;
 				}
 				.htmx-indicator {
 					display: none;
@@ -94,6 +114,75 @@ templ Layout(title string) {
 					from { transform: rotate(0deg); }
 					to { transform: rotate(360deg); }
 				}
+				/* Copy button */
+				.copy-btn {
+					position: absolute;
+					top: 8px;
+					right: 8px;
+					background: var(--nord2);
+					color: var(--nord4);
+					border: 1px solid var(--nord3);
+					border-radius: 4px;
+					padding: 4px 8px;
+					font-size: 11px;
+					cursor: pointer;
+					opacity: 0;
+					transition: opacity 0.2s;
+					z-index: 10;
+				}
+				pre:hover .copy-btn {
+					opacity: 1;
+				}
+				.copy-btn:hover {
+					background: var(--nord3);
+					color: var(--nord6);
+				}
+				.copy-btn.copied {
+					background: var(--nord14);
+					color: var(--nord0);
+				}
+				/* Result card navigation highlight */
+				.result-card {
+					transition: border-color 0.15s ease;
+				}
+				.result-card.focused {
+					border-color: var(--nord8) !important;
+					box-shadow: 0 0 0 1px var(--nord8);
+				}
+				/* Keyboard shortcut hints */
+				kbd {
+					background: var(--nord2);
+					border: 1px solid var(--nord3);
+					border-radius: 3px;
+					padding: 1px 5px;
+					font-size: 11px;
+					font-family: var(--font-mono, monospace);
+					color: var(--nord4);
+				}
+				/* Line numbers in code blocks */
+				.line-num {
+					display: inline-block;
+					width: 3em;
+					text-align: right;
+					padding-right: 1em;
+					color: var(--nord3);
+					user-select: none;
+					font-size: 12px;
+				}
+				/* Nav active state */
+				nav a.active {
+					color: var(--nord8) !important;
+					font-weight: 600;
+				}
+				/* Responsive */
+				@media (max-width: 640px) {
+					.filter-row {
+						flex-direction: column;
+					}
+					.search-bar {
+						flex-direction: column;
+					}
+				}
 			</style>
 		</head>
 		<body class="h-full flex flex-col">
@@ -102,11 +191,14 @@ templ Layout(title string) {
 					<a href="/" class="text-2xl font-bold" style="color: var(--nord8);">
 						vecgrep
 					</a>
-					<nav class="flex gap-4">
+					<nav class="flex gap-4 items-center" id="main-nav">
 						<a href="/" class="hover:underline" style="color: var(--nord9);">Search</a>
 						<a href="/similar" class="hover:underline" style="color: var(--nord9);">Similar</a>
 						<a href="/status" class="hover:underline" style="color: var(--nord9);">Status</a>
 						<a href="/api/health" class="hover:underline" style="color: var(--nord9);">API</a>
+						<span class="text-xs" style="color: var(--nord3);" title="Press / to focus search, j/k to navigate results, Esc to clear">
+							<kbd>/</kbd> search
+						</span>
 					</nav>
 				</div>
 			</header>
@@ -118,6 +210,122 @@ templ Layout(title string) {
 			<footer class="border-t border-gray-700 p-4 text-center text-sm" style="color: var(--nord3);">
 				vecgrep - Semantic code search powered by vector embeddings
 			</footer>
+			<script>
+				// Highlight active nav link
+				(function() {
+					const path = window.location.pathname;
+					document.querySelectorAll('#main-nav a').forEach(a => {
+						const href = a.getAttribute('href');
+						if (href === path || (href !== '/' && path.startsWith(href))) {
+							a.classList.add('active');
+						}
+					});
+				})();
+
+				// Copy to clipboard for code blocks
+				function copyCode(btn) {
+					const pre = btn.closest('pre');
+					const code = pre.querySelector('code');
+					const text = code.textContent;
+					navigator.clipboard.writeText(text).then(() => {
+						btn.textContent = 'Copied!';
+						btn.classList.add('copied');
+						setTimeout(() => {
+							btn.textContent = 'Copy';
+							btn.classList.remove('copied');
+						}, 2000);
+					});
+				}
+
+				// Add copy buttons to all code blocks after HTMX swaps
+				function addCopyButtons(container) {
+					const root = container || document;
+					root.querySelectorAll('pre:not(.has-copy-btn)').forEach(pre => {
+						if (pre.querySelector('code')) {
+							pre.classList.add('has-copy-btn');
+							const btn = document.createElement('button');
+							btn.className = 'copy-btn';
+							btn.textContent = 'Copy';
+							btn.onclick = function() { copyCode(this); };
+							pre.appendChild(btn);
+						}
+					});
+				}
+
+				// Syntax highlighting after HTMX swaps
+				function highlightCode(container) {
+					const root = container || document;
+					root.querySelectorAll('pre code[class*="language-"]').forEach(block => {
+						if (!block.classList.contains('prism-highlighted')) {
+							// Guard against Prism not being loaded
+							if (window.Prism && Prism.highlightElement) {
+								Prism.highlightElement(block);
+							}
+							block.classList.add('prism-highlighted');
+						}
+					});
+				}
+
+				// Initialize on page load
+				document.addEventListener('DOMContentLoaded', function() {
+					addCopyButtons();
+					highlightCode();
+				});
+
+				// Re-initialize after HTMX content swaps
+				document.body.addEventListener('htmx:afterSwap', function(evt) {
+					addCopyButtons(evt.detail.target);
+					highlightCode(evt.detail.target);
+				});
+
+				// Keyboard shortcuts
+				document.addEventListener('keydown', function(e) {
+					const activeTag = document.activeElement.tagName;
+					const isInput = activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT';
+
+					// / to focus search
+					if (e.key === '/' && !isInput) {
+						e.preventDefault();
+						const searchInput = document.querySelector('input[name="q"]') || document.querySelector('input[name="chunk_id"]');
+						if (searchInput) searchInput.focus();
+					}
+
+					// Escape to blur
+					if (e.key === 'Escape' && isInput) {
+						document.activeElement.blur();
+					}
+
+					// j/k to navigate result cards
+					if ((e.key === 'j' || e.key === 'k') && !isInput) {
+						e.preventDefault();
+						const cards = Array.from(document.querySelectorAll('.result-card'));
+						if (cards.length === 0) return;
+
+						const current = document.querySelector('.result-card.focused');
+						let idx = current ? cards.indexOf(current) : -1;
+
+						if (current) current.classList.remove('focused');
+
+						if (e.key === 'j') {
+							idx = Math.min(idx + 1, cards.length - 1);
+						} else {
+							idx = Math.max(idx - 1, 0);
+						}
+
+						cards[idx].classList.add('focused');
+						cards[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+					}
+
+					// Enter on focused card opens similar
+					if (e.key === 'Enter' && !isInput) {
+						const focused = document.querySelector('.result-card.focused');
+						if (focused) {
+							const link = focused.querySelector('a[href*="/similar"]');
+							if (link) window.location.href = link.href;
+						}
+					}
+				});
+			</script>
 		</body>
 	</html>
 }

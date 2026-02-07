@@ -2,10 +2,26 @@ package templates
 
 import "fmt"
 
+// LanguageOption represents a language available in the index.
+type LanguageOption struct {
+	Value string // e.g., "go"
+	Label string // e.g., "Go (42)"
+	Count int64  // Number of chunks for this language
+}
+
+// ChunkTypeOption represents a chunk type available in the index.
+type ChunkTypeOption struct {
+	Value string // e.g., "function"
+	Label string // e.g., "Function (123)"
+	Count int64
+}
+
 // IndexData contains data for the index page.
 type IndexData struct {
-	Query   string
-	Results []SearchResult
+	Query      string
+	Results    []SearchResult
+	Languages  []LanguageOption
+	ChunkTypes []ChunkTypeOption
 }
 
 // SearchResult represents a search result for display.
@@ -21,6 +37,54 @@ type SearchResult struct {
 	Score      float32
 }
 
+// prismLanguage maps vecgrep language identifiers to Prism.js language classes.
+func prismLanguage(lang string) string {
+	switch lang {
+	case "go":
+		return "go"
+	case "python":
+		return "python"
+	case "javascript":
+		return "javascript"
+	case "typescript":
+		return "typescript"
+	case "rust":
+		return "rust"
+	case "java":
+		return "java"
+	case "c":
+		return "c"
+	case "cpp":
+		return "cpp"
+	case "ruby":
+		return "ruby"
+	case "php":
+		return "php"
+	case "swift":
+		return "swift"
+	case "kotlin":
+		return "kotlin"
+	case "shell":
+		return "bash"
+	case "sql":
+		return "sql"
+	case "markdown":
+		return "markdown"
+	case "json":
+		return "json"
+	case "yaml":
+		return "yaml"
+	case "toml":
+		return "toml"
+	case "html":
+		return "html"
+	case "css":
+		return "css"
+	default:
+		return "text"
+	}
+}
+
 templ Index(data IndexData) {
 	@Layout("Search") {
 		<div class="space-y-6">
@@ -31,59 +95,85 @@ templ Index(data IndexData) {
 					hx-target="#results"
 					hx-indicator="#loading"
 					hx-trigger="submit"
+					hx-push-url="true"
 					class="space-y-4"
 				>
-					<div class="flex gap-4">
+					<div class="flex gap-4 search-bar">
 						<input
 							type="text"
 							name="q"
+							id="search-input"
 							placeholder="Search your codebase semantically..."
 							value={ data.Query }
 							class="input flex-1 px-4 py-3 text-lg"
 							autocomplete="off"
 							autofocus
+							aria-label="Search query"
 						/>
 						<button type="submit" class="btn px-6 py-3 text-lg">
 							Search
 						</button>
 					</div>
+					<!-- Search mode selector -->
+					<div class="flex gap-2 items-center">
+						<span class="text-xs" style="color: var(--nord3);">Mode:</span>
+						<label class="flex items-center gap-1 text-sm cursor-pointer" style="color: var(--nord4);">
+							<input type="radio" name="mode" value="hybrid" checked class="accent-current"/>
+							Hybrid
+						</label>
+						<label class="flex items-center gap-1 text-sm cursor-pointer" style="color: var(--nord4);">
+							<input type="radio" name="mode" value="semantic"/>
+							Semantic
+						</label>
+						<label class="flex items-center gap-1 text-sm cursor-pointer" style="color: var(--nord4);">
+							<input type="radio" name="mode" value="keyword"/>
+							Keyword
+						</label>
+					</div>
 					<!-- Filters -->
-					<div class="flex gap-4 flex-wrap">
-						<select name="lang" class="input px-3 py-2">
-							<option value="">All Languages</option>
-							<option value="go">Go</option>
-							<option value="python">Python</option>
-							<option value="javascript">JavaScript</option>
-							<option value="typescript">TypeScript</option>
-							<option value="rust">Rust</option>
-							<option value="java">Java</option>
-							<option value="c">C</option>
-							<option value="cpp">C++</option>
-						</select>
-						<select name="type" class="input px-3 py-2">
-							<option value="">All Types</option>
-							<option value="function">Function</option>
-							<option value="class">Class</option>
-							<option value="block">Block</option>
-							<option value="comment">Comment</option>
-							<option value="generic">Generic</option>
-						</select>
-						<input
-							type="text"
-							name="file"
-							placeholder="File pattern (e.g., *.go)"
-							class="input px-3 py-2"
-						/>
-						<select name="limit" class="input px-3 py-2">
-							<option value="10">10 results</option>
-							<option value="20">20 results</option>
-							<option value="50">50 results</option>
-						</select>
+					<div class="flex gap-4 flex-wrap filter-row">
+						<div>
+							<label for="filter-lang" class="sr-only">Language</label>
+							<select name="lang" id="filter-lang" class="input px-3 py-2" aria-label="Filter by language">
+								<option value="">All Languages</option>
+								for _, lang := range data.Languages {
+									<option value={ lang.Value }>{ lang.Label }</option>
+								}
+							</select>
+						</div>
+						<div>
+							<label for="filter-type" class="sr-only">Chunk Type</label>
+							<select name="type" id="filter-type" class="input px-3 py-2" aria-label="Filter by chunk type">
+								<option value="">All Types</option>
+								for _, ct := range data.ChunkTypes {
+									<option value={ ct.Value }>{ ct.Label }</option>
+								}
+							</select>
+						</div>
+						<div>
+							<label for="filter-file" class="sr-only">File pattern</label>
+							<input
+								type="text"
+								name="file"
+								id="filter-file"
+								placeholder="File pattern (e.g., *.go)"
+								class="input px-3 py-2"
+								aria-label="File pattern filter"
+							/>
+						</div>
+						<div>
+							<label for="filter-limit" class="sr-only">Result limit</label>
+							<select name="limit" id="filter-limit" class="input px-3 py-2" aria-label="Number of results">
+								<option value="10">10 results</option>
+								<option value="20">20 results</option>
+								<option value="50">50 results</option>
+							</select>
+						</div>
 					</div>
 				</form>
 			</div>
 			<!-- Loading indicator -->
-			<div id="loading" class="htmx-indicator text-center py-8">
+			<div id="loading" class="htmx-indicator text-center py-8" role="status" aria-live="polite">
 				<svg class="spinner inline-block w-8 h-8" style="color: var(--nord8);" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
 					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
 					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -91,7 +181,7 @@ templ Index(data IndexData) {
 				<p class="mt-2" style="color: var(--nord4);">Searching...</p>
 			</div>
 			<!-- Results container -->
-			<div id="results">
+			<div id="results" aria-live="polite">
 				if len(data.Results) > 0 {
 					@SearchResults(data.Results)
 				}
@@ -110,6 +200,7 @@ templ SearchResults(results []SearchResult) {
 		<div class="space-y-4">
 			<p class="text-sm" style="color: var(--nord3);">
 				Found { fmt.Sprintf("%d", len(results)) } results
+				<span class="ml-2"><kbd>j</kbd>/<kbd>k</kbd> navigate <kbd>Enter</kbd> open similar</span>
 			</p>
 			for _, result := range results {
 				@ResultCard(result)
@@ -119,7 +210,7 @@ templ SearchResults(results []SearchResult) {
 }
 
 templ ResultCard(result SearchResult) {
-	<div class="card p-4 space-y-3">
+	<div class="card result-card p-4 space-y-3" data-chunk-id={ fmt.Sprintf("%d", result.ChunkID) }>
 		<!-- Header -->
 		<div class="flex items-start justify-between">
 			<div class="flex items-center gap-2 flex-wrap">
@@ -161,31 +252,112 @@ templ ResultCard(result SearchResult) {
 				<span class="badge">{ result.SymbolName }</span>
 			}
 		</div>
-		<!-- Code block -->
-		<pre><code>{ result.Content }</code></pre>
+		<!-- Syntax-highlighted code block -->
+		<pre><code class={ "language-" + prismLanguage(result.Language) }>{ result.Content }</code></pre>
 	</div>
 }
 
 templ Error(message string) {
-	<div class="card p-6 text-center" style="border-color: var(--nord11);">
+	<div class="card p-6 text-center" style="border-color: var(--nord11);" role="alert">
 		<p style="color: var(--nord11);">Error: { message }</p>
 	</div>
 }
 
-templ StatusPage(stats map[string]interface{}) {
+templ StatusPage(stats map[string]interface{}, languages []LanguageOption, chunkTypes []ChunkTypeOption) {
 	@Layout("Status") {
 		<div class="space-y-6">
 			<h1 class="text-2xl font-bold" style="color: var(--nord8);">Index Status</h1>
-			<div class="card p-6">
-				<dl class="grid grid-cols-2 gap-4">
-					for key, value := range stats {
-						<div>
-							<dt class="text-sm" style="color: var(--nord3);">{ key }</dt>
-							<dd class="text-lg font-medium" style="color: var(--nord4);">{ fmt.Sprintf("%v", value) }</dd>
+			<!-- Overview cards -->
+			<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+				for _, key := range []string{"total_chunks", "total_files", "projects"} {
+					if value, ok := stats[key]; ok {
+						<div class="card p-4 text-center">
+							<dt class="text-sm" style="color: var(--nord3);">{ statusLabel(key) }</dt>
+							<dd class="text-3xl font-bold mt-1" style="color: var(--nord8);">{ fmt.Sprintf("%v", value) }</dd>
 						</div>
 					}
-				</dl>
+				}
 			</div>
+			<!-- Language distribution -->
+			if len(languages) > 0 {
+				<div class="card p-6">
+					<h2 class="text-lg font-semibold mb-4" style="color: var(--nord6);">Languages</h2>
+					<div class="space-y-2">
+						for _, lang := range languages {
+							<div class="flex items-center gap-3">
+								<span class="badge badge-lang" style="min-width: 80px; text-align: center;">{ lang.Value }</span>
+								<div class="flex-1 bg-gray-800 rounded-full h-4 overflow-hidden">
+									<div
+										class="h-full rounded-full"
+										style={ fmt.Sprintf("width: %s; background-color: var(--nord10);", langBarWidth(lang.Count, languages)) }
+									></div>
+								</div>
+								<span class="text-sm" style="color: var(--nord4); min-width: 50px; text-align: right;">{ fmt.Sprintf("%d", lang.Count) }</span>
+							</div>
+						}
+					</div>
+				</div>
+			}
+			<!-- Chunk type distribution -->
+			if len(chunkTypes) > 0 {
+				<div class="card p-6">
+					<h2 class="text-lg font-semibold mb-4" style="color: var(--nord6);">Chunk Types</h2>
+					<div class="space-y-2">
+						for _, ct := range chunkTypes {
+							<div class="flex items-center gap-3">
+								<span class="badge badge-type" style="min-width: 80px; text-align: center;">{ ct.Value }</span>
+								<div class="flex-1 bg-gray-800 rounded-full h-4 overflow-hidden">
+									<div
+										class="h-full rounded-full"
+										style={ fmt.Sprintf("width: %s; background-color: var(--nord15);", typeBarWidth(ct.Count, chunkTypes)) }
+									></div>
+								</div>
+								<span class="text-sm" style="color: var(--nord4); min-width: 50px; text-align: right;">{ fmt.Sprintf("%d", ct.Count) }</span>
+							</div>
+						}
+					</div>
+				</div>
+			}
 		</div>
 	}
+}
+
+// statusLabel maps stat keys to human-readable labels.
+func statusLabel(key string) string {
+	switch key {
+	case "total_chunks":
+		return "Total Chunks"
+	case "total_files":
+		return "Total Files"
+	case "projects":
+		return "Projects"
+	default:
+		return key
+	}
+}
+
+// langBarWidth calculates the width percentage for a language bar chart.
+func langBarWidth(count int64, languages []LanguageOption) string {
+	if len(languages) == 0 {
+		return "0%"
+	}
+	maxCount := languages[0].Count // Languages are sorted by count descending
+	if maxCount == 0 {
+		return "0%"
+	}
+	pct := float64(count) / float64(maxCount) * 100
+	return fmt.Sprintf("%.0f%%", pct)
+}
+
+// typeBarWidth calculates the width percentage for a chunk type bar chart.
+func typeBarWidth(count int64, types []ChunkTypeOption) string {
+	if len(types) == 0 {
+		return "0%"
+	}
+	maxCount := types[0].Count
+	if maxCount == 0 {
+		return "0%"
+	}
+	pct := float64(count) / float64(maxCount) * 100
+	return fmt.Sprintf("%.0f%%", pct)
 }

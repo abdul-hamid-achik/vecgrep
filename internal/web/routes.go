@@ -95,6 +95,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/status", s.handler.APIStatus)
 		r.Get("/health", s.handler.Health)
 		r.Get("/similar", s.handler.APISimilar)
+		r.Get("/languages", s.handler.APILanguages)
 	})
 }
 
