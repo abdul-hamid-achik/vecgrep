@@ -216,7 +216,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	
+
 	// If not an HTMX request, render full page (for bookmarks/refreshes)
 	if r.Header.Get("HX-Request") == "" {
 		languages, chunkTypes := h.getIndexedFilters(r.Context())
@@ -229,7 +229,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		component.Render(r.Context(), w)
 		return
 	}
-	
+
 	// HTMX request: return fragment only
 	templates.SearchResults(templateResults).Render(r.Context(), w)
 }
@@ -477,7 +477,7 @@ func (h *Handler) SimilarSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	
+
 	// If not an HTMX request, render full page (for bookmarks/refreshes)
 	if r.Header.Get("HX-Request") == "" {
 		languages, chunkTypes := h.getIndexedFilters(r.Context())
@@ -492,7 +492,7 @@ func (h *Handler) SimilarSearch(w http.ResponseWriter, r *http.Request) {
 		component.Render(r.Context(), w)
 		return
 	}
-	
+
 	// HTMX request: return fragment only
 	templates.SearchResults(templateResults).Render(r.Context(), w)
 }

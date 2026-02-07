@@ -962,7 +962,7 @@ func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string
 					}
 				}
 			}
-			
+
 			// Clamp score to [0, 1] range to maintain consistency with UI percentage display
 			if score > 1.0 {
 				score = 1.0
