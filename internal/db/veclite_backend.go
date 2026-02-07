@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -411,6 +412,19 @@ func (b *VecLiteBackend) SearchEmbeddings(queryEmbedding []float32, limit int) (
 	}
 
 	return searchResults, nil
+}
+
+// GetChunkByID retrieves a full chunk record by its vector ID.
+func (b *VecLiteBackend) GetChunkByID(chunkID int64) (*ChunkRecord, error) {
+	record, err := b.coll.Get(uint64(chunkID))
+	if err != nil {
+		return nil, fmt.Errorf("chunk not found for ID %d: %w", chunkID, err)
+	}
+	if record == nil {
+		return nil, fmt.Errorf("chunk not found for ID %d", chunkID)
+	}
+	chunk := recordToChunk(record)
+	return &chunk, nil
 }
 
 // GetEmbedding retrieves the embedding for a chunk by its ID.
@@ -907,26 +921,46 @@ func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string
 		return nil, err
 	}
 
-	// Convert results - apply text matching as a score boost
-	searchResults := make([]SearchResult, 0, limit)
+	// Convert all results - apply text matching as a score boost
+	searchResults := make([]SearchResult, 0, len(results))
 	textQueryLower := strings.ToLower(textQuery)
+	textQueryWords := strings.Fields(textQueryLower)
 
 	for _, r := range results {
-		if len(searchResults) >= limit {
-			break
-		}
-
 		chunk := recordToChunk(r.Record)
 
 		// Calculate text match boost
 		score := r.Score
 		if textQuery != "" && chunk.Content != "" {
 			contentLower := strings.ToLower(chunk.Content)
+			textWeight := 1.0 - float64(vectorWeight)
+
+			// Exact phrase match gets full boost
 			if strings.Contains(contentLower, textQueryLower) {
-				// Boost score for text match (score is distance, lower is better for cosine)
-				// Apply text weight as a boost
-				textWeight := 1.0 - float64(vectorWeight)
-				score = score * float32(1.0-textWeight*0.3) // Up to 30% boost for text match
+				score = score * float32(1.0+textWeight*0.5) // Up to 50% boost for exact phrase match
+			} else {
+				// Token-level matching: boost proportionally to matched words
+				matchedWords := 0
+				for _, word := range textQueryWords {
+					if strings.Contains(contentLower, word) {
+						matchedWords++
+					}
+				}
+				if matchedWords > 0 && len(textQueryWords) > 0 {
+					matchRatio := float64(matchedWords) / float64(len(textQueryWords))
+					score = score * float32(1.0+textWeight*0.3*matchRatio) // Partial boost for word matches
+				}
+			}
+
+			// Symbol name match gets extra boost
+			if chunk.SymbolName != "" {
+				symbolLower := strings.ToLower(chunk.SymbolName)
+				for _, word := range textQueryWords {
+					if strings.Contains(symbolLower, word) {
+						score = score * float32(1.0+textWeight*0.2) // Extra boost for symbol match
+						break
+					}
+				}
 			}
 		}
 
@@ -942,6 +976,16 @@ func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string
 		}
 
 		searchResults = append(searchResults, sr)
+	}
+
+	// Re-rank by boosted score (higher is better for cosine similarity)
+	sort.Slice(searchResults, func(i, j int) bool {
+		return searchResults[i].Distance > searchResults[j].Distance
+	})
+
+	// Trim to requested limit
+	if len(searchResults) > limit {
+		searchResults = searchResults[:limit]
 	}
 
 	return searchResults, nil

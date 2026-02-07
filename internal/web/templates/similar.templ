@@ -23,84 +23,102 @@ templ Similar(data SimilarData) {
 					hx-target="#results"
 					hx-indicator="#loading"
 					hx-trigger="submit"
+					hx-push-url="true"
 					class="space-y-4"
 				>
 					<!-- Tab interface for input modes -->
 					<div class="space-y-4">
-						<div class="flex gap-4 border-b border-gray-600 pb-2">
-							<button type="button" class="tab-btn active" data-tab="chunk" onclick="switchTab('chunk')">
+						<div class="flex gap-4 border-b border-gray-600 pb-2" role="tablist">
+							<button type="button" class="tab-btn active" data-tab="chunk" onclick="switchTab('chunk')" role="tab" aria-selected="true">
 								Chunk ID
 							</button>
-							<button type="button" class="tab-btn" data-tab="file" onclick="switchTab('file')">
+							<button type="button" class="tab-btn" data-tab="file" onclick="switchTab('file')" role="tab" aria-selected="false">
 								File:Line
 							</button>
-							<button type="button" class="tab-btn" data-tab="text" onclick="switchTab('text')">
+							<button type="button" class="tab-btn" data-tab="text" onclick="switchTab('text')" role="tab" aria-selected="false">
 								Text Snippet
 							</button>
 						</div>
 
 						<!-- Chunk ID input -->
-						<div id="tab-chunk" class="tab-content">
+						<div id="tab-chunk" class="tab-content" role="tabpanel">
 							<input
 								type="text"
 								name="chunk_id"
 								placeholder="Enter chunk ID (e.g., 42)"
 								value={ data.ChunkID }
 								class="input w-full px-4 py-3"
+								aria-label="Chunk ID"
 							/>
 						</div>
 
 						<!-- File:Line input -->
-						<div id="tab-file" class="tab-content hidden">
+						<div id="tab-file" class="tab-content hidden" role="tabpanel">
 							<input
 								type="text"
 								name="file_loc"
 								placeholder="Enter file:line (e.g., internal/search/search.go:50)"
 								value={ data.FileLoc }
 								class="input w-full px-4 py-3"
+								aria-label="File and line location"
 							/>
 						</div>
 
 						<!-- Text snippet input -->
-						<div id="tab-text" class="tab-content hidden">
+						<div id="tab-text" class="tab-content hidden" role="tabpanel">
 							<textarea
 								name="text"
 								placeholder="Enter code snippet to find similar code..."
 								class="input w-full px-4 py-3"
 								rows="4"
+								aria-label="Code snippet"
 							>{ data.Text }</textarea>
 						</div>
 					</div>
 
 					<!-- Filters -->
-					<div class="flex gap-4 flex-wrap">
-						<select name="lang" class="input px-3 py-2">
-							<option value="">All Languages</option>
-							for _, lang := range data.Languages {
-								<option value={ lang.Value }>{ lang.Label }</option>
-							}
-						</select>
-						<select name="type" class="input px-3 py-2">
-							<option value="">All Types</option>
-							for _, ct := range data.ChunkTypes {
-								<option value={ ct.Value }>{ ct.Label }</option>
-							}
-						</select>
-						<input
-							type="text"
-							name="file"
-							placeholder="File pattern (e.g., *.go)"
-							class="input px-3 py-2"
-						/>
+					<div class="flex gap-4 flex-wrap filter-row">
+						<div>
+							<label for="similar-lang" class="sr-only">Language</label>
+							<select name="lang" id="similar-lang" class="input px-3 py-2" aria-label="Filter by language">
+								<option value="">All Languages</option>
+								for _, lang := range data.Languages {
+									<option value={ lang.Value }>{ lang.Label }</option>
+								}
+							</select>
+						</div>
+						<div>
+							<label for="similar-type" class="sr-only">Chunk Type</label>
+							<select name="type" id="similar-type" class="input px-3 py-2" aria-label="Filter by chunk type">
+								<option value="">All Types</option>
+								for _, ct := range data.ChunkTypes {
+									<option value={ ct.Value }>{ ct.Label }</option>
+								}
+							</select>
+						</div>
+						<div>
+							<label for="similar-file" class="sr-only">File pattern</label>
+							<input
+								type="text"
+								name="file"
+								id="similar-file"
+								placeholder="File pattern (e.g., *.go)"
+								class="input px-3 py-2"
+								aria-label="File pattern filter"
+							/>
+						</div>
 						<label class="flex items-center gap-2" style="color: var(--nord4);">
-							<input type="checkbox" name="exclude_same_file" value="true" />
+							<input type="checkbox" name="exclude_same_file" value="true"/>
 							Exclude same file
 						</label>
-						<select name="limit" class="input px-3 py-2">
-							<option value="10">10 results</option>
-							<option value="20">20 results</option>
-							<option value="50">50 results</option>
-						</select>
+						<div>
+							<label for="similar-limit" class="sr-only">Result limit</label>
+							<select name="limit" id="similar-limit" class="input px-3 py-2" aria-label="Number of results">
+								<option value="10">10 results</option>
+								<option value="20">20 results</option>
+								<option value="50">50 results</option>
+							</select>
+						</div>
 					</div>
 
 					<button type="submit" class="btn px-6 py-3">
@@ -110,7 +128,7 @@ templ Similar(data SimilarData) {
 			</div>
 
 			<!-- Loading indicator -->
-			<div id="loading" class="htmx-indicator text-center py-8">
+			<div id="loading" class="htmx-indicator text-center py-8" role="status" aria-live="polite">
 				<svg class="spinner inline-block w-8 h-8" style="color: var(--nord8);" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
 					<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
 					<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -119,7 +137,7 @@ templ Similar(data SimilarData) {
 			</div>
 
 			<!-- Results container -->
-			<div id="results">
+			<div id="results" aria-live="polite">
 				if len(data.Results) > 0 {
 					@SearchResults(data.Results)
 				}
@@ -151,10 +169,9 @@ templ Similar(data SimilarData) {
 			function switchTab(tabName) {
 				// Update tab buttons
 				document.querySelectorAll('.tab-btn').forEach(btn => {
-					btn.classList.remove('active');
-					if (btn.dataset.tab === tabName) {
-						btn.classList.add('active');
-					}
+					const isActive = btn.dataset.tab === tabName;
+					btn.classList.toggle('active', isActive);
+					btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
 				});
 
 				// Update tab content
@@ -163,17 +180,18 @@ templ Similar(data SimilarData) {
 				});
 				document.getElementById('tab-' + tabName).classList.remove('hidden');
 
-				// Clear other inputs
+				// Clear other inputs and focus the active one
 				document.querySelectorAll('.tab-content input, .tab-content textarea').forEach(input => {
 					if (!input.closest('#tab-' + tabName)) {
 						input.value = '';
 					}
 				});
+				const activeInput = document.querySelector('#tab-' + tabName + ' input, #tab-' + tabName + ' textarea');
+				if (activeInput) activeInput.focus();
 			}
 
 			// Initialize - show the tab that has a value
 			document.addEventListener('DOMContentLoaded', function() {
-				const chunkInput = document.querySelector('#tab-chunk input');
 				const fileInput = document.querySelector('#tab-file input');
 				const textInput = document.querySelector('#tab-text textarea');
 
@@ -185,52 +203,4 @@ templ Similar(data SimilarData) {
 			});
 		</script>
 	}
-}
-
-templ SimilarResultCard(result SearchResult) {
-	<div class="card p-4 space-y-3">
-		<!-- Header -->
-		<div class="flex items-start justify-between">
-			<div class="flex items-center gap-2 flex-wrap">
-				<a
-					href="#"
-					class="font-medium hover:underline"
-					style="color: var(--nord8);"
-					title={ result.FilePath }
-				>
-					{ result.FilePath }
-				</a>
-				<span class="text-sm" style="color: var(--nord3);">
-					:{ fmt.Sprintf("%d", result.StartLine) }-{ fmt.Sprintf("%d", result.EndLine) }
-				</span>
-			</div>
-			<div class="flex items-center gap-2">
-				<a
-					href={ templ.SafeURL(fmt.Sprintf("/similar?chunk_id=%d", result.ChunkID)) }
-					class="text-xs px-2 py-1 rounded hover:opacity-80"
-					style="background-color: var(--nord10); color: var(--nord6);"
-					title="Find similar code"
-				>
-					Find Similar
-				</a>
-				<span class="badge badge-score">
-					{ fmt.Sprintf("%.0f%%", result.Score*100) }
-				</span>
-			</div>
-		</div>
-		<!-- Badges -->
-		<div class="flex gap-2 flex-wrap">
-			if result.Language != "" && result.Language != "unknown" {
-				<span class="badge badge-lang">{ result.Language }</span>
-			}
-			if result.ChunkType != "" && result.ChunkType != "generic" {
-				<span class="badge badge-type">{ result.ChunkType }</span>
-			}
-			if result.SymbolName != "" {
-				<span class="badge">{ result.SymbolName }</span>
-			}
-		</div>
-		<!-- Code block -->
-		<pre><code>{ result.Content }</code></pre>
-	</div>
 }

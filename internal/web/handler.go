@@ -178,6 +178,16 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	if filePattern := r.URL.Query().Get("file"); filePattern != "" {
 		opts.FilePattern = filePattern
 	}
+	if mode := r.URL.Query().Get("mode"); mode != "" {
+		switch mode {
+		case "semantic":
+			opts.Mode = search.SearchModeSemantic
+		case "keyword":
+			opts.Mode = search.SearchModeKeyword
+		case "hybrid":
+			opts.Mode = search.SearchModeHybrid
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -221,8 +231,10 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	languages, chunkTypes := h.getIndexedFilters(r.Context())
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	templates.StatusPage(stats).Render(r.Context(), w)
+	templates.StatusPage(stats, languages, chunkTypes).Render(r.Context(), w)
 }
 
 // APISearch handles JSON API search requests.
@@ -249,6 +261,16 @@ func (h *Handler) APISearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if filePattern := r.URL.Query().Get("file"); filePattern != "" {
 		opts.FilePattern = filePattern
+	}
+	if mode := r.URL.Query().Get("mode"); mode != "" {
+		switch mode {
+		case "semantic":
+			opts.Mode = search.SearchModeSemantic
+		case "keyword":
+			opts.Mode = search.SearchModeKeyword
+		case "hybrid":
+			opts.Mode = search.SearchModeHybrid
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
