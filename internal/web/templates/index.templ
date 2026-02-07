@@ -2,10 +2,26 @@ package templates
 
 import "fmt"
 
+// LanguageOption represents a language available in the index.
+type LanguageOption struct {
+	Value string // e.g., "go"
+	Label string // e.g., "Go (42)"
+	Count int64  // Number of chunks for this language
+}
+
+// ChunkTypeOption represents a chunk type available in the index.
+type ChunkTypeOption struct {
+	Value string // e.g., "function"
+	Label string // e.g., "Function (123)"
+	Count int64
+}
+
 // IndexData contains data for the index page.
 type IndexData struct {
-	Query   string
-	Results []SearchResult
+	Query      string
+	Results    []SearchResult
+	Languages  []LanguageOption
+	ChunkTypes []ChunkTypeOption
 }
 
 // SearchResult represents a search result for display.
@@ -51,22 +67,15 @@ templ Index(data IndexData) {
 					<div class="flex gap-4 flex-wrap">
 						<select name="lang" class="input px-3 py-2">
 							<option value="">All Languages</option>
-							<option value="go">Go</option>
-							<option value="python">Python</option>
-							<option value="javascript">JavaScript</option>
-							<option value="typescript">TypeScript</option>
-							<option value="rust">Rust</option>
-							<option value="java">Java</option>
-							<option value="c">C</option>
-							<option value="cpp">C++</option>
+							for _, lang := range data.Languages {
+								<option value={ lang.Value }>{ lang.Label }</option>
+							}
 						</select>
 						<select name="type" class="input px-3 py-2">
 							<option value="">All Types</option>
-							<option value="function">Function</option>
-							<option value="class">Class</option>
-							<option value="block">Block</option>
-							<option value="comment">Comment</option>
-							<option value="generic">Generic</option>
+							for _, ct := range data.ChunkTypes {
+								<option value={ ct.Value }>{ ct.Label }</option>
+							}
 						</select>
 						<input
 							type="text"

@@ -4,10 +4,12 @@ import "fmt"
 
 // SimilarData contains data for the similar search page.
 type SimilarData struct {
-	ChunkID  string
-	FileLoc  string
-	Text     string
-	Results  []SearchResult
+	ChunkID    string
+	FileLoc    string
+	Text       string
+	Results    []SearchResult
+	Languages  []LanguageOption
+	ChunkTypes []ChunkTypeOption
 }
 
 templ Similar(data SimilarData) {
@@ -74,22 +76,15 @@ templ Similar(data SimilarData) {
 					<div class="flex gap-4 flex-wrap">
 						<select name="lang" class="input px-3 py-2">
 							<option value="">All Languages</option>
-							<option value="go">Go</option>
-							<option value="python">Python</option>
-							<option value="javascript">JavaScript</option>
-							<option value="typescript">TypeScript</option>
-							<option value="rust">Rust</option>
-							<option value="java">Java</option>
-							<option value="c">C</option>
-							<option value="cpp">C++</option>
+							for _, lang := range data.Languages {
+								<option value={ lang.Value }>{ lang.Label }</option>
+							}
 						</select>
 						<select name="type" class="input px-3 py-2">
 							<option value="">All Types</option>
-							<option value="function">Function</option>
-							<option value="class">Class</option>
-							<option value="block">Block</option>
-							<option value="comment">Comment</option>
-							<option value="generic">Generic</option>
+							for _, ct := range data.ChunkTypes {
+								<option value={ ct.Value }>{ ct.Label }</option>
+							}
 						</select>
 						<input
 							type="text"

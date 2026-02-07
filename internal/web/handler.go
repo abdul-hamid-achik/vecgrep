@@ -3,14 +3,60 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
+	"unicode"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
 	"github.com/abdul-hamid-achik/vecgrep/internal/version"
 	"github.com/abdul-hamid-achik/vecgrep/internal/web/templates"
 )
+
+// titleCase capitalizes the first letter of a string.
+func titleCase(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
+}
+
+// languageDisplayNames maps internal language identifiers to human-readable names.
+var languageDisplayNames = map[string]string{
+	"go":         "Go",
+	"python":     "Python",
+	"javascript": "JavaScript",
+	"typescript": "TypeScript",
+	"rust":       "Rust",
+	"java":       "Java",
+	"c":          "C",
+	"cpp":        "C++",
+	"ruby":       "Ruby",
+	"php":        "PHP",
+	"swift":      "Swift",
+	"kotlin":     "Kotlin",
+	"shell":      "Shell",
+	"sql":        "SQL",
+	"markdown":   "Markdown",
+	"json":       "JSON",
+	"yaml":       "YAML",
+	"toml":       "TOML",
+	"html":       "HTML",
+	"css":        "CSS",
+}
+
+// chunkTypeDisplayNames maps internal chunk type identifiers to human-readable names.
+var chunkTypeDisplayNames = map[string]string{
+	"function": "Function",
+	"class":    "Class",
+	"block":    "Block",
+	"comment":  "Comment",
+	"generic":  "Generic",
+}
 
 // Handler handles HTTP requests for the web UI.
 type Handler struct {
@@ -26,11 +72,81 @@ func NewHandler(searcher *search.Searcher, projectRoot string) *Handler {
 	}
 }
 
+// getIndexedFilters fetches languages and chunk types from the vector DB.
+func (h *Handler) getIndexedFilters(ctx context.Context) ([]templates.LanguageOption, []templates.ChunkTypeOption) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	stats, err := h.searcher.GetIndexStats(ctx)
+	if err != nil {
+		return nil, nil
+	}
+
+	var languages []templates.LanguageOption
+	var chunkTypes []templates.ChunkTypeOption
+
+	// Extract languages from stats
+	if langMap, ok := stats["languages"].(map[string]int64); ok {
+		for lang, count := range langMap {
+			if lang == "" || lang == "unknown" {
+				continue
+			}
+			displayName := languageDisplayNames[lang]
+			if displayName == "" {
+				displayName = titleCase(lang)
+			}
+			languages = append(languages, templates.LanguageOption{
+				Value: lang,
+				Label: fmt.Sprintf("%s (%d)", displayName, count),
+				Count: count,
+			})
+		}
+		// Sort by count descending, then by name
+		sort.Slice(languages, func(i, j int) bool {
+			if languages[i].Count != languages[j].Count {
+				return languages[i].Count > languages[j].Count
+			}
+			return languages[i].Value < languages[j].Value
+		})
+	}
+
+	// Extract chunk types from stats
+	if typeMap, ok := stats["chunk_types"].(map[string]int64); ok {
+		for ct, count := range typeMap {
+			if ct == "" {
+				continue
+			}
+			displayName := chunkTypeDisplayNames[ct]
+			if displayName == "" {
+				displayName = titleCase(ct)
+			}
+			chunkTypes = append(chunkTypes, templates.ChunkTypeOption{
+				Value: ct,
+				Label: fmt.Sprintf("%s (%d)", displayName, count),
+				Count: count,
+			})
+		}
+		// Sort by count descending
+		sort.Slice(chunkTypes, func(i, j int) bool {
+			if chunkTypes[i].Count != chunkTypes[j].Count {
+				return chunkTypes[i].Count > chunkTypes[j].Count
+			}
+			return chunkTypes[i].Value < chunkTypes[j].Value
+		})
+	}
+
+	return languages, chunkTypes
+}
+
 // Index renders the main search page.
 func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
+	languages, chunkTypes := h.getIndexedFilters(r.Context())
+
 	component := templates.Index(templates.IndexData{
-		Query:   "",
-		Results: nil,
+		Query:      "",
+		Results:    nil,
+		Languages:  languages,
+		ChunkTypes: chunkTypes,
 	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	component.Render(r.Context(), w)
@@ -165,6 +281,16 @@ func (h *Handler) APIStatus(w http.ResponseWriter, r *http.Request) {
 	h.jsonResponse(w, stats)
 }
 
+// APILanguages returns the indexed languages and chunk types as JSON.
+func (h *Handler) APILanguages(w http.ResponseWriter, r *http.Request) {
+	languages, chunkTypes := h.getIndexedFilters(r.Context())
+
+	h.jsonResponse(w, map[string]interface{}{
+		"languages":   languages,
+		"chunk_types": chunkTypes,
+	})
+}
+
 // Health returns a simple health check response.
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	h.jsonResponse(w, map[string]interface{}{
@@ -190,11 +316,15 @@ func (h *Handler) jsonError(w http.ResponseWriter, message string, status int) {
 
 // Similar renders the similar code search page.
 func (h *Handler) Similar(w http.ResponseWriter, r *http.Request) {
+	languages, chunkTypes := h.getIndexedFilters(r.Context())
+
 	component := templates.Similar(templates.SimilarData{
-		ChunkID: r.URL.Query().Get("chunk_id"),
-		FileLoc: r.URL.Query().Get("file_loc"),
-		Text:    r.URL.Query().Get("text"),
-		Results: nil,
+		ChunkID:    r.URL.Query().Get("chunk_id"),
+		FileLoc:    r.URL.Query().Get("file_loc"),
+		Text:       r.URL.Query().Get("text"),
+		Results:    nil,
+		Languages:  languages,
+		ChunkTypes: chunkTypes,
 	})
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	component.Render(r.Context(), w)
