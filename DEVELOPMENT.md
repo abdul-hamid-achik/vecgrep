@@ -49,6 +49,17 @@ task gen          # Generate code (templ, css)
 task clean        # Remove build artifacts
 ```
 
+## Release
+
+```bash
+# Ensure the pipeline passes locally
+task ship
+
+# Create and push the release tag
+task release:tag TAG=vX.Y.Z
+git push origin vX.Y.Z
+```
+
 ---
 
 ## Architecture Overview
