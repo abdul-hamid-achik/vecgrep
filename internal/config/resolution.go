@@ -356,7 +356,7 @@ func FindProjectRootFrom(startDir string) (string, error) {
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			// Reached filesystem root
-			return "", fmt.Errorf("not in a vecgrep project (no config file or %s directory found)", DefaultDataDir)
+			return "", fmt.Errorf("not in a vecgrep project (no config file or %s directory found). Run 'vecgrep init' to initialize", DefaultDataDir)
 		}
 		dir = parent
 	}

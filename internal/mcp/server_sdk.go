@@ -26,6 +26,7 @@ import (
 type InitInput struct {
 	Path  string `json:"path" jsonschema:"Full absolute path to the project directory. Get this from the current working directory the user is in."`
 	Force bool   `json:"force,omitempty" jsonschema:"Overwrite existing configuration if present."`
+	Local bool   `json:"local,omitempty" jsonschema:"Create local .vecgrep/ directory instead of centralized storage in ~/.vecgrep/projects/."`
 }
 
 // SearchInput is the input for vecgrep_search.
@@ -148,15 +149,15 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Version: version.Version,
 	}, &sdkmcp.ServerOptions{
 		Instructions: "vecgrep provides semantic code search using vector embeddings. " +
-			"IMPORTANT: The .vecgrep folder should be added to .gitignore - it contains the local database and should not be committed. " +
-			"For projects with existing .vecgrep folder, just use vecgrep_search directly - it auto-detects the project. " +
+			"By default, project data is stored centrally in ~/.vecgrep/projects/ so no .vecgrep folder is created in your project. " +
+			"For projects with existing index (local or global), just use vecgrep_search directly - it auto-detects the project. " +
 			"For new projects, run vecgrep_init with the project path, then vecgrep_index to index the codebase.",
 	})
 
 	// Register tools using typed handlers
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_init",
-		Description: "Initialize or activate vecgrep for a project. If .vecgrep folder exists, activates the existing index. If not, creates a new one. Note: Search/index/status commands auto-detect projects, so this is only needed for new projects or switching directories.",
+		Description: "Initialize or activate vecgrep for a project. By default, registers the project centrally in ~/.vecgrep/projects/ (no local .vecgrep/ created). Use local=true to create a local .vecgrep/ directory instead. If an existing index is found (local or global), activates it. Search/index/status commands auto-detect projects, so this is only needed for new projects or switching directories.",
 	}, s.handleInit)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -247,7 +248,28 @@ func (s *SDKServer) ensureInitialized(ctx context.Context) error {
 	// Try to auto-detect project from current working directory
 	projectRoot, err := config.GetProjectRoot()
 	if err != nil {
-		return fmt.Errorf("no vecgrep project found. Run vecgrep_init with the project path, or run 'vecgrep init' in the project directory first")
+		// Not found via local markers or global config - try to auto-register globally
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			return fmt.Errorf("no vecgrep project found. Run vecgrep_init with the project path, or run 'vecgrep init' in the project directory first")
+		}
+
+		// Auto-register the cwd globally
+		if regErr := config.AddProjectToGlobal(cwd, ""); regErr != nil {
+			return fmt.Errorf("no vecgrep project found and auto-register failed: %w. Run vecgrep_init with the project path", regErr)
+		}
+
+		// Create the data directory
+		name, _, _ := config.FindProjectByPath(cwd)
+		dataDir, ddErr := config.GetProjectDataDir(name)
+		if ddErr != nil {
+			return fmt.Errorf("failed to get project data directory: %w", ddErr)
+		}
+		if mkErr := os.MkdirAll(dataDir, 0755); mkErr != nil {
+			return fmt.Errorf("failed to create data directory: %w", mkErr)
+		}
+
+		projectRoot = cwd
 	}
 
 	// Auto-activate the detected project
@@ -335,10 +357,21 @@ func (s *SDKServer) handleInit(ctx context.Context, req *sdkmcp.CallToolRequest,
 		}, nil, nil
 	}
 
+	// Local mode: create .vecgrep/ directory inside the project
+	if input.Local {
+		return s.handleInitLocal(ctx, path, input.Force)
+	}
+
+	// Global mode (default): register in ~/.vecgrep/projects/
+	return s.handleInitGlobal(ctx, path, input.Force)
+}
+
+// handleInitLocal creates a local .vecgrep/ directory inside the project.
+func (s *SDKServer) handleInitLocal(ctx context.Context, path string, force bool) (*sdkmcp.CallToolResult, any, error) {
 	dataDir := filepath.Join(path, config.DefaultDataDir)
 
-	// Check if already initialized
-	if _, err := os.Stat(dataDir); err == nil && !input.Force {
+	// Check if already initialized locally
+	if _, err := os.Stat(dataDir); err == nil && !force {
 		// Already initialized - just activate this project
 		return s.activateProject(ctx, path)
 	}
@@ -368,16 +401,57 @@ func (s *SDKServer) handleInit(ctx context.Context, req *sdkmcp.CallToolRequest,
 	return s.activateProject(ctx, path)
 }
 
+// handleInitGlobal registers a project in ~/.vecgrep/projects/.
+func (s *SDKServer) handleInitGlobal(ctx context.Context, path string, force bool) (*sdkmcp.CallToolResult, any, error) {
+	// Check if already registered globally
+	existingName, existingEntry, _ := config.FindProjectByPath(path)
+	if existingEntry != nil && !force {
+		// Already registered - just activate
+		return s.activateProject(ctx, path)
+	}
+	_ = existingName
+
+	// Register in global config
+	if err := config.AddProjectToGlobal(path, ""); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to register project globally: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Get the derived name and data directory
+	name, _, _ := config.FindProjectByPath(path)
+	dataDir, err := config.GetProjectDataDir(name)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to get project data directory: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Create data directory
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to create data directory: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Activate the project
+	return s.activateProject(ctx, path)
+}
+
 // activateProject opens the database and configures the server for the given project.
 func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*sdkmcp.CallToolResult, any, error) {
-	// Load config
-	cfg, err := config.Load(projectPath)
+	// Load resolved config to know if we're in global mode
+	resolved, err := config.LoadResolved(projectPath)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to load config: %v", err)}},
 			IsError: true,
 		}, nil, nil
 	}
+	cfg := resolved.Config
 
 	// Close existing database if open
 	if s.db != nil {
@@ -426,7 +500,10 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Activated vecgrep project: %s\n\n", projectPath)
-	sb.WriteString("**IMPORTANT:** Add `.vecgrep` to your `.gitignore` file.\n\n")
+	// Only show .gitignore warning when using local mode
+	if !resolved.IsGlobalMode {
+		sb.WriteString("**IMPORTANT:** Add `.vecgrep` to your `.gitignore` file.\n\n")
+	}
 	fmt.Fprintf(&sb, "- Data dir: %s\n", cfg.DataDir)
 	fmt.Fprintf(&sb, "- Vector backend: %s\n", vecVersion)
 	fmt.Fprintf(&sb, "- Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model)

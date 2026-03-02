@@ -54,7 +54,8 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize vecgrep in the current directory",
 	Long: `Initialize a new vecgrep project in the current directory.
-This creates a .vecgrep directory with the configuration and database.`,
+By default, project data is stored centrally in ~/.vecgrep/projects/{name}/.
+Use --local to create a .vecgrep directory inside the project instead.`,
 	RunE: runInit,
 }
 
@@ -341,8 +342,8 @@ func init() {
 	profileCmd.AddCommand(profileShowCmd)
 
 	// Init command flags for global/local mode
-	initCmd.Flags().Bool("global", false, "register project in ~/.vecgrep/ instead of creating local .vecgrep/")
-	initCmd.Flags().Bool("local", false, "create local .vecgrep/ directory (default behavior)")
+	initCmd.Flags().Bool("global", false, "register project in ~/.vecgrep/ (this is the default)")
+	initCmd.Flags().Bool("local", false, "create local .vecgrep/ directory instead of centralized storage")
 	initCmd.Flags().String("extension", "yaml", "preferred config file extension (yaml or yml)")
 
 	// Add commands
@@ -376,13 +377,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get current directory: %w", err)
 	}
 
-	// Global mode: register in ~/.vecgrep/projects/
-	if globalMode {
-		return runInitGlobal(cwd, force)
+	// Local mode: create .vecgrep/ directory
+	if localMode {
+		return runInitLocal(cwd, force)
 	}
 
-	// Local mode (default): create .vecgrep/ directory
-	return runInitLocal(cwd, force)
+	// Global mode (default): register in ~/.vecgrep/projects/
+	return runInitGlobal(cwd, force)
 }
 
 // runInitGlobal initializes a project in global mode (~/.vecgrep/projects/)
