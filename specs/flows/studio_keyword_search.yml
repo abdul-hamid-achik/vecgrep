@@ -1,0 +1,53 @@
+version: 1
+name: studio_keyword_search
+intent: |
+    a user can switch vecgrep Studio to keyword mode, enter a query, submit it, and quit cleanly.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); cd \"$TMP\"; \"$ROOT/bin/vecgrep\" init --local >/dev/null; \"$ROOT/bin/vecgrep\" config set search.default_mode keyword >/dev/null; GLYPHRUN=1 TERM=xterm-256color \"$ROOT/bin/vecgrep\" studio"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "mode keyword"
+        timeoutMs: 5000
+    - type: "config mutation"
+    - wait:
+        screen:
+            contains: "config mutation"
+        timeoutMs: 3000
+    - press: "enter"
+    - wait:
+        screen:
+            contains: "0 results"
+        timeoutMs: 5000
+    - snapshot: keyword_search
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: keyword_mode_visible
+      description: Studio shows keyword mode after cycling search modes
+      verify:
+        screen:
+            contains: "mode keyword"
+    - id: query_visible
+      description: the typed query remains visible in the search input
+      verify:
+        screen:
+            contains: "config mutation"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:a7bf8c48b1515f0ed01134b90234f828cfc0b5a5e52cda3115b420b62ced6bde

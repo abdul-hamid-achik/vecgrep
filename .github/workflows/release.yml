@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  TASK_VERSION: v3.51.1
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -23,17 +26,11 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Install templ
-        run: go install github.com/a-h/templ/cmd/templ@latest
+      - name: Set up Task
+        run: go install github.com/go-task/task/v3/cmd/task@${TASK_VERSION}
 
-      - name: Install Tailwind dependencies
-        run: npm install
-
-      - name: Generate templ code
-        run: templ generate
-
-      - name: Generate CSS
-        run: npx @tailwindcss/cli -i assets/css/input.css -o internal/web/static/css/output.css --minify
+      - name: Run checks
+        run: task check
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

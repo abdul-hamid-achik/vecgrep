@@ -5,20 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-06-15
 
 ### Changed
 - **BREAKING**: Migrated to pure veclite storage - all data (files, chunks, metadata) now stored in veclite
+- **BREAKING**: Replaced the HTMX web interface with vecgrep Studio (`vecgrep studio`)
 - Removed SQLite entirely - no CGO required for any operations
 - Simplified database architecture - single data store instead of SQLite + veclite hybrid
+- Shared CLI and Studio behavior now routes through an internal application service layer
 - Cross-compilation now works for all platforms (linux/darwin/windows on amd64/arm64)
 - Simplified release workflow - single GoReleaser job for all platforms
+
+### Added
+- Interactive Studio terminal app for search, preview, indexing, status, config inspection, similar-code lookup, and index maintenance
 
 ### Removed
 - SQLite dependency and all related code
 - sqlite-vec backend (replaced by pure veclite)
 - sqlc code generation (no SQL needed)
 - CGO requirement from build process
+- Web UI, templ/Tailwind/npm build tooling, and web server Docker/CI steps
 
 ### Migration
 - **Existing users must re-index after upgrading:**
@@ -37,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Database migration support for schema upgrades
 - CHANGELOG.md with version history
 - CONTRIBUTING.md with contribution guidelines
-- Comprehensive DEVELOPMENT.md with architecture documentation
+- Comprehensive `docs/development.md` with architecture documentation
 
 ### Changed
 - Configuration now resolves from multiple sources in priority order:

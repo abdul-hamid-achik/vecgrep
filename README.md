@@ -15,7 +15,7 @@ vecgrep indexes your codebase and enables natural language search using vector e
 - **Language-Aware Chunking** - Intelligent code splitting by functions, classes, and blocks
 - **Rich Filtering** - Filter by language, chunk type, directory, file pattern, and line range
 - **MCP Support** - Model Context Protocol server for AI assistant integration
-- **Web Interface** - Browser-based search UI with syntax highlighting
+- **Studio** - Full-screen Bubble Tea workspace for search, preview, indexing, and status
 - **Similar Code Finder** - Find semantically similar code across your codebase
 - **Search Diagnostics** - Explain mode for debugging and optimizing searches
 - **Embedding Cache** - Cache query embeddings for faster repeated searches
@@ -62,7 +62,7 @@ task install
    vecgrep init
    ```
 
-   **Important:** Add `.vecgrep` to your `.gitignore` file:
+   `vecgrep init` registers the project globally by default. If you prefer project-local state, run `vecgrep init --local` and ignore `.vecgrep/`:
    ```bash
    echo ".vecgrep" >> .gitignore
    ```
@@ -77,6 +77,11 @@ task install
    vecgrep search "error handling in HTTP requests"
    ```
 
+   Or open Studio:
+   ```bash
+   vecgrep studio
+   ```
+
 ### Using OpenAI (Alternative)
 
 If you prefer cloud embeddings via OpenAI:
@@ -88,12 +93,10 @@ If you prefer cloud embeddings via OpenAI:
 
 2. **Configure vecgrep to use OpenAI:**
 
-   Edit `.vecgrep/config.yaml`:
-   ```yaml
-   embedding:
-     provider: openai
-     model: text-embedding-3-small
-     dimensions: 1536
+   ```bash
+   vecgrep config set embedding.provider openai
+   vecgrep config set embedding.model text-embedding-3-small
+   vecgrep config set embedding.dimensions 1536
    ```
 
    Or set via environment:
@@ -112,10 +115,10 @@ If you prefer cloud embeddings via OpenAI:
 ### Initialize a Project
 
 ```bash
-vecgrep init [--force]
+vecgrep init [--local] [--force]
 ```
 
-Creates a `.vecgrep` directory with configuration and database.
+Registers the project globally by default. Use `--local` when you want a project-local `.vecgrep/` directory.
 
 ### Index Files
 
@@ -198,23 +201,21 @@ vecgrep search "imports" --lines=1-50
 vecgrep search "API endpoints" --format=json
 ```
 
-### Web Interface
+### Studio
 
-Start the web server:
+Open the full-screen terminal workspace:
 
 ```bash
-vecgrep serve --web
+vecgrep studio
 ```
 
-Open http://localhost:8080 in your browser to search with a visual interface.
+In an interactive terminal, running `vecgrep` without a subcommand also opens Studio.
 
-Options:
-- `-p, --port` - Server port (default: 8080)
-- `--host` - Server host (default: localhost)
+Studio supports query search, result preview, status/config views, incremental indexing, full re-index confirmation, file deletion from the index, and reset confirmation.
 
 ### MCP Server
 
-Start the MCP server for AI assistant integration:
+Start the MCP stdio server for AI assistant integration:
 
 ```bash
 vecgrep serve --mcp
@@ -371,9 +372,9 @@ vecgrep completion fish > ~/.config/fish/completions/vecgrep.fish
 
 ## Configuration
 
-Configuration is stored in `.vecgrep/config.yaml`:
+Project configuration is usually stored in `vecgrep.yaml` at the project root. Legacy `.vecgrep/config.yaml` files are still read.
 
-> **Note:** The `.vecgrep` directory contains your local index database and configuration.
+> **Note:** Local project indexes may live in `.vecgrep/`, and legacy projects may still keep configuration at `.vecgrep/config.yaml`.
 > Add it to `.gitignore` to avoid committing it to version control.
 
 ```yaml
@@ -401,10 +402,6 @@ search:
   default_mode: hybrid          # Default search mode: semantic, keyword, or hybrid
   vector_weight: 0.7            # Weight for vector similarity in hybrid mode (0-1)
   text_weight: 0.3              # Weight for text matching in hybrid mode (0-1)
-
-server:
-  host: localhost
-  port: 8080
 
 vector:
   veclite:
@@ -446,8 +443,6 @@ All environment variables use the `VECGREP_` prefix:
 | `VECGREP_OLLAMA_URL` | Ollama API URL (default: `http://localhost:11434`) |
 | `VECGREP_OPENAI_API_KEY` | OpenAI API key (or use `OPENAI_API_KEY`) |
 | `VECGREP_OPENAI_BASE_URL` | OpenAI base URL (for Azure/custom endpoints) |
-| `VECGREP_HOST` | Server bind address |
-| `VECGREP_PORT` | Server port |
 
 ### Global Flags
 
@@ -465,7 +460,7 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 
 | Tool | Description |
 |------|-------------|
-| `vecgrep_init` | Initialize vecgrep in a directory (creates `.vecgrep` folder) |
+| `vecgrep_init` | Initialize or activate a project. Defaults to global storage; set `local=true` to create `.vecgrep/` in the project. |
 | `vecgrep_search` | Search with semantic, keyword, or hybrid mode. Supports rich filtering, explain mode, and context lines. |
 | `vecgrep_index` | Index or re-index files in the project |
 | `vecgrep_status` | Get index statistics (files, chunks, languages) |
@@ -577,7 +572,7 @@ claude mcp add --scope user vecgrep -- vecgrep serve --mcp
 claude mcp add --scope local vecgrep -- vecgrep serve --mcp
 ```
 
-The MCP server works in any directory. If `.vecgrep` doesn't exist, use `vecgrep_init` to initialize it first.
+The MCP server works in any directory. If the project has not been registered or initialized yet, use `vecgrep_init` first.
 
 Manage your MCP servers:
 
@@ -619,7 +614,7 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 }
 ```
 
-**Note:** The `cwd` should point to a directory with an initialized `.vecgrep` folder.
+**Note:** The `cwd` should point to the project directory. vecgrep can use either global project registration or a local `.vecgrep/` directory.
 
 ## Docker
 
@@ -631,11 +626,9 @@ Run vecgrep in a container while using Ollama on your host machine.
 # Start Ollama on host (with Metal GPU on macOS)
 OLLAMA_METAL=1 OLLAMA_HOST=0.0.0.0 ollama serve
 
-# Run vecgrep container
-docker compose up -d
+# Run the vecgrep container
+docker compose run --rm vecgrep vecgrep --help
 ```
-
-The web interface is available at http://localhost:8080
 
 ### Configuration
 
@@ -648,8 +641,8 @@ Volumes:
 ### Index from Container
 
 ```bash
-docker compose exec app vecgrep index /workspace
-docker compose exec app vecgrep search "your query"
+docker compose run --rm vecgrep vecgrep index /workspace
+docker compose run --rm vecgrep vecgrep search "your query"
 ```
 
 ## Upgrading
@@ -671,7 +664,7 @@ vecgrep index
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed development workflow.
+See [docs/development.md](docs/development.md) for detailed development workflow.
 
 ```bash
 task doctor       # Check your environment
@@ -679,6 +672,7 @@ task setup        # Install dependencies
 task dev          # Run with hot reload
 task check        # Run fmt, lint, test
 task build        # Build binary
+task flows        # Run terminal Studio flows
 ```
 
 ## License

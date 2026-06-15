@@ -2,11 +2,6 @@ version: 2
 
 project_name: vecgrep
 
-before:
-  hooks:
-    - templ generate
-    - go mod tidy
-
 builds:
   - id: vecgrep
     main: ./cmd/vecgrep

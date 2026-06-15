@@ -87,10 +87,10 @@ type ResetInput struct {
 
 // OverviewInput is the input for vecgrep_overview.
 type OverviewInput struct {
-	IncludeStructure    bool `json:"include_structure,omitempty" jsonschema:"Include directory structure in output (default: true)."`
-	IncludeEntryPoints  bool `json:"include_entry_points,omitempty" jsonschema:"Include entry point files in output (default: true)."`
-	MaxDirectoryDepth   int  `json:"max_directory_depth,omitempty" jsonschema:"Maximum directory depth to show (default: 3)."`
-	IncludeKeyFiles     bool `json:"include_key_files,omitempty" jsonschema:"Include key files like README, config (default: true)."`
+	IncludeStructure   bool `json:"include_structure,omitempty" jsonschema:"Include directory structure in output (default: true)."`
+	IncludeEntryPoints bool `json:"include_entry_points,omitempty" jsonschema:"Include entry point files in output (default: true)."`
+	MaxDirectoryDepth  int  `json:"max_directory_depth,omitempty" jsonschema:"Maximum directory depth to show (default: 3)."`
+	IncludeKeyFiles    bool `json:"include_key_files,omitempty" jsonschema:"Include key files like README, config (default: true)."`
 }
 
 // BatchSearchInput is the input for vecgrep_batch_search.

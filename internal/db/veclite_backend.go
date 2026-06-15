@@ -3,7 +3,6 @@ package db
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -103,6 +102,7 @@ func (b *VecLiteBackend) Init(dimensions int) error {
 		veclite.WithDimension(dimensions),
 		veclite.WithDistanceType(veclite.DistanceCosine), // Use cosine for embeddings
 		veclite.WithHNSW(16, 200),                        // M=16, efConstruction=200
+		veclite.WithTextIndex("content", "symbol_name", "relative_path", "language", "chunk_type"),
 	)
 	if err != nil {
 		// Collection might already exist, try to get it
@@ -514,6 +514,7 @@ func (b *VecLiteBackend) DeleteAll() error {
 		veclite.WithDimension(b.dimensions),
 		veclite.WithDistanceType(veclite.DistanceCosine), // Use cosine for embeddings
 		veclite.WithHNSW(16, 200),                        // M=16, efConstruction=200
+		veclite.WithTextIndex("content", "symbol_name", "relative_path", "language", "chunk_type"),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to recreate collection: %w", err)
@@ -708,11 +709,17 @@ type FilterOptions struct {
 	Directory   string   // Filter by directory prefix
 	MinLine     int      // Filter by minimum start line (0 = no filter)
 	MaxLine     int      // Filter by maximum start line (0 = no filter)
+	ProjectRoot string   // Filter by project root
 }
 
 // buildNativeFilters converts FilterOptions to veclite native filters.
 func (b *VecLiteBackend) buildNativeFilters(opts FilterOptions) []veclite.Filter {
 	var filters []veclite.Filter
+
+	// Project filter
+	if opts.ProjectRoot != "" {
+		filters = append(filters, veclite.Equal("project_root", opts.ProjectRoot))
+	}
 
 	// Language filter
 	if opts.Language != "" {
@@ -860,120 +867,61 @@ func (b *VecLiteBackend) SearchWithExplain(queryEmbedding []float32, limit int, 
 	return searchResults, explainResult, nil
 }
 
-// TextSearch performs a keyword-based search on content.
-// Note: This is a simple Contains-based search since veclite doesn't have native BM25.
-// For true BM25 text search, a future veclite version would be needed.
+// TextSearch performs a keyword-based search on content using VecLite BM25.
 func (b *VecLiteBackend) TextSearch(query string, limit int, opts FilterOptions) ([]SearchResult, error) {
-	// Build filters including text search
 	filters := b.buildNativeFilters(opts)
 
-	// Add text search filter using Contains
-	if query != "" {
-		// Search in content field
-		filters = append(filters, veclite.Contains("content", query))
+	searchOpts := []veclite.SearchOption{veclite.TopK(limit)}
+	if len(filters) > 0 {
+		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
 	}
 
-	// Find matching records
-	records, err := b.coll.Find(filters...)
+	results, err := b.coll.TextSearch(query, searchOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert to SearchResults (no score since this is text-based)
-	searchResults := make([]SearchResult, 0, limit)
-	for _, r := range records {
-		if len(searchResults) >= limit {
-			break
-		}
-
-		chunk := recordToChunk(r)
-		sr := SearchResult{
-			ChunkID:  int64(r.ID),
-			Distance: 0, // No distance for text search
-			Chunk:    &chunk,
-		}
-		searchResults = append(searchResults, sr)
-	}
-
-	return searchResults, nil
+	return b.resultsToSearchResults(results), nil
 }
 
-// HybridSearch combines vector search with text filtering.
-// The vector search provides ranking while text matching is used as a boost.
+// HybridSearch combines vector search with VecLite BM25 text search.
 // vectorWeight controls the influence of vector similarity (0-1).
 func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string, limit int, opts FilterOptions, vectorWeight float32) ([]SearchResult, error) {
 	if len(queryEmbedding) != b.dimensions {
 		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), b.dimensions)
 	}
 
-	// For hybrid search, we do vector search with filters but don't require text match
-	// Text matching is used for re-ranking/boosting, not filtering
 	filters := b.buildNativeFilters(opts)
 
-	// Build search options with filters (not including text query as filter)
-	searchOpts := []veclite.SearchOption{veclite.TopK(limit * 2)} // Get more for re-ranking
+	textWeight := 1.0 - float64(vectorWeight)
+	if textWeight < 0 {
+		textWeight = 0
+	}
+
+	searchOpts := []veclite.SearchOption{
+		veclite.TopK(limit),
+		veclite.WithVectorWeight(float64(vectorWeight)),
+		veclite.WithTextWeight(textWeight),
+	}
 	if len(filters) > 0 {
 		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
 	}
 
-	results, err := b.coll.Search(queryEmbedding, searchOpts...)
+	results, err := b.coll.HybridSearch(queryEmbedding, textQuery, searchOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert all results - apply text matching as a score boost
-	searchResults := make([]SearchResult, 0, len(results))
-	textQueryLower := strings.ToLower(textQuery)
-	textQueryWords := strings.Fields(textQueryLower)
+	return b.resultsToSearchResults(results), nil
+}
 
+func (b *VecLiteBackend) resultsToSearchResults(results []veclite.Result) []SearchResult {
+	searchResults := make([]SearchResult, 0, len(results))
 	for _, r := range results {
 		chunk := recordToChunk(r.Record)
-
-		// Calculate text match boost
-		score := r.Score
-		if textQuery != "" && chunk.Content != "" {
-			contentLower := strings.ToLower(chunk.Content)
-			textWeight := 1.0 - float64(vectorWeight)
-
-			// Exact phrase match gets full boost
-			if strings.Contains(contentLower, textQueryLower) {
-				score = score * float32(1.0+textWeight*0.5) // Up to 50% boost for exact phrase match
-			} else {
-				// Token-level matching: boost proportionally to matched words
-				matchedWords := 0
-				for _, word := range textQueryWords {
-					if strings.Contains(contentLower, word) {
-						matchedWords++
-					}
-				}
-				if matchedWords > 0 && len(textQueryWords) > 0 {
-					matchRatio := float64(matchedWords) / float64(len(textQueryWords))
-					score = score * float32(1.0+textWeight*0.3*matchRatio) // Partial boost for word matches
-				}
-			}
-
-			// Symbol name match gets extra boost
-			if chunk.SymbolName != "" {
-				symbolLower := strings.ToLower(chunk.SymbolName)
-				for _, word := range textQueryWords {
-					if strings.Contains(symbolLower, word) {
-						score = score * float32(1.0+textWeight*0.2) // Extra boost for symbol match
-						break
-					}
-				}
-			}
-
-			// Clamp score to [0, 1] range to maintain consistency with UI percentage display
-			if score > 1.0 {
-				score = 1.0
-			} else if score < 0.0 {
-				score = 0.0
-			}
-		}
-
 		sr := SearchResult{
 			ChunkID:  int64(r.Record.ID),
-			Distance: score,
+			Distance: r.Score,
 			Chunk:    &chunk,
 		}
 
@@ -984,18 +932,7 @@ func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string
 
 		searchResults = append(searchResults, sr)
 	}
-
-	// Re-rank by boosted score (higher is better for cosine similarity)
-	sort.Slice(searchResults, func(i, j int) bool {
-		return searchResults[i].Distance > searchResults[j].Distance
-	})
-
-	// Trim to requested limit
-	if len(searchResults) > limit {
-		searchResults = searchResults[:limit]
-	}
-
-	return searchResults, nil
+	return searchResults
 }
 
 // Ensure VecLiteBackend implements VectorBackend.

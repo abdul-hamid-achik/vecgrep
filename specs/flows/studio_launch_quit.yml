@@ -1,0 +1,44 @@
+version: 1
+name: studio_launch_quit
+intent: |
+    a user can open vecgrep Studio in an initialized project and quit cleanly.
+target:
+    cmd: ["/bin/sh", "-lc", "GLYPHRUN=1 TERM=xterm-256color ./bin/vecgrep studio"]
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "vecgrep"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "mode hybrid"
+        timeoutMs: 5000
+    - snapshot: launch
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: workspace_visible
+      description: Studio renders the search workspace
+      verify:
+        screen:
+            contains: "vecgrep"
+    - id: mode_visible
+      description: the active search mode is visible
+      verify:
+        screen:
+            contains: "mode hybrid"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:9a18b7a8dfb3a70e9da379beb31fb846b4e9b7a5f0b9d3d2a7c8f0a8557f2712

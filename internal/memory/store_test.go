@@ -35,8 +35,8 @@ func (m *mockProvider) EmbedBatch(ctx context.Context, texts []string) ([][]floa
 	return results, nil
 }
 
-func (m *mockProvider) Model() string       { return "mock-model" }
-func (m *mockProvider) Dimensions() int     { return 768 }
+func (m *mockProvider) Model() string              { return "mock-model" }
+func (m *mockProvider) Dimensions() int            { return 768 }
 func (m *mockProvider) Ping(context.Context) error { return nil }
 
 func setupTestStore(t *testing.T) (*MemoryStore, func()) {

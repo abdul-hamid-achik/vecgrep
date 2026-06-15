@@ -38,7 +38,7 @@ type ProjectEntry struct {
 	Embedding *EmbeddingConfig `yaml:"embedding,omitempty"`
 	// Indexing overrides for this project
 	Indexing *IndexingConfig `yaml:"indexing,omitempty"`
-	// Server overrides for this project
+	// MCP server overrides for this project
 	Server *ServerConfig `yaml:"server,omitempty"`
 }
 
@@ -92,6 +92,7 @@ func LoadGlobalConfig() (*GlobalConfig, error) {
 	if err := yaml.Unmarshal(data, &globalCfg); err != nil {
 		return nil, fmt.Errorf("failed to parse global config: %w", err)
 	}
+	globalCfg.Defaults.present = collectConfigPresence(data, "defaults")
 
 	// Initialize maps if nil
 	if globalCfg.Projects == nil {

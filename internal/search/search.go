@@ -125,6 +125,7 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		Directory:   opts.Directory,
 		MinLine:     opts.MinLine,
 		MaxLine:     opts.MaxLine,
+		ProjectRoot: opts.ProjectRoot,
 	}
 
 	var searchResults []db.SearchResult
@@ -209,6 +210,7 @@ func (s *Searcher) SearchWithExplain(ctx context.Context, query string, opts Sea
 		Directory:   opts.Directory,
 		MinLine:     opts.MinLine,
 		MaxLine:     opts.MaxLine,
+		ProjectRoot: opts.ProjectRoot,
 	}
 
 	// Get results with explanation
@@ -266,6 +268,7 @@ func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts Si
 		Directory:   opts.Directory,
 		MinLine:     opts.MinLine,
 		MaxLine:     opts.MaxLine,
+		ProjectRoot: opts.ProjectRoot,
 	}
 
 	// Request more results to account for filtering
@@ -348,6 +351,7 @@ func (s *Searcher) SearchSimilarByText(ctx context.Context, text string, opts Si
 		Directory:   opts.Directory,
 		MinLine:     opts.MinLine,
 		MaxLine:     opts.MaxLine,
+		ProjectRoot: opts.ProjectRoot,
 	}
 
 	searchResults, err := s.db.SearchWithFilter(embedding, opts.Limit, filterOpts)
@@ -428,18 +432,18 @@ func formatDefault(results []Result) string {
 	var sb strings.Builder
 
 	for i, r := range results {
-		sb.WriteString(fmt.Sprintf("=== Result %d (score: %.2f) ===\n", i+1, r.Score))
-		sb.WriteString(fmt.Sprintf("File: %s\n", r.RelativePath))
-		sb.WriteString(fmt.Sprintf("Lines: %d-%d", r.StartLine, r.EndLine))
+		fmt.Fprintf(&sb, "=== Result %d (score: %.2f) ===\n", i+1, r.Score)
+		fmt.Fprintf(&sb, "File: %s\n", r.RelativePath)
+		fmt.Fprintf(&sb, "Lines: %d-%d", r.StartLine, r.EndLine)
 
 		if r.SymbolName != "" {
-			sb.WriteString(fmt.Sprintf(" | Symbol: %s", r.SymbolName))
+			fmt.Fprintf(&sb, " | Symbol: %s", r.SymbolName)
 		}
 		if r.ChunkType != "" && r.ChunkType != "generic" {
-			sb.WriteString(fmt.Sprintf(" | Type: %s", r.ChunkType))
+			fmt.Fprintf(&sb, " | Type: %s", r.ChunkType)
 		}
 		if r.Language != "" && r.Language != "unknown" {
-			sb.WriteString(fmt.Sprintf(" | Lang: %s", r.Language))
+			fmt.Fprintf(&sb, " | Lang: %s", r.Language)
 		}
 		sb.WriteString("\n\n")
 
@@ -475,9 +479,9 @@ func formatCompact(results []Result) string {
 
 	for _, r := range results {
 		// Format: file:startLine-endLine score symbol
-		sb.WriteString(fmt.Sprintf("%s:%d-%d\t%.2f", r.RelativePath, r.StartLine, r.EndLine, r.Score))
+		fmt.Fprintf(&sb, "%s:%d-%d\t%.2f", r.RelativePath, r.StartLine, r.EndLine, r.Score)
 		if r.SymbolName != "" {
-			sb.WriteString(fmt.Sprintf("\t%s", r.SymbolName))
+			fmt.Fprintf(&sb, "\t%s", r.SymbolName)
 		}
 		sb.WriteString("\n")
 	}

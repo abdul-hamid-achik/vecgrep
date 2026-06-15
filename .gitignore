@@ -19,8 +19,6 @@ coverage.html
 
 # Dependency directories
 vendor/
-node_modules/
-package-lock.json
 
 # Go workspace
 go.work
@@ -37,16 +35,10 @@ go.work.sum
 .DS_Store
 Thumbs.db
 
-# Generated files
-internal/db/generated/
-
 # Environment files (keep .env.example)
 .env
 .env.local
 .env.*.local
-
-# Tailwind CLI binary
-/bin/tailwindcss*
 
 # Air tmp directory
 tmp/
@@ -61,12 +53,8 @@ tmp/
 # Task cache
 .task/
 
+# Glyphrun artifacts
+.glyphrun/
+
 # Claude Code
 .claude/
-
-# Generated templ files
-*_templ.go
-
-# Generated Tailwind CSS
-assets/css/output.css
-internal/web/static/css/output.css

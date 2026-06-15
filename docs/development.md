@@ -45,7 +45,11 @@ ollama pull nomic-embed-text
 task              # List all available tasks
 task build        # Build the binary
 task test         # Run tests
-task gen          # Generate code (templ, css)
+task race         # Run tests with the race detector
+task short        # Run short tests
+task verbose      # Run verbose tests
+task cov          # Generate coverage output
+task flows        # Run all terminal Studio flows
 task clean        # Remove build artifacts
 ```
 
@@ -65,8 +69,8 @@ vecgrep follows a layered architecture with clear separation of concerns:
         ┌─────────────────────┼─────────────────────┐
         ▼                     ▼                     ▼
 ┌───────────────┐    ┌───────────────┐    ┌───────────────┐
-│   MCP Server  │    │  Web Server   │    │    Search     │
-│ internal/mcp  │    │ internal/web  │    │internal/search│
+│   MCP Server  │    │    Studio     │    │    Search     │
+│ internal/mcp  │    │internal/studio│    │internal/search│
 └───────────────┘    └───────────────┘    └───────────────┘
         │                     │                     │
         └─────────────────────┼─────────────────────┘
@@ -156,13 +160,12 @@ type Provider interface {
 ### `internal/index/`
 File indexing and code chunking:
 - `indexer.go` - Main indexer coordinating the process
-- `chunker.go` - Language-aware code splitting
-- `walker.go` - File discovery with ignore patterns
-- `language.go` - Language detection
+- `chunker.go` - Language detection and heuristic code splitting
+- `watcher.go` - Optional file system watching for changed files
 
 **Chunker Strategy:**
-- Uses tree-sitter for language-aware parsing
-- Identifies functions, methods, classes, and blocks
+- Uses language-specific pattern extraction where available
+- Identifies functions, types, classes, and blocks
 - Falls back to sliding window for unknown formats
 - Respects chunk_size and chunk_overlap settings
 
@@ -183,19 +186,29 @@ Model Context Protocol server:
 ### `internal/search/`
 Search implementation:
 - `search.go` - Query embedding and similarity search
-- `results.go` - Result formatting and ranking
+- `multi.go` - Multi-query search helpers
+- `warmup.go` - Search warmup helpers
+
+### `internal/app/`
+Shared application service layer used by CLI and Studio:
+- `session.go` - Project/config/database/provider session setup
+- `search.go` - Search and similar-code requests
+- `index.go` - Index maintenance operations
+- `status.go` - Project status aggregation
+
+### `internal/studio/`
+Bubble Tea v2 Studio terminal app:
+- `model.go` - Update/view state machine
+- `run.go` - Program bootstrap
+- `theme.go` - Lip Gloss styles
+
+### `internal/render/`
+CLI rendering adapters for shared result formatting.
 
 ### `internal/version/`
 Version information:
 - Set via ldflags at build time
 - Used by `vecgrep version` command
-
-### `internal/web/`
-Web server with HTMX:
-- `server.go` - Chi router setup
-- `handlers.go` - HTTP handlers
-- `templates/` - Templ template files
-- `static/` - Static assets (CSS)
 
 ---
 
@@ -233,12 +246,11 @@ type EmbeddingConfig struct {
 
 ### Adding a Language Chunker
 
-1. Add language detection in `internal/index/language.go`
+1. Add language detection in `internal/index/chunker.go`
 
-2. Implement tree-sitter parsing in `internal/index/chunker.go`:
+2. Implement heuristic chunk extraction in `internal/index/chunker.go`:
 ```go
 func (c *Chunker) chunkNewLang(content string) []Chunk {
-    // Use tree-sitter parser for the language
     // Identify semantic units (functions, classes, etc.)
     // Return chunks with proper types
 }
@@ -326,7 +338,16 @@ func TestSearch_Integration(t *testing.T) {
 Run integration tests:
 ```bash
 task test        # All tests (Ollama required)
-task test:short  # Skip integration tests
+task short       # Skip integration tests
+```
+
+### Terminal Flows
+
+Glyphrun terminal flows live in `specs/flows/`, matching the flow/action layout used by the automation projects.
+
+```bash
+task flows
+task flow FLOW=specs/flows/studio_launch_quit.yml
 ```
 
 ### Mock Providers
@@ -351,28 +372,14 @@ func (m *MockProvider) Embed(ctx context.Context, text string) ([]float32, error
 
 ### GitHub Actions
 
-- **ci.yml** - Runs on every push/PR: lint, test, build
-- **release.yml** - Runs on tags: creates GitHub release with binaries
+- **ci.yml** - Runs on every push/PR: `task check`, `task race`, `task build`, and coverage upload
+- **release.yml** - Runs `task check`, then creates tagged release binaries with GoReleaser
 
 ### Local CI Simulation
 
 ```bash
 task ship  # Runs full CI pipeline locally
 ```
-
----
-
-## Code Generation
-
-| Command | Regenerates |
-|---------|-------------|
-| `task gen` | All generated code |
-| `task gen:templ` | Go code from .templ files |
-| `task gen:css` | Tailwind CSS |
-
-Always run `task gen` after modifying:
-- `internal/web/templates/*.templ`
-- `assets/css/input.css`
 
 ---
 
@@ -392,9 +399,9 @@ Always run `task gen` after modifying:
 - Embeddings dimension changed (e.g., switched models)
 - Run `vecgrep reset --force` and re-index
 
-**CGO errors during build**
-- Ensure CGO is enabled: `export CGO_ENABLED=1`
-- On macOS, Xcode command line tools required
+**Database migration warning**
+- A legacy `.vecgrep/vecgrep.db` file without a veclite index is not used by the current build
+- Run `vecgrep reset --force` and re-index, or keep a backup before deleting legacy data
 
 ### Debug Mode
 

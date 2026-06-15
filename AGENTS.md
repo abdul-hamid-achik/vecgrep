@@ -12,7 +12,7 @@ vecgrep is a local-first semantic code search tool powered by vector embeddings.
 - Incremental indexing with file hashing
 - Language-aware code chunking
 - MCP (Model Context Protocol) server for AI assistant integration
-- Web interface with HTMX
+- Bubble Tea Studio terminal app
 
 ## Directory Structure
 
@@ -28,12 +28,12 @@ internal/
     veclite_backend.go     # VecLite HNSW implementation
   embed/            # Embedding providers (Ollama, OpenAI)
   index/            # File indexer and chunker
+  app/              # Shared CLI/Studio service layer
   mcp/              # Model Context Protocol server (server_sdk.go)
+  render/           # CLI rendering adapters
   search/           # Search implementation
+  studio/           # Bubble Tea Studio terminal app
   version/          # Version info (set via ldflags)
-  web/              # Web server with templ templates
-    templates/      # templ template files
-    static/         # Static assets (Tailwind CSS)
 ```
 
 ## Development Commands
@@ -43,31 +43,26 @@ Use [Task](https://taskfile.dev) for all operations:
 ```bash
 task doctor       # Check environment setup
 task setup        # Install dependencies and tools
-task dev          # Hot reload development (air + CSS watch)
+task dev          # Hot reload development (air)
 task check        # Run fmt, lint, test (use before commits)
 task build        # Build binary to ./bin/vecgrep
 task test         # Run tests
-task gen          # Generate code (templ, CSS)
+task flows        # Run terminal Studio flows
 ```
 
 ## Prerequisites
 
 1. **Go 1.25+**
 2. **Ollama** running locally with `nomic-embed-text` model
-3. **Dev tools**: templ, air (installed via `task setup:tools`)
-
-## Code Generation
-
-This project uses code generation. Always run `task gen` after modifying:
-- `internal/web/templates/*.templ` - regenerates Go template code
-- `assets/css/input.css` or templates - rebuilds Tailwind CSS
+3. **Dev tools**: air (installed via `task tools`)
 
 ## Testing
 
 ```bash
 task test         # Run all tests
-task test:v       # Verbose output
-task test:short   # Skip integration tests
+task verbose      # Verbose output
+task short        # Skip integration tests
+task flows        # Run all specs/flows/*.yml with Glyphrun
 task cov          # Coverage report
 ```
 
@@ -121,10 +116,10 @@ See `internal/config/resolution.go` for the full resolution logic.
 3. Run tests to ensure compatibility
 4. Note: Existing indexes may need to be rebuilt after schema changes
 
-### Modifying web templates
-1. Edit `.templ` files in `internal/web/templates/`
-2. Run `task gen:templ`
-3. CSS changes require `task gen:css`
+### Modifying Studio
+1. Update Bubble Tea state and rendering in `internal/studio/`
+2. Keep shared behavior in `internal/app/` when CLI and Studio need the same operation
+3. Add unit tests for state transitions and Glyphrun specs under `specs/flows/`
 
 ## Code Style
 

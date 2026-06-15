@@ -1,12 +1,13 @@
-version: '3'
+version: "3"
 
 vars:
   BINARY_NAME: vecgrep
   BUILD_DIR: ./bin
+  AIR_VERSION: v1.65.3
   VERSION:
-    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
   COMMIT:
-    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+    sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
   BUILD_TIME:
     sh: date -u '+%Y-%m-%dT%H:%M:%SZ'
   LDFLAGS: >-
@@ -19,126 +20,33 @@ env:
 
 tasks:
   default:
-    desc: Show available tasks
+    desc: List available tasks
     cmds:
       - task --list
 
-  # ════════════════════════════════════════════════════════════════════════════
-  # QUICK COMMANDS
-  # ════════════════════════════════════════════════════════════════════════════
-
-  check:
-    desc: Run all checks (fmt, lint, test) - use before committing
-    aliases: [ci, verify]
-    cmds:
-      - task: fmt
-      - task: lint
-      - task: test
-      - |
-        echo ""
-        echo "  ✓ All checks passed"
-        echo ""
-
   doctor:
-    desc: Diagnose your development environment
+    desc: Check local development prerequisites
     cmds:
       - |
+        echo "vecgrep doctor"
         echo ""
-        echo "  ╔═══════════════════════════════════════════════════════════════╗"
-        echo "  ║                    vecgrep doctor                             ║"
-        echo "  ╚═══════════════════════════════════════════════════════════════╝"
-        echo ""
-        echo "  Required Tools"
-        echo "  ──────────────"
-        command -v go >/dev/null && echo "    ✓ go $(go version | awk '{print $3}')" || echo "    ✗ go (run: brew install go)"
-        command -v ollama >/dev/null && echo "    ✓ ollama" || echo "    ✗ ollama (run: brew install ollama)"
-        echo ""
-        echo "  Dev Tools"
-        echo "  ─────────"
-        command -v templ >/dev/null && echo "    ✓ templ" || echo "    ✗ templ (run: task setup:tools)"
-        command -v air >/dev/null && echo "    ✓ air" || echo "    ✗ air (run: task setup:tools)"
-        command -v goreleaser >/dev/null && echo "    ✓ goreleaser" || echo "    ○ goreleaser (optional: brew install goreleaser)"
-        command -v golangci-lint >/dev/null && echo "    ✓ golangci-lint" || echo "    ○ golangci-lint (optional: brew install golangci-lint)"
-        echo ""
-        echo "  Ollama Status"
-        echo "  ─────────────"
-        curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "    ✓ Ollama running" || echo "    ✗ Ollama not running (run: task ollama)"
-        ollama list 2>/dev/null | grep -q nomic-embed-text && echo "    ✓ nomic-embed-text model" || echo "    ✗ nomic-embed-text (run: ollama pull nomic-embed-text)"
-        echo ""
-        echo "  Project Status"
-        echo "  ──────────────"
-        [ -f "bin/vecgrep" ] && echo "    ✓ Binary built" || echo "    ○ Binary not built (run: task build)"
-        [ -d ".vecgrep" ] && echo "    ✓ Project initialized" || echo "    ○ Not initialized (run: ./bin/vecgrep init)"
-        echo ""
-
-  wtf:
-    desc: Debug - show what's wrong
-    cmds:
-      - |
-        echo ""
-        echo "  ╔═══════════════════════════════════════════════════════════════╗"
-        echo "  ║                    vecgrep wtf                                ║"
-        echo "  ╚═══════════════════════════════════════════════════════════════╝"
-        echo ""
-        echo "  Build Check"
-        echo "  ───────────"
-      - go build -o /dev/null ./cmd/vecgrep 2>&1 || true
-      - |
-        echo ""
-        echo "  Test Check"
-        echo "  ──────────"
-      - go test ./... 2>&1 | grep -E "(FAIL|PASS|---)" | head -20 || echo "    Tests passing"
-      - |
-        echo ""
-        echo "  Recent Git"
-        echo "  ──────────"
-        git log --oneline -5 2>/dev/null | sed 's/^/    /' || echo "    Not a git repo"
-        echo ""
-
-  ship:
-    desc: Full pipeline - check, build, test (like CI)
-    cmds:
-      - |
-        echo ""
-        echo "  ╔═══════════════════════════════════════════════════════════════╗"
-        echo "  ║                    Preparing to ship                          ║"
-        echo "  ╚═══════════════════════════════════════════════════════════════╝"
-        echo ""
-      - task: gen
-      - task: check
-      - task: build
-      - |
-        echo ""
-        echo "  ╔═══════════════════════════════════════════════════════════════╗"
-        echo "  ║  ✓ Ready to ship!                                             ║"
-        echo "  ╚═══════════════════════════════════════════════════════════════╝"
-        echo ""
-        echo "    git push origin main"
-        echo ""
-
-  # ════════════════════════════════════════════════════════════════════════════
-  # SETUP
-  # ════════════════════════════════════════════════════════════════════════════
+        command -v go >/dev/null && echo "ok go $(go version | awk '{print $3}')" || echo "missing go"
+        command -v ollama >/dev/null && echo "ok ollama" || echo "missing ollama"
+        command -v air >/dev/null && echo "ok air" || echo "missing air (run: task tools)"
+        command -v glyph >/dev/null && echo "ok glyph" || echo "missing glyph"
+        command -v golangci-lint >/dev/null && echo "ok golangci-lint" || echo "missing golangci-lint (go vet fallback will run)"
+        curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "ok ollama server" || echo "offline ollama server"
+        ollama list 2>/dev/null | grep -q nomic-embed-text && echo "ok nomic-embed-text" || echo "missing nomic-embed-text"
+        [ -f "{{.BUILD_DIR}}/{{.BINARY_NAME}}" ] && echo "ok binary" || echo "missing binary (run: task build)"
 
   setup:
-    desc: Run all setup tasks
+    desc: Install dependencies and local tools
     cmds:
-      - task: setup:go
-      - task: setup:tools
-      - task: setup:tailwind
-      - |
-        echo ""
-        echo "  ✓ Setup complete"
-        echo ""
-        echo "  Next steps:"
-        echo "    task gen       Generate code"
-        echo "    task build     Build binary"
-        echo "    task dev       Start development"
-        echo ""
+      - task: deps
+      - task: tools
 
-  "setup:go":
-    desc: Download Go dependencies
-    aliases: [deps]
+  deps:
+    desc: Download and tidy Go modules
     cmds:
       - go mod download
       - go mod tidy
@@ -147,59 +55,69 @@ tasks:
       - go.sum
     method: checksum
 
-  "setup:tools":
-    desc: Install development tools
+  tools:
+    desc: Install Go development tools
     cmds:
-      - go install github.com/a-h/templ/cmd/templ@latest
-      - go install github.com/air-verse/air@latest
+      - go install github.com/air-verse/air@{{.AIR_VERSION}}
     status:
-      - command -v templ
       - command -v air
 
-  "setup:tailwind":
-    desc: Check Tailwind CSS CLI is available via npx
+  fmt:
+    desc: Format Go code
+    aliases: [format]
     cmds:
-      - echo "Tailwind CSS v4 is used via npx @tailwindcss/cli"
-    status:
-      - command -v npx
+      - go fmt ./...
 
-  # ════════════════════════════════════════════════════════════════════════════
-  # CODE GENERATION
-  # ════════════════════════════════════════════════════════════════════════════
-
-  gen:
-    desc: Run all code generation (templ, css)
-    aliases: [generate]
-    deps: [gen:templ, gen:css]
-
-  "gen:templ":
-    desc: Generate Go code from templ files
-    aliases: [templ]
-    sources:
-      - 'internal/web/templates/**/*.templ'
-    generates:
-      - 'internal/web/templates/**/*_templ.go'
+  lint:
+    desc: Run linters
     cmds:
-      - templ generate
+      - |
+        if command -v golangci-lint >/dev/null; then
+          golangci-lint run ./...
+        else
+          go vet ./...
+          test -z "$(gofmt -l .)"
+        fi
 
-  "gen:css":
-    desc: Build Tailwind CSS
-    aliases: [css]
-    sources:
-      - 'assets/css/input.css'
-      - 'internal/web/templates/**/*.templ'
-    generates:
-      - 'internal/web/static/css/output.css'
+  test:
+    desc: Run all tests
     cmds:
-      - npx @tailwindcss/cli@latest -i assets/css/input.css -o internal/web/static/css/output.css --minify
+      - go test ./...
 
-  # ════════════════════════════════════════════════════════════════════════════
-  # BUILD
-  # ════════════════════════════════════════════════════════════════════════════
+  verbose:
+    desc: Run tests with verbose output
+    aliases: [tv]
+    cmds:
+      - go test -v ./...
+
+  short:
+    desc: Run short tests
+    cmds:
+      - go test -short ./...
+
+  race:
+    desc: Run tests with the race detector
+    cmds:
+      - go test -race ./...
+
+  cov:
+    desc: Generate coverage report
+    aliases: [coverage]
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - open coverage.html || true
+
+  check:
+    desc: Run format, lint, and tests
+    aliases: [ci, verify]
+    cmds:
+      - task: fmt
+      - task: lint
+      - task: test
 
   build:
     desc: Build the vecgrep binary
-    aliases: [b]
     cmds:
       - mkdir -p {{.BUILD_DIR}}
       - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}} ./cmd/vecgrep
@@ -210,116 +128,61 @@ tasks:
     generates:
       - "{{.BUILD_DIR}}/{{.BINARY_NAME}}"
 
-  "build:release":
-    desc: Build optimized release binary
+  release:
+    desc: Build an optimized release binary
     cmds:
       - mkdir -p {{.BUILD_DIR}}
       - go build -ldflags "{{.LDFLAGS}} -s -w" -trimpath -o {{.BUILD_DIR}}/{{.BINARY_NAME}} ./cmd/vecgrep
 
   install:
     desc: Install vecgrep to GOPATH/bin
-    aliases: [i]
     cmds:
       - go install -ldflags "{{.LDFLAGS}}" ./cmd/vecgrep
 
-  # ════════════════════════════════════════════════════════════════════════════
-  # DEVELOPMENT
-  # ════════════════════════════════════════════════════════════════════════════
-
   dev:
-    desc: Start development with hot reload (air + css watch)
+    desc: Start hot reload development
     cmds:
-      - task --parallel dev:air dev:css
+      - task: air
 
-  "dev:air":
-    desc: Run Air for Go hot reload
-    aliases: [air]
+  air:
+    desc: Run Air
     cmds:
       - air
 
-  "dev:css":
-    desc: Watch and rebuild Tailwind CSS
-    cmds:
-      - npx @tailwindcss/cli@latest -i assets/css/input.css -o internal/web/static/css/output.css --watch
-
-  "watch:templ":
-    desc: Watch and regenerate templ files
-    cmds:
-      - templ generate --watch
-
   run:
-    desc: "Build and run vecgrep (usage: task run -- search \"query\")"
-    aliases: [r]
+    desc: Run the built binary with extra args
     deps: [build]
     cmds:
       - "{{.BUILD_DIR}}/{{.BINARY_NAME}} {{.CLI_ARGS}}"
 
-  # ════════════════════════════════════════════════════════════════════════════
-  # TESTING
-  # ════════════════════════════════════════════════════════════════════════════
-
-  test:
-    desc: Run all tests
-    aliases: [t]
+  flow:
+    desc: Run one terminal flow with FLOW=specs/flows/name.yml
+    deps: [build]
+    requires:
+      vars: [FLOW]
     cmds:
-      - go test ./...
+      - glyph run "{{.FLOW}}" --format md --progress auto {{.CLI_ARGS}}
 
-  "test:v":
-    desc: Run tests with verbose output
-    aliases: [tv]
+  flows:
+    desc: Run all terminal flows
+    deps: [build]
     cmds:
-      - go test -v ./...
+      - glyph run specs/flows/*.yml --format md --progress auto {{.CLI_ARGS}}
 
-  "test:short":
-    desc: Run unit tests only (skip integration)
+  ship:
+    desc: Run the local release verification pipeline
     cmds:
-      - go test -short ./...
+      - task: check
+      - task: race
+      - task: build
+      - task: flows
 
-  cov:
-    desc: Run tests with coverage report
-    aliases: [coverage]
+  wtf:
+    desc: Print quick debug information
     cmds:
-      - go test -coverprofile=coverage.out ./...
-      - go tool cover -html=coverage.out -o coverage.html
-      - open coverage.html || true
-
-  # ════════════════════════════════════════════════════════════════════════════
-  # LINTING & FORMATTING
-  # ════════════════════════════════════════════════════════════════════════════
-
-  lint:
-    desc: Run linters
-    aliases: [l]
-    cmds:
-      - |
-        if command -v golangci-lint >/dev/null; then
-          golangci-lint run ./...
-        else
-          go vet ./...
-          test -z "$(gofmt -l .)"
-        fi
-
-  fmt:
-    desc: Format all code
-    aliases: [f]
-    cmds:
-      - go fmt ./...
-      - templ fmt . || true
-
-  # ════════════════════════════════════════════════════════════════════════════
-  # DATABASE
-  # ════════════════════════════════════════════════════════════════════════════
-
-  "db:reset":
-    desc: Reset the local database
-    cmds:
-      - rm -rf .vecgrep/
-      - "{{.BUILD_DIR}}/{{.BINARY_NAME}} init"
-      - echo "  ✓ Database reset"
-
-  # ════════════════════════════════════════════════════════════════════════════
-  # OLLAMA
-  # ════════════════════════════════════════════════════════════════════════════
+      - go build -o /dev/null ./cmd/vecgrep 2>&1 || true
+      - go test ./... 2>&1 | grep -E "(FAIL|PASS|---)" | head -20 || echo "tests passing"
+      - git log --oneline -5 2>/dev/null || true
 
   ollama:
     desc: Start Ollama with Metal GPU support
@@ -329,55 +192,44 @@ tasks:
     cmds:
       - ollama serve
 
-  # ════════════════════════════════════════════════════════════════════════════
-  # DOCKER
-  # ════════════════════════════════════════════════════════════════════════════
-
-  "docker:build":
-    desc: Build Docker image
+  image:
+    desc: Build the Docker image
     cmds:
       - docker build -t vecgrep:{{.VERSION}} -t vecgrep:latest .
-      - echo "  ✓ Built vecgrep:{{.VERSION}}"
 
-  "docker:run":
-    desc: "Run Docker container (usage: task docker:run -- index /path)"
+  container:
+    desc: Run the Docker image with extra args
     cmds:
       - docker run --rm -v $(pwd):/workspace vecgrep:latest {{.CLI_ARGS}}
 
   up:
-    desc: Start docker-compose stack
-    aliases: [compose:up]
+    desc: Start the Compose stack
     cmds:
-      - docker-compose up -d
-      - |
-        echo ""
-        echo "  ✓ Services started"
-        echo ""
+      - docker compose up -d
 
   down:
-    desc: Stop docker-compose stack
-    aliases: [compose:down]
+    desc: Stop the Compose stack
     cmds:
-      - docker-compose down
-
-  # ════════════════════════════════════════════════════════════════════════════
-  # CLEANUP
-  # ════════════════════════════════════════════════════════════════════════════
+      - docker compose down
 
   clean:
     desc: Remove build artifacts
-    aliases: [c]
     cmds:
       - rm -rf {{.BUILD_DIR}}
-      - rm -rf tmp
-      - rm -rf dist
+      - rm -rf tmp dist .task .glyphrun
       - rm -f coverage.out coverage.html
-      - echo "  ✓ Cleaned"
+      - rm -f {{.BINARY_NAME}}
+
+  reset:
+    desc: Reset the local project database
+    cmds:
+      - rm -rf .vecgrep/
+      - task: build
+      - "{{.BUILD_DIR}}/{{.BINARY_NAME}} init --local"
 
   nuke:
-    desc: Clean everything including database (destructive!)
-    prompt: This will delete the database. Continue?
+    desc: Remove build artifacts and local database
+    prompt: This will delete the local database. Continue?
     cmds:
       - task: clean
       - rm -rf .vecgrep/
-      - echo "  ✓ Nuked"

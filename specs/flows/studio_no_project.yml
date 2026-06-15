@@ -1,0 +1,47 @@
+version: 1
+name: studio_no_project
+intent: |
+    a user who opens Studio outside a vecgrep project sees the no-project recovery guidance and can quit cleanly.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); cd \"$TMP\"; GLYPHRUN=1 TERM=xterm-256color \"$ROOT/bin/vecgrep\" studio"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "No vecgrep project found"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "vecgrep init --local"
+        timeoutMs: 5000
+    - snapshot: no_project
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: no_project_visible
+      description: Studio reports that no project is available
+      verify:
+        screen:
+            contains: "No vecgrep project found"
+    - id: init_guidance_visible
+      description: Studio shows initialization guidance
+      verify:
+        screen:
+            contains: "vecgrep init --local"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:52f6170278eb512d338a495b029635fc54de35f481a212531802f9baffe1e885

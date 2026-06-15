@@ -21,7 +21,8 @@ type OpenOptions struct {
 }
 
 // Open opens a database connection and initializes the veclite backend.
-func Open(dbPath string, dimensions int, dataDir string) (*DB, error) {
+// The dbPath argument is kept for compatibility; veclite data is derived from dataDir.
+func Open(_ string, dimensions int, dataDir string) (*DB, error) {
 	return OpenWithOptions(OpenOptions{
 		Dimensions: dimensions,
 		DataDir:    dataDir,

@@ -181,10 +181,10 @@ func GetProviderInfo(ctx context.Context) string {
 		if p.Available {
 			status = "available"
 		}
-		sb.WriteString(fmt.Sprintf("  - %s (%s)\n", p.Type, status))
-		sb.WriteString(fmt.Sprintf("    URL: %s\n", p.URL))
-		sb.WriteString(fmt.Sprintf("    Model: %s (%d dimensions)\n", p.Model, p.Dimensions))
-		sb.WriteString(fmt.Sprintf("    %s\n", p.Description))
+		fmt.Fprintf(&sb, "  - %s (%s)\n", p.Type, status)
+		fmt.Fprintf(&sb, "    URL: %s\n", p.URL)
+		fmt.Fprintf(&sb, "    Model: %s (%d dimensions)\n", p.Model, p.Dimensions)
+		fmt.Fprintf(&sb, "    %s\n", p.Description)
 	}
 
 	return sb.String()

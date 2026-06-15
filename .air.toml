@@ -15,11 +15,11 @@ tmp_dir = "tmp"
   # Time delay after file change before rebuild (ms)
   delay = 500
   # Directories to exclude
-  exclude_dir = ["assets", "tmp", "vendor", "testdata", "node_modules", ".git", ".vecgrep"]
+  exclude_dir = ["tmp", "vendor", "testdata", ".git", ".vecgrep", ".vecai", ".glyphrun", ".claude"]
   # File extensions to exclude
   exclude_file = []
   # Regex patterns to exclude
-  exclude_regex = ["_test.go", ".*_templ.go"]
+  exclude_regex = ["_test.go"]
   # Unchanged files to exclude
   exclude_unchanged = false
   # Follow symlinks
@@ -27,7 +27,7 @@ tmp_dir = "tmp"
   # Run binary with full path
   full_bin = ""
   # File extensions to watch
-  include_ext = ["go", "tpl", "tmpl", "html", "sql"]
+  include_ext = ["go", "yaml", "yml", "toml"]
   # Directories to include
   include_dir = []
   # Include files matching regex

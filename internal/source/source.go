@@ -81,37 +81,3 @@ func (r *SourceRegistry) All() []Source {
 	}
 	return sources
 }
-
-// FileSource adapts the existing file-based indexing to the Source interface.
-type FileSource struct {
-	name        string
-	projectRoot string
-}
-
-// NewFileSource creates a new FileSource.
-func NewFileSource(name, projectRoot string) *FileSource {
-	return &FileSource{
-		name:        name,
-		projectRoot: projectRoot,
-	}
-}
-
-// Name returns the source name.
-func (f *FileSource) Name() string {
-	return f.name
-}
-
-// List returns all documents from the file system.
-// For file sources, this delegates to the existing indexer.
-func (f *FileSource) List(ctx context.Context) ([]Document, error) {
-	// This would integrate with the existing file walking logic
-	// For now, return empty - actual file listing happens through the indexer
-	return nil, nil
-}
-
-// Watch watches for file changes.
-func (f *FileSource) Watch(ctx context.Context, onChange func([]Document)) error {
-	// File watching is handled by the existing watcher.go
-	// This is a placeholder for consistency with the interface
-	return nil
-}

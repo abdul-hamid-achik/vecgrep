@@ -34,7 +34,7 @@ Be respectful and constructive in all interactions. We're building this together
 
 ## Development Setup
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed setup instructions.
+See [docs/development.md](docs/development.md) for detailed setup instructions.
 
 Quick start:
 ```bash
@@ -81,9 +81,10 @@ task check  # Runs fmt, lint, and test
 
 ```bash
 task test        # Run all tests
-task test:v      # Verbose output
-task test:short  # Skip integration tests
+task verbose     # Verbose output
+task short       # Skip integration tests
 task cov         # Generate coverage report
+task flows       # Run terminal Studio flows
 ```
 
 ### Writing Tests
@@ -146,10 +147,12 @@ internal/
   db/              # Database layer (veclite)
   embed/           # Embedding providers (Ollama, OpenAI)
   index/           # File indexer and chunker
+  app/             # Shared CLI/Studio service layer
   mcp/             # MCP server implementation
+  render/          # CLI rendering adapters
   search/          # Search implementation
+  studio/          # Bubble Tea Studio terminal app
   version/         # Version info
-  web/             # Web server and templates
 ```
 
 ## Adding New Features
@@ -164,7 +167,7 @@ internal/
 ### Adding a Language Chunker
 
 1. Add language detection in `internal/index/chunker.go`
-2. Implement tree-sitter parsing for the language
+2. Implement heuristic chunk extraction for the language
 3. Add tests with sample code
 
 ### Adding an MCP Tool
@@ -179,16 +182,6 @@ internal/
 2. Update payload construction in `InsertChunk()` and extraction in `recordToChunk()`
 3. Run tests to ensure compatibility
 4. Note: Existing indexes may need to be rebuilt after schema changes
-
-## Code Generation
-
-This project uses code generation. After modifying source files, run:
-
-```bash
-task gen          # Generate all code
-task gen:templ    # Regenerate templates
-task gen:css      # Rebuild Tailwind CSS
-```
 
 ## Questions?
 

@@ -187,6 +187,7 @@ func (r *ConfigResolution) loadYAMLConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
+	cfg.present = collectConfigPresence(data, "")
 
 	return &cfg, nil
 }
@@ -202,7 +203,9 @@ func (r *ConfigResolution) mergeConfig(dst, src *Config) {
 
 	mergeEmbeddingConfig(&dst.Embedding, &src.Embedding)
 	mergeIndexingConfig(&dst.Indexing, &src.Indexing)
-	mergeServerConfig(&dst.Server, &src.Server)
+	mergeSearchConfig(dst, src)
+	mergeServerConfigWithPresence(dst, src)
+	mergeVectorConfig(dst, src)
 }
 
 func mergeEmbeddingConfig(dst, src *EmbeddingConfig) {
@@ -242,14 +245,39 @@ func mergeIndexingConfig(dst, src *IndexingConfig) {
 }
 
 func mergeServerConfig(dst, src *ServerConfig) {
-	if src.Host != "" {
-		dst.Host = src.Host
+	if src.MCPEnabled {
+		dst.MCPEnabled = true
 	}
-	if src.Port != 0 {
-		dst.Port = src.Port
+}
+
+func mergeServerConfigWithPresence(dst, src *Config) {
+	if src.Server.MCPEnabled || src.has("server.mcp_enabled") {
+		dst.Server.MCPEnabled = src.Server.MCPEnabled
 	}
-	// MCPEnabled is a bool, only override if explicitly set
-	// We can't distinguish false from unset, so we don't merge it
+}
+
+func mergeSearchConfig(dst, src *Config) {
+	if src.Search.DefaultMode != "" || src.has("search.default_mode") {
+		dst.Search.DefaultMode = src.Search.DefaultMode
+	}
+	if src.Search.VectorWeight != 0 || src.has("search.vector_weight") {
+		dst.Search.VectorWeight = src.Search.VectorWeight
+	}
+	if src.Search.TextWeight != 0 || src.has("search.text_weight") {
+		dst.Search.TextWeight = src.Search.TextWeight
+	}
+}
+
+func mergeVectorConfig(dst, src *Config) {
+	if src.Vector.VecLite.M != 0 || src.has("vector.veclite.m") {
+		dst.Vector.VecLite.M = src.Vector.VecLite.M
+	}
+	if src.Vector.VecLite.EfConstruction != 0 || src.has("vector.veclite.ef_construction") {
+		dst.Vector.VecLite.EfConstruction = src.Vector.VecLite.EfConstruction
+	}
+	if src.Vector.VecLite.EfSearch != 0 || src.has("vector.veclite.ef_search") {
+		dst.Vector.VecLite.EfSearch = src.Vector.VecLite.EfSearch
+	}
 }
 
 // applyEnvironment applies VECGREP_* environment variables
@@ -285,16 +313,6 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 		cfg.Embedding.OpenAIBaseURL = val
 	} else if val := os.Getenv("OPENAI_BASE_URL"); val != "" {
 		cfg.Embedding.OpenAIBaseURL = val
-	}
-
-	// Server settings
-	if val := os.Getenv("VECGREP_HOST"); val != "" {
-		cfg.Server.Host = val
-	}
-	if val := os.Getenv("VECGREP_PORT"); val != "" {
-		if port, err := strconv.Atoi(val); err == nil {
-			cfg.Server.Port = port
-		}
 	}
 
 	// Data directory
@@ -376,16 +394,16 @@ func ShowResolvedConfig(cfg *Config, sources []string) string {
 
 	// Data settings
 	sb.WriteString("Data:\n")
-	sb.WriteString(fmt.Sprintf("  data_dir: %s\n", cfg.DataDir))
-	sb.WriteString(fmt.Sprintf("  db_path: %s\n", cfg.DBPath))
+	fmt.Fprintf(&sb, "  data_dir: %s\n", cfg.DataDir)
+	fmt.Fprintf(&sb, "  db_path: %s\n", cfg.DBPath)
 
 	// Embedding settings
 	sb.WriteString("\nEmbedding:\n")
-	sb.WriteString(fmt.Sprintf("  provider: %s\n", cfg.Embedding.Provider))
-	sb.WriteString(fmt.Sprintf("  model: %s\n", cfg.Embedding.Model))
-	sb.WriteString(fmt.Sprintf("  dimensions: %d\n", cfg.Embedding.Dimensions))
+	fmt.Fprintf(&sb, "  provider: %s\n", cfg.Embedding.Provider)
+	fmt.Fprintf(&sb, "  model: %s\n", cfg.Embedding.Model)
+	fmt.Fprintf(&sb, "  dimensions: %d\n", cfg.Embedding.Dimensions)
 	if cfg.Embedding.Provider == "ollama" {
-		sb.WriteString(fmt.Sprintf("  ollama_url: %s\n", cfg.Embedding.OllamaURL))
+		fmt.Fprintf(&sb, "  ollama_url: %s\n", cfg.Embedding.OllamaURL)
 	}
 	if cfg.Embedding.Provider == "openai" {
 		if cfg.Embedding.OpenAIAPIKey != "" {
@@ -394,28 +412,38 @@ func ShowResolvedConfig(cfg *Config, sources []string) string {
 			sb.WriteString("  openai_api_key: [not set]\n")
 		}
 		if cfg.Embedding.OpenAIBaseURL != "" {
-			sb.WriteString(fmt.Sprintf("  openai_base_url: %s\n", cfg.Embedding.OpenAIBaseURL))
+			fmt.Fprintf(&sb, "  openai_base_url: %s\n", cfg.Embedding.OpenAIBaseURL)
 		}
 	}
 
 	// Indexing settings
 	sb.WriteString("\nIndexing:\n")
-	sb.WriteString(fmt.Sprintf("  chunk_size: %d\n", cfg.Indexing.ChunkSize))
-	sb.WriteString(fmt.Sprintf("  chunk_overlap: %d\n", cfg.Indexing.ChunkOverlap))
-	sb.WriteString(fmt.Sprintf("  max_file_size: %d\n", cfg.Indexing.MaxFileSize))
-	sb.WriteString(fmt.Sprintf("  ignore_patterns: %v\n", cfg.Indexing.IgnorePatterns))
+	fmt.Fprintf(&sb, "  chunk_size: %d\n", cfg.Indexing.ChunkSize)
+	fmt.Fprintf(&sb, "  chunk_overlap: %d\n", cfg.Indexing.ChunkOverlap)
+	fmt.Fprintf(&sb, "  max_file_size: %d\n", cfg.Indexing.MaxFileSize)
+	fmt.Fprintf(&sb, "  ignore_patterns: %v\n", cfg.Indexing.IgnorePatterns)
+
+	// Search settings
+	sb.WriteString("\nSearch:\n")
+	fmt.Fprintf(&sb, "  default_mode: %s\n", cfg.Search.DefaultMode)
+	fmt.Fprintf(&sb, "  vector_weight: %.2f\n", cfg.Search.VectorWeight)
+	fmt.Fprintf(&sb, "  text_weight: %.2f\n", cfg.Search.TextWeight)
 
 	// Server settings
 	sb.WriteString("\nServer:\n")
-	sb.WriteString(fmt.Sprintf("  host: %s\n", cfg.Server.Host))
-	sb.WriteString(fmt.Sprintf("  port: %d\n", cfg.Server.Port))
-	sb.WriteString(fmt.Sprintf("  mcp_enabled: %t\n", cfg.Server.MCPEnabled))
+	fmt.Fprintf(&sb, "  mcp_enabled: %t\n", cfg.Server.MCPEnabled)
+
+	// Vector settings
+	sb.WriteString("\nVector:\n")
+	fmt.Fprintf(&sb, "  veclite.m: %d\n", cfg.Vector.VecLite.M)
+	fmt.Fprintf(&sb, "  veclite.ef_construction: %d\n", cfg.Vector.VecLite.EfConstruction)
+	fmt.Fprintf(&sb, "  veclite.ef_search: %d\n", cfg.Vector.VecLite.EfSearch)
 
 	// Sources
 	if len(sources) > 0 {
 		sb.WriteString("\nConfig sources (in order of loading):\n")
 		for _, s := range sources {
-			sb.WriteString(fmt.Sprintf("  - %s\n", s))
+			fmt.Fprintf(&sb, "  - %s\n", s)
 		}
 	}
 

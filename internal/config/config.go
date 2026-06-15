@@ -38,6 +38,8 @@ type Config struct {
 
 	// Vector configuration
 	Vector VectorConfig `mapstructure:"vector" yaml:"vector,omitempty"`
+
+	present map[string]bool `mapstructure:"-" yaml:"-"`
 }
 
 // SearchConfig holds search-related settings
@@ -94,12 +96,8 @@ type IndexingConfig struct {
 	MaxFileSize int64 `mapstructure:"max_file_size" yaml:"max_file_size,omitempty"`
 }
 
-// ServerConfig holds server settings
+// ServerConfig holds MCP server settings.
 type ServerConfig struct {
-	// Host is the server bind address
-	Host string `mapstructure:"host" yaml:"host,omitempty"`
-	// Port is the server port
-	Port int `mapstructure:"port" yaml:"port,omitempty"`
 	// MCPEnabled enables the MCP server
 	MCPEnabled bool `mapstructure:"mcp_enabled" yaml:"mcp_enabled,omitempty"`
 }
@@ -137,8 +135,6 @@ func DefaultConfig() *Config {
 			TextWeight:   0.3,      // 30% text matching
 		},
 		Server: ServerConfig{
-			Host:       "localhost",
-			Port:       8080,
 			MCPEnabled: true,
 		},
 		Vector: VectorConfig{
@@ -148,6 +144,22 @@ func DefaultConfig() *Config {
 				EfSearch:       100,
 			},
 		},
+	}
+}
+
+func (c *Config) has(path string) bool {
+	if c == nil || c.present == nil {
+		return false
+	}
+	return c.present[path]
+}
+
+func (c *Config) markPresent(paths ...string) {
+	if c.present == nil {
+		c.present = make(map[string]bool, len(paths))
+	}
+	for _, path := range paths {
+		c.present[path] = true
 	}
 }
 
@@ -196,8 +208,6 @@ func LoadLegacy(projectDir string) (*Config, error) {
 	_ = v.BindEnv("embedding.ollama_url", "VECGREP_OLLAMA_URL")
 	_ = v.BindEnv("embedding.openai_api_key", "VECGREP_OPENAI_API_KEY")
 	_ = v.BindEnv("embedding.openai_base_url", "VECGREP_OPENAI_BASE_URL")
-	_ = v.BindEnv("server.host", "VECGREP_HOST")
-	_ = v.BindEnv("server.port", "VECGREP_PORT")
 
 	// Read config file (ignore if not found)
 	if err := v.ReadInConfig(); err != nil {
@@ -245,8 +255,6 @@ func (c *Config) WriteDefaultConfig() error {
 	v.Set("indexing.chunk_overlap", c.Indexing.ChunkOverlap)
 	v.Set("indexing.ignore_patterns", c.Indexing.IgnorePatterns)
 	v.Set("indexing.max_file_size", c.Indexing.MaxFileSize)
-	v.Set("server.host", c.Server.Host)
-	v.Set("server.port", c.Server.Port)
 	v.Set("server.mcp_enabled", c.Server.MCPEnabled)
 
 	return v.WriteConfigAs(configPath)

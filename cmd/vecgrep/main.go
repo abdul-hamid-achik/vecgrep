@@ -7,18 +7,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
-	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 	"github.com/abdul-hamid-achik/vecgrep/internal/mcp"
+	"github.com/abdul-hamid-achik/vecgrep/internal/render"
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
+	"github.com/abdul-hamid-achik/vecgrep/internal/studio"
 	"github.com/abdul-hamid-achik/vecgrep/internal/version"
-	"github.com/abdul-hamid-achik/vecgrep/internal/web"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -38,6 +38,12 @@ embeddings to find similar code across your codebase.
 
 It supports Ollama for local embeddings, ensuring your code never
 leaves your machine.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if !isInteractiveTerminal() {
+			return cmd.Help()
+		}
+		return runStudio(cmd, args)
+	},
 }
 
 var versionCmd = &cobra.Command{
@@ -76,11 +82,18 @@ Returns the most relevant code chunks ranked by similarity.`,
 	RunE: runSearch,
 }
 
+var studioCmd = &cobra.Command{
+	Use:   "studio",
+	Short: "Open the interactive terminal search workspace",
+	Long:  `Open vecgrep Studio for search, inspection, indexing, and project status.`,
+	RunE:  runStudio,
+}
+
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Start the MCP and web server",
-	Long: `Start the Model Context Protocol (MCP) server and optional web interface
-for integration with AI assistants and browsers.`,
+	Short: "Start the MCP stdio server",
+	Long: `Start the Model Context Protocol (MCP) server over stdio
+for integration with AI assistants.`,
 	RunE: runServe,
 }
 
@@ -293,10 +306,7 @@ func init() {
 	searchCmd.Flags().Bool("all-profiles", false, "search all configured profiles")
 
 	// Serve command flags
-	serveCmd.Flags().IntP("port", "p", 8080, "server port")
-	serveCmd.Flags().String("host", "localhost", "server host")
 	serveCmd.Flags().Bool("mcp", false, "start MCP server (stdio)")
-	serveCmd.Flags().Bool("web", false, "start web server")
 
 	// Similar command flags
 	similarCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
@@ -351,6 +361,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(indexCmd)
 	rootCmd.AddCommand(searchCmd)
+	rootCmd.AddCommand(studioCmd)
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(similarCmd)
@@ -499,72 +510,42 @@ func runInitLocal(cwd string, force bool) error {
 }
 
 func runIndex(cmd *cobra.Command, args []string) error {
-	projectRoot, err := config.GetProjectRoot()
+	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+		return err
 	}
-
-	cfg, err := config.Load(projectRoot)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer database.Close()
-
-	// Create embedding provider
-	provider, err := createProvider(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create embedding provider: %w", err)
-	}
-
-	// Ping provider to verify it's available
-	ctx := context.Background()
-	if err := provider.Ping(ctx); err != nil {
-		return fmt.Errorf("embedding provider unavailable: %w\nMake sure the provider is running and the model '%s' is available", err, cfg.Embedding.Model)
-	}
+	defer session.Close()
+	service := app.NewService(session)
 
 	// Get flags
 	fullReindex, _ := cmd.Flags().GetBool("full")
 	additionalIgnores, _ := cmd.Flags().GetStringSlice("ignore")
 
-	// Create indexer config
-	indexerCfg := index.DefaultIndexerConfig()
-	indexerCfg.ChunkSize = cfg.Indexing.ChunkSize * 4 // Convert tokens to chars (approx)
-	indexerCfg.ChunkOverlap = cfg.Indexing.ChunkOverlap * 4
-	indexerCfg.MaxFileSize = cfg.Indexing.MaxFileSize
-	indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, additionalIgnores...)
-
-	// Create indexer
-	indexer := index.NewIndexer(database, provider, indexerCfg)
-
 	// Set up progress callback
 	verbose, _ := rootCmd.PersistentFlags().GetBool("verbose")
-	indexer.SetProgressCallback(func(p index.Progress) {
+	progress := func(p index.Progress) {
 		if verbose {
 			fmt.Printf("\r  %s (%d/%d files, %d chunks)",
 				p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
 		}
-	})
+	}
 
-	fmt.Printf("Indexing %s...\n", projectRoot)
-	fmt.Printf("  Model: %s\n", cfg.Embedding.Model)
+	fmt.Printf("Indexing %s...\n", session.ProjectRoot)
+	fmt.Printf("  Model: %s\n", session.Config.Embedding.Model)
 
 	// Perform indexing
+	req := app.IndexRequest{
+		Paths:             args,
+		FullReindex:       fullReindex,
+		AdditionalIgnores: additionalIgnores,
+	}
 	var result *index.IndexResult
 	if fullReindex {
 		fmt.Println("  Mode: full re-index")
-		result, err = indexer.ReindexAll(ctx, projectRoot)
 	} else {
 		fmt.Println("  Mode: incremental")
-		result, err = indexer.Index(ctx, projectRoot, args...)
 	}
+	result, err = service.Index(cmd.Context(), req, progress)
 
 	if err != nil {
 		return fmt.Errorf("indexing failed: %w", err)
@@ -593,30 +574,12 @@ func runIndex(cmd *cobra.Command, args []string) error {
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
-	projectRoot, err := config.GetProjectRoot()
+	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+		return err
 	}
-
-	cfg, err := config.Load(projectRoot)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer database.Close()
-
-	// Create embedding provider
-	provider, err := createProvider(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create embedding provider: %w", err)
-	}
+	defer session.Close()
+	service := app.NewService(session)
 
 	// Get flags
 	query := strings.Join(args, " ")
@@ -635,150 +598,71 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	// Parse line range
 	var minLine, maxLine int
 	if linesRange != "" {
-		minLine, maxLine = parseLineRange(linesRange)
+		minLine, maxLine = app.ParseLineRange(linesRange)
 	}
 
 	// Parse search mode
-	mode := parseSearchMode(modeStr, cfg.Search.DefaultMode)
+	mode := app.ParseSearchMode(modeStr, session.Config.Search.DefaultMode)
 
-	// Create searcher
-	searcher := search.NewSearcher(database, provider)
-
-	// Build search options
-	opts := search.SearchOptions{
-		Limit:        limit,
-		Language:     lang,
-		Languages:    languages,
-		ChunkType:    chunkType,
-		ChunkTypes:   chunkTypes,
-		FilePattern:  filePattern,
-		Directory:    directory,
-		MinLine:      minLine,
-		MaxLine:      maxLine,
-		ProjectRoot:  projectRoot,
-		Mode:         mode,
-		VectorWeight: cfg.Search.VectorWeight,
-		TextWeight:   cfg.Search.TextWeight,
-		Explain:      explain,
+	resp, err := service.Search(cmd.Context(), app.SearchRequest{
+		Query:       query,
+		Limit:       limit,
+		Language:    lang,
+		Languages:   languages,
+		ChunkType:   chunkType,
+		ChunkTypes:  chunkTypes,
+		FilePattern: filePattern,
+		Directory:   directory,
+		MinLine:     minLine,
+		MaxLine:     maxLine,
+		Mode:        mode,
+		Explain:     explain,
+	})
+	if err != nil {
+		return fmt.Errorf("search failed: %w", err)
 	}
 
-	// Perform search
-	ctx := context.Background()
-
-	if explain {
-		results, explanation, err := searcher.SearchWithExplain(ctx, query, opts)
-		if err != nil {
-			return fmt.Errorf("search failed: %w", err)
-		}
-
+	if explain && resp.Diagnostics != nil {
 		// Print explanation
 		fmt.Printf("Search Diagnostics:\n")
-		fmt.Printf("  Index type: %s\n", explanation.IndexType)
-		fmt.Printf("  Nodes visited: %d\n", explanation.NodesVisited)
-		fmt.Printf("  Duration: %v\n", explanation.Duration)
-		fmt.Printf("  Mode: %s\n", explanation.Mode)
+		fmt.Printf("  Index type: %s\n", resp.Diagnostics.IndexType)
+		fmt.Printf("  Nodes visited: %d\n", resp.Diagnostics.NodesVisited)
+		fmt.Printf("  Duration: %v\n", resp.Diagnostics.Duration)
+		fmt.Printf("  Mode: %s\n", resp.Diagnostics.Mode)
 		fmt.Println()
-
-		// Print results
-		printSearchResults(results, format)
-	} else {
-		results, err := searcher.Search(ctx, query, opts)
-		if err != nil {
-			return fmt.Errorf("search failed: %w", err)
-		}
-		printSearchResults(results, format)
 	}
 
+	printSearchResults(resp.Results, format)
 	return nil
 }
 
-// parseLineRange parses a line range string like "1-100" into min and max values.
-func parseLineRange(rangeStr string) (int, int) {
-	parts := strings.Split(rangeStr, "-")
-	if len(parts) != 2 {
-		return 0, 0
-	}
-	min, _ := strconv.Atoi(parts[0])
-	max, _ := strconv.Atoi(parts[1])
-	return min, max
+func runStudio(cmd *cobra.Command, args []string) error {
+	return studio.Run(cmd.Context(), "")
 }
 
-// parseSearchMode converts a mode string to SearchMode type.
-func parseSearchMode(modeStr, defaultMode string) search.SearchMode {
-	if modeStr == "" {
-		modeStr = defaultMode
-	}
-	switch strings.ToLower(modeStr) {
-	case "semantic":
-		return search.SearchModeSemantic
-	case "keyword":
-		return search.SearchModeKeyword
-	case "hybrid":
-		return search.SearchModeHybrid
-	default:
-		return search.SearchModeHybrid
-	}
+func isInteractiveTerminal() bool {
+	return isCharDevice(os.Stdin) && isCharDevice(os.Stdout)
+}
+
+func isCharDevice(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && (info.Mode()&os.ModeCharDevice) != 0
 }
 
 // printSearchResults formats and prints search results.
 func printSearchResults(results []search.Result, format string) {
-	var outputFormat search.OutputFormat
-	switch format {
-	case "json":
-		outputFormat = search.FormatJSON
-	case "compact":
-		outputFormat = search.FormatCompact
-	default:
-		outputFormat = search.FormatDefault
-	}
-
-	fmt.Print(search.FormatResults(results, outputFormat))
+	fmt.Print(render.Results(results, render.ParseOutputFormat(format)))
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	// Get flags
-	host, _ := cmd.Flags().GetString("host")
-	port, _ := cmd.Flags().GetInt("port")
-	mcpMode, _ := cmd.Flags().GetBool("mcp")
-	webMode, _ := cmd.Flags().GetBool("web")
-
-	// Default to web mode if neither is specified
-	if !mcpMode && !webMode {
-		webMode = true
+	// The --mcp flag is retained for backward compatibility. The serve command
+	// is MCP-only now that the browser UI has been removed.
+	session, err := app.OpenSession(cmd.Context(), "")
+	if err != nil && !app.IsNoProject(err) {
+		return err
 	}
-
-	// Try to find project root - MCP mode can work without it
-	projectRoot, projectErr := config.GetProjectRoot()
-
-	var cfg *config.Config
-	var database *db.DB
-	var provider embed.Provider
-
-	// If we have a project, load it fully
-	if projectErr == nil {
-		var err error
-		cfg, err = config.Load(projectRoot)
-		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
-		}
-
-		database, err = db.OpenWithOptions(db.OpenOptions{
-			Dimensions: cfg.Embedding.Dimensions,
-			DataDir:    cfg.DataDir,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to open database: %w", err)
-		}
-		defer database.Close()
-
-		// Create embedding provider
-		provider, err = createProvider(cfg)
-		if err != nil {
-			return fmt.Errorf("failed to create embedding provider: %w", err)
-		}
-	} else if !mcpMode {
-		// Web mode requires an initialized project
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+	if session != nil {
+		defer session.Close()
 	}
 
 	// Set up context with signal handling
@@ -793,45 +677,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Start MCP server (stdio) - works even without initialized project
-	if mcpMode {
-		// Use the official MCP SDK for reliable protocol handling
-		mcpServer := mcp.NewSDKServer(mcp.SDKServerConfig{
-			DB:          database,    // nil if not initialized
-			Provider:    provider,    // nil if not initialized
-			ProjectRoot: projectRoot, // empty if not initialized
-		})
-		return mcpServer.Run(ctx)
+	mcpCfg := mcp.SDKServerConfig{}
+	if session != nil {
+		mcpCfg.DB = session.DB
+		mcpCfg.Provider = session.Provider
+		mcpCfg.ProjectRoot = session.ProjectRoot
 	}
 
-	// Start web server (requires initialized project)
-	if webMode {
-		webServer := web.NewServer(web.ServerConfig{
-			Host:        host,
-			Port:        port,
-			DB:          database,
-			Provider:    provider,
-			ProjectRoot: projectRoot,
-		})
-
-		fmt.Printf("Starting web server on http://%s:%d\n", host, port)
-		fmt.Printf("  Project: %s\n", projectRoot)
-
-		// Run until context is canceled
-		errChan := make(chan error, 1)
-		go func() {
-			errChan <- webServer.ListenAndServe()
-		}()
-
-		select {
-		case err := <-errChan:
-			return err
-		case <-ctx.Done():
-			return nil
-		}
-	}
-
-	return nil
+	mcpServer := mcp.NewSDKServer(mcpCfg)
+	return mcpServer.Run(ctx)
 }
 
 // StatusOutput represents the JSON output for the status command
@@ -856,57 +710,35 @@ type PendingChanges struct {
 func runStatus(cmd *cobra.Command, args []string) error {
 	format, _ := cmd.Flags().GetString("format")
 
-	projectRoot, err := config.GetProjectRoot()
+	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+		return err
 	}
+	defer session.Close()
+	service := app.NewService(session)
 
-	cfg, err := config.Load(projectRoot)
+	status, err := service.Status(cmd.Context())
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return fmt.Errorf("failed to get status: %w", err)
 	}
-
-	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer database.Close()
-
-	stats, err := database.Stats()
-	if err != nil {
-		return fmt.Errorf("failed to get stats: %w", err)
-	}
-
-	vecVersion, _ := database.VecVersion()
-
-	// Check for pending changes
-	indexerCfg := index.DefaultIndexerConfig()
-	indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, indexerCfg.IgnorePatterns...)
-	indexer := index.NewIndexer(database, nil, indexerCfg)
-
-	ctx := context.Background()
-	pending, pendingErr := indexer.GetPendingChanges(ctx, projectRoot)
 
 	// JSON output
 	if format == "json" {
 		output := StatusOutput{
-			ProjectRoot:    projectRoot,
-			Database:       cfg.DBPath,
-			VectorBackend:  vecVersion,
-			EmbeddingModel: cfg.Embedding.Model,
-			Provider:       cfg.Embedding.Provider,
-			Stats:          stats,
+			ProjectRoot:    status.ProjectRoot,
+			Database:       status.VecLitePath,
+			VectorBackend:  status.VectorBackend,
+			EmbeddingModel: status.Model,
+			Provider:       status.Provider,
+			Stats:          status.Stats,
 		}
 
-		if pendingErr == nil {
+		if status.PendingChanges != nil {
 			output.PendingChanges = &PendingChanges{
-				NewFiles:      pending.NewFiles,
-				ModifiedFiles: pending.ModifiedFiles,
-				DeletedFiles:  pending.DeletedFiles,
-				TotalPending:  pending.TotalPending,
+				NewFiles:      status.PendingChanges.NewFiles,
+				ModifiedFiles: status.PendingChanges.ModifiedFiles,
+				DeletedFiles:  status.PendingChanges.DeletedFiles,
+				TotalPending:  status.PendingChanges.TotalPending,
 			}
 		}
 
@@ -920,22 +752,22 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	// Default text output
 	fmt.Printf("vecgrep status\n")
-	fmt.Printf("  Project root: %s\n", projectRoot)
-	fmt.Printf("  Database: %s\n", cfg.DBPath)
-	fmt.Printf("  Vector backend: %s\n", vecVersion)
-	fmt.Printf("  Embedding model: %s (%s)\n", cfg.Embedding.Model, cfg.Embedding.Provider)
+	fmt.Printf("  Project root: %s\n", status.ProjectRoot)
+	fmt.Printf("  Database: %s\n", status.VecLitePath)
+	fmt.Printf("  Vector backend: %s\n", status.VectorBackend)
+	fmt.Printf("  Embedding model: %s (%s)\n", status.Model, status.Provider)
 	fmt.Printf("\nIndex statistics:\n")
-	fmt.Printf("  Projects:   %d\n", stats["projects"])
-	fmt.Printf("  Files:      %d\n", stats["files"])
-	fmt.Printf("  Chunks:     %d\n", stats["chunks"])
-	fmt.Printf("  Embeddings: %d\n", stats["embeddings"])
+	fmt.Printf("  Projects:   %d\n", status.Stats["projects"])
+	fmt.Printf("  Files:      %d\n", status.Stats["files"])
+	fmt.Printf("  Chunks:     %d\n", status.Stats["chunks"])
+	fmt.Printf("  Embeddings: %d\n", status.Stats["embeddings"])
 
-	if pendingErr == nil {
+	if status.PendingChanges != nil {
 		fmt.Printf("\nReindex status:\n")
-		fmt.Printf("  New files:      %d\n", pending.NewFiles)
-		fmt.Printf("  Modified files: %d\n", pending.ModifiedFiles)
-		fmt.Printf("  Deleted files:  %d\n", pending.DeletedFiles)
-		if pending.TotalPending > 0 {
+		fmt.Printf("  New files:      %d\n", status.PendingChanges.NewFiles)
+		fmt.Printf("  Modified files: %d\n", status.PendingChanges.ModifiedFiles)
+		fmt.Printf("  Deleted files:  %d\n", status.PendingChanges.DeletedFiles)
+		if status.PendingChanges.TotalPending > 0 {
 			fmt.Printf("\nRun 'vecgrep index' to update the index.\n")
 		}
 	}
@@ -946,27 +778,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 func runDelete(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 
-	projectRoot, err := config.GetProjectRoot()
+	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+		return err
 	}
+	defer session.Close()
+	service := app.NewService(session)
 
-	cfg, err := config.Load(projectRoot)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer database.Close()
-
-	ctx := context.Background()
-	chunksDeleted, err := database.DeleteFile(ctx, filePath)
+	chunksDeleted, err := service.DeleteFile(cmd.Context(), filePath)
 	if err != nil {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
@@ -976,29 +795,16 @@ func runDelete(cmd *cobra.Command, args []string) error {
 }
 
 func runClean(cmd *cobra.Command, args []string) error {
-	projectRoot, err := config.GetProjectRoot()
+	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+		return err
 	}
-
-	cfg, err := config.Load(projectRoot)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer database.Close()
+	defer session.Close()
+	service := app.NewService(session)
 
 	fmt.Println("Cleaning database...")
 
-	ctx := context.Background()
-	stats, err := database.Clean(ctx)
+	stats, err := service.Clean(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("failed to clean database: %w", err)
 	}
@@ -1018,19 +824,16 @@ func runClean(cmd *cobra.Command, args []string) error {
 func runReset(cmd *cobra.Command, args []string) error {
 	force, _ := cmd.Flags().GetBool("force")
 
-	projectRoot, err := config.GetProjectRoot()
+	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+		return err
 	}
-
-	cfg, err := config.Load(projectRoot)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
+	defer session.Close()
+	service := app.NewService(session)
 
 	// Confirmation prompt unless --force is used
 	if !force {
-		fmt.Printf("WARNING: This will delete ALL indexed data for %s\n", projectRoot)
+		fmt.Printf("WARNING: This will delete ALL indexed data for %s\n", session.ProjectRoot)
 		fmt.Printf("This action cannot be undone.\n\n")
 		fmt.Printf("Type 'yes' to confirm: ")
 
@@ -1042,17 +845,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer database.Close()
-
-	ctx := context.Background()
-	if err := database.ResetAll(ctx); err != nil {
+	if err := service.Reset(cmd.Context(), app.ResetProject); err != nil {
 		return fmt.Errorf("failed to reset database: %w", err)
 	}
 
@@ -1060,29 +853,6 @@ func runReset(cmd *cobra.Command, args []string) error {
 	fmt.Println("Run 'vecgrep index' to re-index your codebase.")
 
 	return nil
-}
-
-// createProvider creates an embedding provider based on config.
-func createProvider(cfg *config.Config) (embed.Provider, error) {
-	switch cfg.Embedding.Provider {
-	case "openai":
-		provider := embed.NewOpenAIProvider(embed.OpenAIConfig{
-			APIKey:     cfg.Embedding.OpenAIAPIKey,
-			BaseURL:    cfg.Embedding.OpenAIBaseURL,
-			Model:      cfg.Embedding.Model,
-			Dimensions: cfg.Embedding.Dimensions,
-		})
-		return provider, nil
-	case "ollama", "":
-		provider := embed.NewOllamaProvider(embed.OllamaConfig{
-			URL:        cfg.Embedding.OllamaURL,
-			Model:      cfg.Embedding.Model,
-			Dimensions: cfg.Embedding.Dimensions,
-		})
-		return provider, nil
-	default:
-		return nil, fmt.Errorf("unknown embedding provider: %s", cfg.Embedding.Provider)
-	}
 }
 
 func runSimilar(cmd *cobra.Command, args []string) error {
@@ -1102,98 +872,44 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 	// Parse line range
 	var minLine, maxLine int
 	if linesRange != "" {
-		minLine, maxLine = parseLineRange(linesRange)
+		minLine, maxLine = app.ParseLineRange(linesRange)
 	}
 
-	// Validate input: either text flag or positional argument required
-	if textSnippet == "" && len(args) == 0 {
-		return fmt.Errorf("target required: provide a chunk ID, file:line location, or use --text")
+	var positional string
+	if len(args) > 0 {
+		positional = args[0]
 	}
-	if textSnippet != "" && len(args) > 0 {
-		return fmt.Errorf("cannot specify both --text and a positional target")
-	}
-
-	projectRoot, err := config.GetProjectRoot()
+	target, err := app.ParseSimilarTarget(positional, textSnippet)
 	if err != nil {
-		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+		return err
 	}
 
-	cfg, err := config.Load(projectRoot)
+	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return err
 	}
+	defer session.Close()
+	service := app.NewService(session)
 
-	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer database.Close()
-
-	// Create embedding provider
-	provider, err := createProvider(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create embedding provider: %w", err)
-	}
-
-	// Create searcher
-	searcher := search.NewSearcher(database, provider)
-
-	// Build similar options
-	opts := search.SimilarOptions{
-		SearchOptions: search.SearchOptions{
-			Limit:       limit,
-			Language:    lang,
-			Languages:   languages,
-			ChunkType:   chunkType,
-			ChunkTypes:  chunkTypes,
-			FilePattern: filePattern,
-			Directory:   directory,
-			MinLine:     minLine,
-			MaxLine:     maxLine,
-			ProjectRoot: projectRoot,
-		},
+	resp, err := service.Similar(cmd.Context(), app.SimilarRequest{
+		Target:          target,
+		Limit:           limit,
+		Language:        lang,
+		Languages:       languages,
+		ChunkType:       chunkType,
+		ChunkTypes:      chunkTypes,
+		FilePattern:     filePattern,
+		Directory:       directory,
+		MinLine:         minLine,
+		MaxLine:         maxLine,
 		ExcludeSameFile: excludeSameFile,
-		ExcludeSourceID: true, // Default to excluding source
-	}
-
-	ctx := context.Background()
-	var results []search.Result
-
-	if textSnippet != "" {
-		// Text-based search
-		results, err = searcher.SearchSimilarByText(ctx, textSnippet, opts)
-	} else {
-		target := args[0]
-
-		// Parse target: numeric → chunk ID, contains ":" → file:line
-		if chunkID, parseErr := strconv.ParseInt(target, 10, 64); parseErr == nil {
-			// Chunk ID
-			results, err = searcher.SearchSimilarByID(ctx, chunkID, opts)
-		} else if strings.Contains(target, ":") {
-			// File:line location
-			parts := strings.SplitN(target, ":", 2)
-			if len(parts) != 2 {
-				return fmt.Errorf("invalid file:line format: %s", target)
-			}
-			line, lineErr := strconv.Atoi(parts[1])
-			if lineErr != nil {
-				return fmt.Errorf("invalid line number in %s: %w", target, lineErr)
-			}
-			results, err = searcher.SearchSimilarByLocation(ctx, parts[0], line, opts)
-		} else {
-			return fmt.Errorf("invalid target format: %s (expected chunk ID or file:line)", target)
-		}
-	}
-
+	})
 	if err != nil {
 		return fmt.Errorf("search failed: %w", err)
 	}
 
 	// Format and print results
-	printSearchResults(results, format)
+	printSearchResults(resp.Results, format)
 
 	return nil
 }
@@ -1263,19 +979,12 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	isGlobal, _ := cmd.Flags().GetBool("global")
 
 	if isGlobal {
-		// Set in global config
-		globalCfg, err := config.LoadGlobalConfig()
+		configPath, err := config.GetGlobalConfigPath()
 		if err != nil {
-			return fmt.Errorf("failed to load global config: %w", err)
-		}
-
-		// Parse dot-notation key
-		if err := setConfigValue(&globalCfg.Defaults, key, value); err != nil {
 			return err
 		}
-
-		if err := config.SaveGlobalConfig(globalCfg); err != nil {
-			return fmt.Errorf("failed to save global config: %w", err)
+		if err := config.SetConfigValueInFile(configPath, "defaults."+key, value); err != nil {
+			return err
 		}
 
 		fmt.Printf("Set %s = %s in global config\n", key, value)
@@ -1288,85 +997,28 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
 	}
 
-	// Determine config file path
-	configPath := filepath.Join(projectRoot, "vecgrep.yaml")
-	if _, err := os.Stat(filepath.Join(projectRoot, "vecgrep.yml")); err == nil {
-		configPath = filepath.Join(projectRoot, "vecgrep.yml")
-	}
+	configPath := projectConfigPath(projectRoot)
 
-	// Load or create project config
-	cfg := &config.Config{}
-	if data, err := os.ReadFile(configPath); err == nil {
-		// TODO: parse existing yaml and merge
-		_ = data
-	}
-
-	if err := setConfigValue(cfg, key, value); err != nil {
+	if err := config.SetConfigValueInFile(configPath, key, value); err != nil {
 		return err
-	}
-
-	// Write config using viper
-	v := viper.New()
-	v.Set(key, value)
-	if err := v.WriteConfigAs(configPath); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
 	}
 
 	fmt.Printf("Set %s = %s in %s\n", key, value, configPath)
 	return nil
 }
 
-// setConfigValue sets a value in a Config struct using dot notation
-func setConfigValue(cfg *config.Config, key, value string) error {
-	switch key {
-	case "embedding.provider":
-		cfg.Embedding.Provider = value
-	case "embedding.model":
-		cfg.Embedding.Model = value
-	case "embedding.ollama_url":
-		cfg.Embedding.OllamaURL = value
-	case "embedding.openai_api_key":
-		cfg.Embedding.OpenAIAPIKey = value
-	case "embedding.openai_base_url":
-		cfg.Embedding.OpenAIBaseURL = value
-	case "embedding.dimensions":
-		dim, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid dimensions value: %w", err)
-		}
-		cfg.Embedding.Dimensions = dim
-	case "indexing.chunk_size":
-		size, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid chunk_size value: %w", err)
-		}
-		cfg.Indexing.ChunkSize = size
-	case "indexing.chunk_overlap":
-		overlap, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid chunk_overlap value: %w", err)
-		}
-		cfg.Indexing.ChunkOverlap = overlap
-	case "indexing.max_file_size":
-		size, err := strconv.ParseInt(value, 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid max_file_size value: %w", err)
-		}
-		cfg.Indexing.MaxFileSize = size
-	case "server.host":
-		cfg.Server.Host = value
-	case "server.port":
-		port, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid port value: %w", err)
-		}
-		cfg.Server.Port = port
-	case "data_dir":
-		cfg.DataDir = value
-	default:
-		return fmt.Errorf("unknown config key: %s", key)
+func projectConfigPath(projectRoot string) string {
+	yamlPath := filepath.Join(projectRoot, "vecgrep.yaml")
+	if _, err := os.Stat(yamlPath); err == nil {
+		return yamlPath
 	}
-	return nil
+
+	ymlPath := filepath.Join(projectRoot, "vecgrep.yml")
+	if _, err := os.Stat(ymlPath); err == nil {
+		return ymlPath
+	}
+
+	return yamlPath
 }
 
 func runProjectsList(cmd *cobra.Command, args []string) error {
