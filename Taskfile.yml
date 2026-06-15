@@ -97,6 +97,8 @@ tasks:
 
   race:
     desc: Run tests with the race detector
+    env:
+      CGO_ENABLED: "1"
     cmds:
       - go test -race ./...
 
