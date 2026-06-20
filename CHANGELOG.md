@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-06-20
+
+### Added
+- VitePress documentation site powered by Bun, with `task site`, `task site:build`, and `task site:preview`.
+- OpenAI, Cohere, and Voyage embedding provider support alongside Ollama.
+- Query/document embedding role support for providers that distinguish retrieval modes.
+- Embedding profile guard that detects provider, model, dimensions, distance, modality, and chunker drift before incremental indexing or vector search.
+- Studio flows for first-run project registration, browse alias launch, cloud provider config, and removed command behavior.
+
+### Changed
+- Store generated project data under `~/.vecgrep/projects/<project>` by default instead of creating repo-local `.vecgrep/` directories.
+- Make `vecgrep studio` the canonical Bubble Tea terminal workspace command and keep `vecgrep browse` as the alias.
+- Use Bun for docs dependencies and scripts instead of npm lockfile workflows.
+- Route document indexing through document embeddings and semantic search through query embeddings when the provider supports it.
+- Polish Studio status, filtering, search, indexing, and first-run behavior.
+
+### Removed
+- Removed the old `vecgrep tui` command surface.
+- Removed stale profile/source code paths that were not wired into the current product.
+- Removed `package-lock.json` from the docs site setup.
+
 ## [2.0.1] - 2026-06-15
 
 ### Fixed
@@ -112,6 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable chunk size and overlap
 - Ignore patterns for excluding files from indexing
 
+[2.1.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.0.1...v2.1.0
+[2.0.1]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v0.3.1...v2.0.0
 [0.3.1]: https://github.com/abdul-hamid-achik/vecgrep/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v0.2.10...v0.3.0
 [0.2.10]: https://github.com/abdul-hamid-achik/vecgrep/compare/v0.2.0...v0.2.10
