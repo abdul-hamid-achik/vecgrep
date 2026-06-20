@@ -8,11 +8,14 @@ services:
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: vecgrep
     volumes:
-      - ./.vecgrep:/data/.vecgrep
+      - vecgrep-home:/home/vecgrep/.vecgrep
       - ./:/workspace:ro
+    working_dir: /workspace
     environment:
-      - VECGREP_DATA_DIR=/data
       - VECGREP_OLLAMA_URL=http://host.docker.internal:11434
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["vecgrep", "--help"]
+
+volumes:
+  vecgrep-home:

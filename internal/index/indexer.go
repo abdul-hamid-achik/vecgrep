@@ -280,8 +280,8 @@ func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file file
 			texts[j] = chunk.Content
 		}
 
-		// Generate embeddings in batch
-		embeddings, err := idx.provider.EmbedBatch(ctx, texts)
+		// Generate document embeddings in batch.
+		embeddings, err := embedDocuments(ctx, idx.provider, texts)
 		if err != nil {
 			return totalChunks, fmt.Errorf("embed batch: %w", err)
 		}
@@ -326,6 +326,13 @@ func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file file
 	}
 
 	return totalChunks, nil
+}
+
+func embedDocuments(ctx context.Context, provider embed.Provider, texts []string) ([][]float32, error) {
+	if documentProvider, ok := provider.(embed.DocumentProvider); ok {
+		return documentProvider.EmbedDocuments(ctx, texts)
+	}
+	return provider.EmbedBatch(ctx, texts)
 }
 
 // buildIgnoreMatcher builds a gitignore-style matcher for file filtering.

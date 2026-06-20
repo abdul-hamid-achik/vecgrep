@@ -13,6 +13,8 @@ task setup
 task dev
 ```
 
+The docs site uses Bun. `task setup` installs docs dependencies with `bun install`, and `task doctor` checks that Bun is available.
+
 ## Daily Workflow
 
 ```bash
@@ -50,6 +52,8 @@ task short        # Run short tests
 task verbose      # Run verbose tests
 task cov          # Generate coverage output
 task flows        # Run all terminal Studio flows
+task site         # Start the VitePress docs site
+task site:build   # Build the VitePress docs site
 task clean        # Remove build artifacts
 ```
 
@@ -86,7 +90,7 @@ vecgrep follows a layered architecture with clear separation of concerns:
 ┌───────────────┐                          ┌───────────────┐
 │   Embedding   │                          │   Database    │
 │ internal/embed│                          │  internal/db  │
-│(Ollama/OpenAI)│                          │  (veclite)    │
+│Ollama/cloud   │                          │  (veclite)    │
 └───────────────┘                          └───────────────┘
 ```
 
@@ -103,11 +107,11 @@ vecgrep follows a layered architecture with clear separation of concerns:
 
 2. **Search Flow:**
    ```
-   Query → Embedding → Vector Search → Ranked Results
+   Query → Embedding → Vector/BM25 Search → Ranked Results
    ```
-   - Query text is embedded using the same provider
-   - Vector similarity search finds closest chunks
-   - Results are ranked by cosine similarity
+   - Query text is embedded using the same provider for semantic and hybrid modes
+   - Keyword mode uses VecLite BM25 without generating a query embedding
+   - Vector similarity and BM25 results are ranked or fused by the selected search mode
 
 ---
 
@@ -131,6 +135,9 @@ Hierarchical configuration system with multiple sources:
 6. Global defaults (~/.vecgrep/config.yaml)
 7. Built-in defaults
 
+**Default Storage:**
+New projects are registered in `~/.vecgrep/config.yaml` by default, with generated index data stored under `~/.vecgrep/projects/<project>/`. Repo-local `.vecgrep/` directories are legacy or explicit `vecgrep init --local` behavior only.
+
 ### `internal/db/`
 Pure veclite database layer (no SQLite, no CGO):
 - `db.go` - Database operations and wrapper
@@ -143,19 +150,45 @@ All data is stored in veclite vector payloads:
 - Chunk info: content, lines, type, symbol name
 - Project info: root path, indexed timestamp
 
+**Embedding Boundary:**
+vecgrep owns provider selection, credentials, batching, retries, code chunking, and rebuild policy. VecLite owns vector storage, BM25, filtering, HNSW search, and persistence. See `docs/veclite-integration.md` for the integration contract.
+
+**Embedding Profile Guard:**
+Indexing persists `embedding_profile.json` next to `vectors.veclite` with provider, model, dimensions, distance, modality, and chunker version. Incremental indexing and vector-based search compare the stored profile with the active config and require a full re-index when vector meaning changes.
+
 ### `internal/embed/`
 Embedding provider implementations:
 - `provider.go` - Provider interface definition
 - `ollama.go` - Ollama API client (local)
 - `openai.go` - OpenAI API client (cloud)
+- `cohere.go` - Cohere Embed v2 client (cloud)
+- `voyage.go` - Voyage AI embeddings client (cloud)
+- `detect.go` - Provider detection and model metadata
 
 **Provider Interface:**
 ```go
 type Provider interface {
     Embed(ctx context.Context, text string) ([]float32, error)
+    EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
+    Model() string
     Dimensions() int
+    Ping(ctx context.Context) error
 }
 ```
+
+Providers that distinguish retrieval roles can also implement:
+
+```go
+type QueryProvider interface {
+    EmbedQuery(ctx context.Context, text string) ([]float32, error)
+}
+
+type DocumentProvider interface {
+    EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error)
+}
+```
+
+The indexer prefers `DocumentProvider` for chunk embeddings. Search prefers `QueryProvider` for semantic, hybrid, and similar-by-text queries. Providers without those optional interfaces use the base `Provider` methods.
 
 ### `internal/index/`
 File indexing and code chunking:
@@ -186,7 +219,6 @@ Model Context Protocol server:
 ### `internal/search/`
 Search implementation:
 - `search.go` - Query embedding and similarity search
-- `multi.go` - Multi-query search helpers
 - `warmup.go` - Search warmup helpers
 
 ### `internal/app/`
@@ -240,7 +272,7 @@ type EmbeddingConfig struct {
 }
 ```
 
-3. Wire up in provider factory (in embed package)
+3. Wire up in `internal/app/provider.go` and MCP initialization if the shared factory cannot be used
 
 4. Update README.md with usage instructions
 
@@ -350,6 +382,16 @@ task flows
 task flow FLOW=specs/flows/studio_launch_quit.yml
 ```
 
+### Docs Site
+
+The docs site is powered by VitePress and uses Markdown files in `docs/`.
+
+```bash
+task site
+task site:build
+task site:preview
+```
+
 ### Mock Providers
 
 For testing search without Ollama:
@@ -393,11 +435,11 @@ task ship  # Runs full CI pipeline locally
 
 **"failed to connect to Ollama"**
 - Ensure Ollama is running: `ollama serve`
-- Check the URL in config (default: http://localhost:11434)
+- Check the URL in config (default: `http://localhost:11434`)
 
-**"embedding dimensions mismatch"**
-- Embeddings dimension changed (e.g., switched models)
-- Run `vecgrep reset --force` and re-index
+**"embedding profile mismatch" or "embedding dimensions mismatch"**
+- Embedding provider, model, dimensions, distance, or chunker profile changed
+- Run `vecgrep index --full` or `vecgrep reset --force` and re-index
 
 **Database migration warning**
 - A legacy `.vecgrep/vecgrep.db` file without a veclite index is not used by the current build

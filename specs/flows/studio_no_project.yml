@@ -20,7 +20,7 @@ steps:
         timeoutMs: 5000
     - wait:
         screen:
-            contains: "vecgrep init --local"
+            contains: "Press i to register"
         timeoutMs: 5000
     - snapshot: no_project
     - press: "ctrl+c"
@@ -38,10 +38,9 @@ outcomes:
       description: Studio shows initialization guidance
       verify:
         screen:
-            contains: "vecgrep init --local"
+            contains: "Press i to register"
     - id: clean_exit
       description: the app exits cleanly
       verify:
         process:
             exitCode: 0
-contractHash: sha256:52f6170278eb512d338a495b029635fc54de35f481a212531802f9baffe1e885

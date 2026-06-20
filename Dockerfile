@@ -33,20 +33,20 @@ FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates \
     && adduser -D -u 1000 vecgrep \
-    && mkdir -p /data \
-    && chown vecgrep:vecgrep /data
+    && mkdir -p /workspace \
+    && chown vecgrep:vecgrep /workspace
 
 COPY --from=builder /build/vecgrep /usr/local/bin/
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 USER vecgrep
-WORKDIR /data
+WORKDIR /workspace
 
-ENV VECGREP_DATA_DIR=/data
+ENV HOME=/home/vecgrep
 ENV VECGREP_OLLAMA_URL=http://host.docker.internal:11434
 
-VOLUME ["/data"]
+VOLUME ["/home/vecgrep/.vecgrep"]
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["vecgrep", "--help"]

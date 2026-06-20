@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -234,6 +235,9 @@ func (p *OpenAIProvider) embedBatchInternal(ctx context.Context, texts []string)
 		if err == ErrContextCanceled {
 			return nil, NewProviderError("openai", "embed", err)
 		}
+		if errors.Is(err, ErrDimensionMismatch) {
+			return nil, NewProviderError("openai", "embed", err)
+		}
 		// Check for rate limit (429) - always retry
 		if strings.Contains(err.Error(), "rate_limit") || strings.Contains(err.Error(), "429") {
 			continue
@@ -322,10 +326,9 @@ func (p *OpenAIProvider) doEmbedBatch(ctx context.Context, texts []string) ([][]
 			return nil, fmt.Errorf("invalid embedding index: %d", data.Index)
 		}
 
-		// Convert float64 to float32
-		embedding := make([]float32, len(data.Embedding))
-		for i, v := range data.Embedding {
-			embedding[i] = float32(v)
+		embedding := float64sToFloat32s(data.Embedding)
+		if err := validateEmbeddingDimensions("openai", embedding, p.config.Dimensions); err != nil {
+			return nil, err
 		}
 
 		embeddings[data.Index] = embedding

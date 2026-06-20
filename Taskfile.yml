@@ -32,6 +32,7 @@ tasks:
         echo ""
         command -v go >/dev/null && echo "ok go $(go version | awk '{print $3}')" || echo "missing go"
         command -v ollama >/dev/null && echo "ok ollama" || echo "missing ollama"
+        command -v bun >/dev/null && echo "ok bun $(bun --version)" || echo "missing bun"
         command -v air >/dev/null && echo "ok air" || echo "missing air (run: task tools)"
         command -v glyph >/dev/null && echo "ok glyph" || echo "missing glyph"
         command -v golangci-lint >/dev/null && echo "ok golangci-lint" || echo "missing golangci-lint (go vet fallback will run)"
@@ -43,6 +44,7 @@ tasks:
     desc: Install dependencies and local tools
     cmds:
       - task: deps
+      - task: site:deps
       - task: tools
 
   deps:
@@ -171,10 +173,37 @@ tasks:
     cmds:
       - glyph run specs/flows/*.yml --format md --progress auto {{.CLI_ARGS}}
 
+  site:
+    desc: Start the VitePress docs site
+    deps: [site:deps]
+    cmds:
+      - bun run site -- {{.CLI_ARGS}}
+
+  site:deps:
+    desc: Install docs site dependencies with Bun
+    cmds:
+      - bun install
+    status:
+      - test -d node_modules
+      - test -f bun.lock
+
+  site:build:
+    desc: Build the VitePress docs site
+    deps: [site:deps]
+    cmds:
+      - bun run site:build
+
+  site:preview:
+    desc: Preview the built VitePress docs site
+    deps: [site:deps]
+    cmds:
+      - bun run site:preview -- {{.CLI_ARGS}}
+
   ship:
     desc: Run the local release verification pipeline
     cmds:
       - task: check
+      - task: site:build
       - task: race
       - task: build
       - task: flows
@@ -219,19 +248,20 @@ tasks:
     cmds:
       - rm -rf {{.BUILD_DIR}}
       - rm -rf tmp dist .task .glyphrun
+      - rm -rf docs/.vitepress/dist docs/.vitepress/cache
       - rm -f coverage.out coverage.html
       - rm -f {{.BINARY_NAME}}
 
   reset:
-    desc: Reset the local project database
+    desc: Reset the current project's global index
     cmds:
-      - rm -rf .vecgrep/
       - task: build
-      - "{{.BUILD_DIR}}/{{.BINARY_NAME}} init --local"
+      - "{{.BUILD_DIR}}/{{.BINARY_NAME}} init --global --force"
+      - "{{.BUILD_DIR}}/{{.BINARY_NAME}} reset --force"
 
   nuke:
-    desc: Remove build artifacts and local database
-    prompt: This will delete the local database. Continue?
+    desc: Remove build artifacts and repo-local legacy database
+    prompt: This will delete build artifacts and any repo-local .vecgrep directory. Continue?
     cmds:
       - task: clean
       - rm -rf .vecgrep/

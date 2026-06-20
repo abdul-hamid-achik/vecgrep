@@ -1,0 +1,31 @@
+version: 1
+name: profile_command_removed
+intent: |
+    stale source-profile commands are not exposed while profile indexing/search is not implemented.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); \"$ROOT/bin/vecgrep\" profile"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 24
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 1
+        timeoutMs: 5000
+    - snapshot: removed
+outcomes:
+    - id: unknown_command
+      description: the removed profile command fails as an unknown command
+      verify:
+        screen:
+            contains: "unknown command"
+    - id: profile_named
+      description: the error identifies the stale command
+      verify:
+        screen:
+            contains: "profile"

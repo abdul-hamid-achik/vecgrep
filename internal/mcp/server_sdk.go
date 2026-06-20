@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
@@ -471,21 +472,12 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	}
 
 	// Create embedding provider based on config
-	var provider embed.Provider
-	switch cfg.Embedding.Provider {
-	case "openai":
-		provider = embed.NewOpenAIProvider(embed.OpenAIConfig{
-			APIKey:     cfg.Embedding.OpenAIAPIKey,
-			BaseURL:    cfg.Embedding.OpenAIBaseURL,
-			Model:      cfg.Embedding.Model,
-			Dimensions: cfg.Embedding.Dimensions,
-		})
-	default:
-		provider = embed.NewOllamaProvider(embed.OllamaConfig{
-			URL:        cfg.Embedding.OllamaURL,
-			Model:      cfg.Embedding.Model,
-			Dimensions: cfg.Embedding.Dimensions,
-		})
+	provider, err := app.NewProvider(cfg)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to create embedding provider: %v", err)}},
+			IsError: true,
+		}, nil, nil
 	}
 
 	// Update server state
@@ -564,6 +556,16 @@ func (s *SDKServer) checkProvider(ctx context.Context) *sdkmcp.CallToolResult {
 			sb.WriteString("1. Ensure OPENAI_API_KEY or VECGREP_OPENAI_API_KEY is set\n")
 			sb.WriteString("2. Verify your API key is valid\n")
 			sb.WriteString("3. Check your OpenAI account has available credits\n")
+		} else if _, ok := s.provider.(*embed.CohereProvider); ok {
+			sb.WriteString("To fix this (Cohere):\n")
+			sb.WriteString("1. Ensure COHERE_API_KEY or VECGREP_COHERE_API_KEY is set\n")
+			sb.WriteString("2. Verify your API key is valid\n")
+			sb.WriteString("3. Check your Cohere account has available credits\n")
+		} else if _, ok := s.provider.(*embed.VoyageProvider); ok {
+			sb.WriteString("To fix this (Voyage):\n")
+			sb.WriteString("1. Ensure VOYAGE_API_KEY or VECGREP_VOYAGE_API_KEY is set\n")
+			sb.WriteString("2. Verify your API key is valid\n")
+			sb.WriteString("3. Check your Voyage account has available credits\n")
 		} else {
 			sb.WriteString("Verify your embedding provider is configured correctly.\n")
 		}

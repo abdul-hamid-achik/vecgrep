@@ -1,0 +1,46 @@
+version: 1
+name: studio_first_run_init
+intent: |
+    a user can open Studio in a plain folder, register it globally, and reach the search workspace.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; printf 'package main\n\nfunc main() {}\n' > main.go; GLYPHRUN=1 TERM=xterm-256color \"$ROOT/bin/vecgrep\" studio"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "No vecgrep project found"
+        timeoutMs: 5000
+    - press: "i"
+    - wait:
+        screen:
+            contains: "mode hybrid"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "Search"
+        timeoutMs: 5000
+    - snapshot: first_run_initialized
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: workspace_visible_after_init
+      description: Studio opens the search workspace after inline initialization
+      verify:
+        screen:
+            contains: "mode hybrid"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0

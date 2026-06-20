@@ -3,7 +3,10 @@ name: studio_launch_quit
 intent: |
     a user can open vecgrep Studio in an initialized project and quit cleanly.
 target:
-    cmd: ["/bin/sh", "-lc", "GLYPHRUN=1 TERM=xterm-256color ./bin/vecgrep studio"]
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; GLYPHRUN=1 TERM=xterm-256color \"$ROOT/bin/vecgrep\" studio"
     cwd: "."
 terminal:
     cols: 100
@@ -41,4 +44,3 @@ outcomes:
       verify:
         process:
             exitCode: 0
-contractHash: sha256:9a18b7a8dfb3a70e9da379beb31fb846b4e9b7a5f0b9d3d2a7c8f0a8557f2712

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -81,6 +82,8 @@ type Model struct {
 	lastDuration  time.Duration
 	loading       bool
 	indexing      bool
+	indexProgress *index.Progress
+	indexRecent   []string
 	statusMessage string
 	errMessage    string
 	confirm       confirmAction
@@ -109,6 +112,13 @@ type indexDoneMsg struct {
 	full   bool
 }
 
+type indexProgressMsg struct {
+	progress index.Progress
+	ch       <-chan index.Progress
+}
+
+type indexProgressClosedMsg struct{}
+
 type deleteDoneMsg struct {
 	path    string
 	deleted int64
@@ -124,26 +134,14 @@ type editorDoneMsg struct {
 }
 
 func NewModel(ctx context.Context, startDir string) Model {
-	ti := textinput.New()
-	ti.Placeholder = "Search code by meaning..."
-	ti.Prompt = "query "
-	ti.SetWidth(80)
+	ti := newTextInput("query", "Search code by meaning...", 80)
 	ti.Focus()
 
-	dir := textinput.New()
-	dir.Placeholder = "internal/"
-	dir.Prompt = "dir "
-	dir.SetWidth(24)
+	dir := newTextInput("dir", "internal/", 24)
 
-	file := textinput.New()
-	file.Placeholder = "**/*_test.go"
-	file.Prompt = "file "
-	file.SetWidth(28)
+	file := newTextInput("file", "**/*_test.go", 28)
 
-	lines := textinput.New()
-	lines.Placeholder = "1-120"
-	lines.Prompt = "lines "
-	lines.SetWidth(18)
+	lines := newTextInput("lines", "1-120", 18)
 
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(12))
 	vp.SoftWrap = false
@@ -164,6 +162,24 @@ func NewModel(ctx context.Context, startDir string) Model {
 		types:       []string{"", "function", "class", "block", "comment", "generic"},
 		loading:     true,
 	}
+}
+
+func newTextInput(prompt, placeholder string, width int) textinput.Model {
+	input := textinput.New()
+	input.Placeholder = placeholder
+	input.Prompt = prompt + " "
+	input.SetWidth(width)
+
+	styles := textinput.DefaultDarkStyles()
+	styles.Focused.Prompt = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
+	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(colorMuted)
+	styles.Focused.Text = lipgloss.NewStyle().Foreground(colorInk)
+	styles.Blurred.Prompt = lipgloss.NewStyle().Foreground(colorMuted)
+	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(colorMuted)
+	styles.Blurred.Text = lipgloss.NewStyle().Foreground(colorDim)
+	input.SetStyles(styles)
+
+	return input
 }
 
 func (m Model) Init() tea.Cmd {
@@ -228,6 +244,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case indexDoneMsg:
 		m.indexing = false
+		m.indexProgress = nil
+		m.indexRecent = nil
 		if msg.err != nil {
 			m.errMessage = msg.err.Error()
 			return m, nil
@@ -239,6 +257,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMessage = fmt.Sprintf("%s %d files, %d skipped, %d chunks in %s", mode, msg.result.FilesProcessed, msg.result.FilesSkipped, msg.result.ChunksCreated, msg.result.Duration.Round(time.Millisecond))
 		m.errMessage = ""
 		return m, m.reloadStatusCmd()
+
+	case indexProgressMsg:
+		progress := msg.progress
+		m.indexProgress = &progress
+		m.addIndexRecent(progress.CurrentFile)
+		if m.indexing {
+			return m, waitForIndexProgressCmd(msg.ch)
+		}
+		return m, nil
+
+	case indexProgressClosedMsg:
+		return m, nil
 
 	case deleteDoneMsg:
 		if msg.err != nil {
@@ -327,6 +357,15 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		return nil, true
 	}
 
+	if m.session == nil {
+		switch key {
+		case "ctrl+c", "q":
+			return tea.Quit, true
+		case "i":
+			return m.initProjectCmd(), true
+		}
+	}
+
 	if m.activeView == viewSearch && m.isTextFocus() {
 		switch key {
 		case "ctrl+c":
@@ -346,7 +385,8 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 			m.prevFocus()
 			return nil, true
 		case "ctrl+f":
-			m.query.Focus()
+			m.focus = focusQuery
+			m.applyFocus()
 			return nil, true
 		case "enter":
 			return m.searchCmd(), true
@@ -580,6 +620,9 @@ func (m *Model) indexCmd(full bool) tea.Cmd {
 		return nil
 	}
 	m.indexing = true
+	start := time.Now()
+	m.indexProgress = &index.Progress{StartTime: start}
+	m.indexRecent = nil
 	m.errMessage = ""
 	if full {
 		m.statusMessage = "full reindexing"
@@ -587,9 +630,62 @@ func (m *Model) indexCmd(full bool) tea.Cmd {
 		m.statusMessage = "indexing"
 	}
 	req := app.IndexRequest{FullReindex: full}
-	return func() tea.Msg {
-		result, err := m.service.Index(m.ctx, req, nil)
+	progressCh := make(chan index.Progress, 32)
+	indexTask := func() tea.Msg {
+		defer close(progressCh)
+		result, err := m.service.Index(m.ctx, req, func(progress index.Progress) {
+			select {
+			case progressCh <- progress:
+			default:
+			}
+		})
 		return indexDoneMsg{result: result, err: err, full: full}
+	}
+	return tea.Batch(waitForIndexProgressCmd(progressCh), indexTask)
+}
+
+func waitForIndexProgressCmd(ch <-chan index.Progress) tea.Cmd {
+	return func() tea.Msg {
+		progress, ok := <-ch
+		if !ok {
+			return indexProgressClosedMsg{}
+		}
+		return indexProgressMsg{progress: progress, ch: ch}
+	}
+}
+
+func (m *Model) addIndexRecent(path string) {
+	if path == "" {
+		return
+	}
+	displayPath := path
+	if m.session != nil && m.session.ProjectRoot != "" {
+		if rel, err := filepath.Rel(m.session.ProjectRoot, path); err == nil && !strings.HasPrefix(rel, "..") {
+			displayPath = rel
+		}
+	}
+	displayPath = filepath.ToSlash(displayPath)
+	if len(m.indexRecent) > 0 && m.indexRecent[len(m.indexRecent)-1] == displayPath {
+		return
+	}
+	m.indexRecent = append(m.indexRecent, displayPath)
+	if len(m.indexRecent) > 5 {
+		m.indexRecent = m.indexRecent[len(m.indexRecent)-5:]
+	}
+}
+
+func (m *Model) initProjectCmd() tea.Cmd {
+	if m.loading {
+		return nil
+	}
+	m.loading = true
+	m.errMessage = ""
+	m.statusMessage = "registering project"
+	return func() tea.Msg {
+		if _, err := app.InitGlobalProject(m.ctx, m.startDir, false); err != nil {
+			return sessionLoadedMsg{err: err}
+		}
+		return loadSessionCmd(m.ctx, m.startDir)()
 	}
 }
 
@@ -671,14 +767,14 @@ func (m *Model) resize() {
 	if m.height <= 0 {
 		m.height = 30
 	}
-	m.query.SetWidth(clamp(m.width-12, 20, 120))
-	filterWidth := clamp((m.width-12)/3, 16, 34)
+	m.query.SetWidth(clamp(m.width-20, 20, 120))
+	filterWidth := clamp((m.width-12)/3, 18, 36)
 	if m.width < 80 {
-		filterWidth = clamp(m.width-12, 20, 80)
+		filterWidth = clamp(m.width-14, 20, 80)
 	}
-	m.directory.SetWidth(filterWidth)
-	m.filePattern.SetWidth(filterWidth)
-	m.lineRange.SetWidth(filterWidth)
+	m.directory.SetWidth(clamp(filterWidth-8, 8, 64))
+	m.filePattern.SetWidth(clamp(filterWidth-9, 8, 64))
+	m.lineRange.SetWidth(clamp(filterWidth-10, 8, 64))
 
 	previewHeight := clamp(m.height-12, 6, 30)
 	previewWidth := clamp(m.width/2-4, 30, m.width-4)
@@ -724,8 +820,15 @@ func (m Model) renderHeader() string {
 	if m.status != nil {
 		project = m.status.ProjectRoot
 	}
-	left := titleStyle.Render("vecgrep") + " " + mutedStyle.Render(project)
-	right := mutedStyle.Render(fmt.Sprintf("mode %s  limit %d", m.mode, m.limit))
+	left := titleStyle.Render("vecgrep") + " " + mutedStyle.Render(truncateDisplay(project, clamp(m.width/2, 24, 80)))
+	rightParts := []string{fmt.Sprintf("mode %s", m.mode), fmt.Sprintf("limit %d", m.limit)}
+	if m.status != nil {
+		rightParts = append(rightParts,
+			fmt.Sprintf("files %d", m.status.Stats["files"]),
+			fmt.Sprintf("chunks %d", m.status.Stats["chunks"]),
+		)
+	}
+	right := mutedStyle.Render(strings.Join(rightParts, "  "))
 	if m.width > lipgloss.Width(left)+lipgloss.Width(right)+2 {
 		return left + strings.Repeat(" ", m.width-lipgloss.Width(left)-lipgloss.Width(right)) + right
 	}
@@ -734,72 +837,144 @@ func (m Model) renderHeader() string {
 
 func (m Model) renderSearch() string {
 	if m.loading && m.session == nil {
-		return panelStyle.Width(m.width - 2).Render("loading project...")
+		return m.renderPanel("Project", "loading project...", m.width-2, false)
 	}
 	if m.session == nil {
-		msg := "No vecgrep project found.\n\nRun `vecgrep init --local` in this directory, or `vecgrep projects add`, then reopen Studio.\n\nctrl+c quits"
-		if m.errMessage != "" {
-			msg = m.errMessage + "\n\n" + msg
-		}
-		return panelStyle.Width(m.width - 2).Render(msg)
+		return m.renderPanel("Project", m.renderUnavailableProject(), m.width-2, false)
 	}
 
-	query := m.query.View()
+	query := m.renderQuery()
 	filterInputs := m.renderFilterInputs()
-	filters := fmt.Sprintf("m mode: %s   L lang: %s   T type: %s   +/- limit: %d",
-		m.mode, displayValue(m.languages[m.langIdx], "all"), displayValue(m.types[m.typeIdx], "all"), m.limit)
+	filters := m.renderFilterBar()
 
-	results := m.renderResults()
-	preview := panelStyle.Width(m.preview.Width()).Render(m.preview.View())
 	if m.width >= 96 {
 		listWidth := clamp(m.width-m.preview.Width()-6, 35, m.width-4)
-		results = panelStyle.Width(listWidth).Render(results)
+		results := m.renderPanel(m.resultsTitle(), m.renderResults(listWidth-4), listWidth, m.focus == focusResults)
+		preview := m.renderPanel(m.previewTitle(), m.renderPreview(), m.preview.Width(), m.focus == focusPreview)
 		return lipgloss.JoinVertical(lipgloss.Left,
 			query,
 			filterInputs,
-			mutedStyle.Render(filters),
-			lipgloss.JoinHorizontal(lipgloss.Top, results, preview),
+			filters,
+			lipgloss.JoinHorizontal(lipgloss.Top, results, "  ", preview),
 		)
 	}
 
+	results := m.renderPanel(m.resultsTitle(), m.renderResults(m.width-6), m.width-2, m.focus == focusResults)
+	preview := m.renderPanel(m.previewTitle(), m.renderPreview(), m.width-2, m.focus == focusPreview)
 	return lipgloss.JoinVertical(lipgloss.Left,
 		query,
 		filterInputs,
-		mutedStyle.Render(filters),
-		panelStyle.Width(m.width-2).Render(results),
+		filters,
+		results,
 		preview,
 	)
+}
+
+func (m Model) renderUnavailableProject() string {
+	if m.errMessage != "" && !strings.Contains(m.errMessage, "not in a vecgrep project") {
+		return "Could not open this project.\n\n" +
+			m.errMessage +
+			"\n\nIf the index was created by an older vecgrep/veclite version, run `vecgrep reset --force` and then `vecgrep index`.\n\nctrl+c quits"
+	}
+	return "No vecgrep project found.\n\nPress i to register this folder in ~/.vecgrep/projects, or run `vecgrep init --local` to keep state in the repo.\n\nctrl+c quits"
+}
+
+func (m Model) renderQuery() string {
+	return m.renderPanel("Search", m.query.View(), m.width-2, m.focus == focusQuery)
 }
 
 func (m Model) renderFilterInputs() string {
 	if m.width < 80 {
 		return lipgloss.JoinVertical(lipgloss.Left,
-			m.directory.View(),
-			m.filePattern.View(),
-			m.lineRange.View(),
+			m.renderPanel("Directory", m.directory.View(), m.width-2, m.focus == focusDirectory),
+			m.renderPanel("File glob", m.filePattern.View(), m.width-2, m.focus == focusFilePattern),
+			m.renderPanel("Line range", m.lineRange.View(), m.width-2, m.focus == focusLineRange),
 		)
 	}
+	filterWidth := clamp((m.width-12)/3, 18, 36)
 	return lipgloss.JoinHorizontal(lipgloss.Top,
-		m.directory.View(),
+		m.renderPanel("Directory", m.directory.View(), filterWidth, m.focus == focusDirectory),
 		"  ",
-		m.filePattern.View(),
+		m.renderPanel("File glob", m.filePattern.View(), filterWidth, m.focus == focusFilePattern),
 		"  ",
-		m.lineRange.View(),
+		m.renderPanel("Line range", m.lineRange.View(), filterWidth, m.focus == focusLineRange),
 	)
 }
 
-func (m Model) renderResults() string {
+func (m Model) renderFilterBar() string {
+	chips := []string{
+		m.renderChip("mode "+string(m.mode), false),
+		m.renderChip("lang "+displayValue(m.languages[m.langIdx], "all"), m.languages[m.langIdx] != ""),
+		m.renderChip("type "+displayValue(m.types[m.typeIdx], "all"), m.types[m.typeIdx] != ""),
+		m.renderChip(fmt.Sprintf("limit %d", m.limit), false),
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, chips[0], " ", chips[1], " ", chips[2], " ", chips[3])
+}
+
+func (m Model) renderChip(label string, active bool) string {
+	if active {
+		return activeChipStyle.Render(label)
+	}
+	return chipStyle.Render(label)
+}
+
+func (m Model) renderPanel(title, body string, width int, focused bool) string {
+	if width < 20 {
+		width = 20
+	}
+	titleText := truncateDisplay(title, width-2)
+	titleStyle := panelTitleStyle
+	style := panelStyle
+	if focused {
+		titleStyle = activePanelTitleStyle
+		style = focusedPanelStyle
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, titleStyle.Render(titleText), body)
+	return style.Width(width).Render(content)
+}
+
+func (m Model) resultsTitle() string {
+	if len(m.results) == 0 {
+		return "Results"
+	}
+	title := fmt.Sprintf("Results %d/%d", m.selected+1, len(m.results))
+	if m.lastDuration > 0 {
+		title += " in " + m.lastDuration.Round(time.Millisecond).String()
+	}
+	return title
+}
+
+func (m Model) previewTitle() string {
+	if len(m.results) == 0 || m.selected < 0 || m.selected >= len(m.results) {
+		return "Preview"
+	}
+	result := m.results[m.selected]
+	path := result.RelativePath
+	if path == "" {
+		path = result.FilePath
+	}
+	return fmt.Sprintf("Preview %s:%d", path, result.StartLine)
+}
+
+func (m Model) renderPreview() string {
+	if len(m.results) == 0 {
+		return mutedStyle.Render("Select a result to preview.")
+	}
+	return m.preview.View()
+}
+
+func (m Model) renderResults(width int) string {
 	if m.indexing {
-		return "indexing..."
+		return m.renderIndexProgress(width)
 	}
 	if m.loading {
-		return "searching..."
+		return mutedStyle.Render("Searching...")
 	}
 	if len(m.results) == 0 {
 		if m.lastQuery == "" {
-			return "Type a query and press enter."
+			return mutedStyle.Render("Type a query and press enter.")
 		}
-		return "No results."
+		return mutedStyle.Render("No results.")
 	}
 
 	maxRows := clamp(m.height-14, 5, 24)
@@ -811,13 +986,9 @@ func (m Model) renderResults() string {
 
 	var b strings.Builder
 	for i := start; i < end; i++ {
-		result := m.results[i]
-		line := fmt.Sprintf("%2d %.2f %s:%d", i+1, result.Score, result.RelativePath, result.StartLine)
-		if result.SymbolName != "" {
-			line += " " + result.SymbolName
-		}
+		line := m.renderResultRow(i, m.results[i], width)
 		if i == m.selected {
-			b.WriteString(activeStyle.Width(max(20, m.width/3)).Render(line))
+			b.WriteString(activeStyle.Width(width).Render(line))
 		} else {
 			b.WriteString(line)
 		}
@@ -826,22 +997,104 @@ func (m Model) renderResults() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func (m Model) renderResultRow(index int, result search.Result, width int) string {
+	marker := " "
+	if index == m.selected {
+		marker = ">"
+	}
+	path := result.RelativePath
+	if path == "" {
+		path = result.FilePath
+	}
+	if path == "" {
+		path = "(unknown)"
+	}
+	row := fmt.Sprintf("%s %2d  %.2f  %s:%d", marker, index+1, result.Score, path, result.StartLine)
+
+	var meta []string
+	if result.Language != "" {
+		meta = append(meta, result.Language)
+	}
+	if result.ChunkType != "" {
+		meta = append(meta, result.ChunkType)
+	}
+	if result.SymbolName != "" {
+		meta = append(meta, result.SymbolName)
+	}
+	if len(meta) > 0 {
+		row += "  " + strings.Join(meta, " ")
+	}
+
+	return truncateDisplay(row, width)
+}
+
+func (m Model) renderIndexProgress(width int) string {
+	progress := m.indexProgress
+	if progress == nil {
+		return mutedStyle.Render("Indexing current project...")
+	}
+
+	total := progress.TotalFiles
+	processed := progress.ProcessedFiles
+	bar := progressBar(processed, total, clamp(width-22, 10, 36))
+	elapsed := ""
+	if !progress.StartTime.IsZero() {
+		elapsed = "  " + time.Since(progress.StartTime).Round(time.Second).String()
+	}
+
+	lines := []string{
+		fmt.Sprintf("%s  %d/%d files%s", bar, processed, total, elapsed),
+		fmt.Sprintf("%d skipped  %d chunks", progress.SkippedFiles, progress.TotalChunks),
+	}
+	if progress.CurrentFile != "" {
+		lines = append(lines, "Current: "+truncateDisplay(displayIndexPath(m.session, progress.CurrentFile), width-9))
+	}
+	if len(m.indexRecent) > 0 {
+		lines = append(lines, "", "Recent")
+		for _, path := range m.indexRecent {
+			lines = append(lines, "  "+truncateDisplay(path, width-4))
+		}
+	}
+	if len(progress.Errors) > 0 {
+		lines = append(lines, "", warnStyle.Render(fmt.Sprintf("%d warnings", len(progress.Errors))))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m Model) renderStatus() string {
 	if m.status == nil {
-		return panelStyle.Width(m.width - 2).Render("status unavailable")
+		return m.renderPanel("Status", "status unavailable", m.width-2, true)
 	}
+
+	fresh := "unknown"
+	if m.status.PendingChanges != nil {
+		fresh = "yes"
+		if !m.status.IndexFresh {
+			fresh = "no"
+		}
+	}
+
 	lines := []string{
-		"Status",
+		fmt.Sprintf("Project:      %s", m.status.ProjectRoot),
+		fmt.Sprintf("Data dir:     %s", m.status.DataDir),
+		fmt.Sprintf("VecLite:      %s", m.status.VecLitePath),
+		fmt.Sprintf("VecLite size: %s", formatBytes(m.status.VecLiteSizeBytes)),
+		fmt.Sprintf("Backend:      %s", m.status.VectorBackend),
+		fmt.Sprintf("Embedding:    %s / %s / %d dims", m.status.Provider, m.status.Model, m.status.Dimensions),
+		fmt.Sprintf("Profile:      %s", m.status.ProfileStatus),
 		"",
-		fmt.Sprintf("Project:    %s", m.status.ProjectRoot),
-		fmt.Sprintf("Database:   %s", m.status.VecLitePath),
-		fmt.Sprintf("Provider:   %s (%s)", m.status.Model, m.status.Provider),
-		fmt.Sprintf("Dimensions: %d", m.status.Dimensions),
-		"",
-		fmt.Sprintf("Projects:   %d", m.status.Stats["projects"]),
-		fmt.Sprintf("Files:      %d", m.status.Stats["files"]),
-		fmt.Sprintf("Chunks:     %d", m.status.Stats["chunks"]),
-		fmt.Sprintf("Embeddings: %d", m.status.Stats["embeddings"]),
+		fmt.Sprintf("Fresh:        %s", fresh),
+		fmt.Sprintf("Projects:     %d", m.status.Stats["projects"]),
+		fmt.Sprintf("Files:        %d", m.status.Stats["files"]),
+		fmt.Sprintf("Chunks:       %d", m.status.Stats["chunks"]),
+		fmt.Sprintf("Embeddings:   %d", m.status.Stats["embeddings"]),
+		fmt.Sprintf("Source bytes: %s", formatBytes(m.status.IndexedBytes)),
+	}
+	if !m.status.LatestIndexedAt.IsZero() {
+		lines = append(lines, fmt.Sprintf("Latest:       %s", formatTimeAgo(m.status.LatestIndexedAt)))
+	}
+	if m.status.ProfilePath != "" {
+		lines = append(lines, fmt.Sprintf("Profile path: %s", m.status.ProfilePath))
 	}
 	if m.status.PendingChanges != nil {
 		lines = append(lines, "",
@@ -851,7 +1104,17 @@ func (m Model) renderStatus() string {
 			fmt.Sprintf("Deleted:    %d", m.status.PendingChanges.DeletedFiles),
 		)
 	}
-	return panelStyle.Width(m.width - 2).Render(strings.Join(lines, "\n"))
+	if m.status.DetailedStats != nil {
+		if languages := formatCountLines("Languages", m.status.DetailedStats.Languages, 6); len(languages) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, languages...)
+		}
+		if chunkTypes := formatCountLines("Chunk types", m.status.DetailedStats.ChunkTypes, 6); len(chunkTypes) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, chunkTypes...)
+		}
+	}
+	return m.renderPanel("Status", strings.Join(lines, "\n"), m.width-2, true)
 }
 
 func (m Model) renderConfig() string {
@@ -868,12 +1131,32 @@ func (m Model) renderConfig() string {
 		fmt.Sprintf("embedding.provider:   %s", cfg.Embedding.Provider),
 		fmt.Sprintf("embedding.model:      %s", cfg.Embedding.Model),
 		fmt.Sprintf("embedding.dimensions: %d", cfg.Embedding.Dimensions),
-		fmt.Sprintf("embedding.ollama_url: %s", cfg.Embedding.OllamaURL),
+	}
+	switch cfg.Embedding.Provider {
+	case "ollama", "":
+		lines = append(lines, fmt.Sprintf("embedding.ollama_url: %s", cfg.Embedding.OllamaURL))
+	case "openai":
+		lines = append(lines,
+			fmt.Sprintf("embedding.openai_api_key: %s", secretStatus(cfg.Embedding.OpenAIAPIKey)),
+			fmt.Sprintf("embedding.openai_base_url: %s", cfg.Embedding.OpenAIBaseURL),
+		)
+	case "cohere":
+		lines = append(lines,
+			fmt.Sprintf("embedding.cohere_api_key: %s", secretStatus(cfg.Embedding.CohereAPIKey)),
+			fmt.Sprintf("embedding.cohere_base_url: %s", cfg.Embedding.CohereBaseURL),
+		)
+	case "voyage":
+		lines = append(lines,
+			fmt.Sprintf("embedding.voyage_api_key: %s", secretStatus(cfg.Embedding.VoyageAPIKey)),
+			fmt.Sprintf("embedding.voyage_base_url: %s", cfg.Embedding.VoyageBaseURL),
+		)
+	}
+	lines = append(lines,
 		"",
 		fmt.Sprintf("indexing.chunk_size:     %d", cfg.Indexing.ChunkSize),
 		fmt.Sprintf("indexing.chunk_overlap:  %d", cfg.Indexing.ChunkOverlap),
 		fmt.Sprintf("indexing.max_file_size:  %d", cfg.Indexing.MaxFileSize),
-	}
+	)
 	if len(m.session.ConfigSources) > 0 {
 		lines = append(lines, "", "Sources")
 		for _, source := range m.session.ConfigSources {
@@ -881,6 +1164,13 @@ func (m Model) renderConfig() string {
 		}
 	}
 	return panelStyle.Width(m.width - 2).Render(strings.Join(lines, "\n"))
+}
+
+func secretStatus(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "[not set]"
+	}
+	return "[set]"
 }
 
 func (m Model) renderHelp() string {
@@ -900,6 +1190,7 @@ func (m Model) renderHelp() string {
 		"s            find similar to selected result",
 		"r / R        index / full reindex",
 		"x            delete selected file",
+		"i            register this folder globally when none is open",
 		"o            open selected result in EDITOR",
 		"v / c / ?    status / config / help",
 		"!            reset project index",
@@ -942,4 +1233,113 @@ func displayValue(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func displayIndexPath(session *app.Session, path string) string {
+	if session != nil && session.ProjectRoot != "" {
+		if rel, err := filepath.Rel(session.ProjectRoot, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.ToSlash(path)
+}
+
+func progressBar(processed, total, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	percent := 0
+	if total > 0 {
+		percent = clamp((processed*100)/total, 0, 100)
+	}
+	filled := 0
+	if total > 0 {
+		filled = clamp((processed*width)/total, 0, width)
+	}
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + fmt.Sprintf("] %3d%%", percent)
+}
+
+type countItem struct {
+	name  string
+	count int64
+}
+
+func formatCountLines(title string, counts map[string]int64, limit int) []string {
+	items := sortedCounts(counts, limit)
+	if len(items) == 0 {
+		return nil
+	}
+	lines := []string{title}
+	for _, item := range items {
+		lines = append(lines, fmt.Sprintf("  %s %d", item.name, item.count))
+	}
+	return lines
+}
+
+func sortedCounts(counts map[string]int64, limit int) []countItem {
+	if len(counts) == 0 {
+		return nil
+	}
+	items := make([]countItem, 0, len(counts))
+	for name, count := range counts {
+		if name == "" || count == 0 {
+			continue
+		}
+		items = append(items, countItem{name: name, count: count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count == items[j].count {
+			return items[i].name < items[j].name
+		}
+		return items[i].count > items[j].count
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	value := float64(bytes)
+	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f PiB", value/unit)
+}
+
+func formatTimeAgo(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	age := time.Since(t).Round(time.Second)
+	if age < 0 {
+		return t.Format(time.RFC3339)
+	}
+	return fmt.Sprintf("%s ago (%s)", age, t.Format(time.RFC3339))
+}
+
+func truncateDisplay(value string, width int) string {
+	if width <= 0 || lipgloss.Width(value) <= width {
+		return value
+	}
+	if width <= 3 {
+		return strings.Repeat(".", width)
+	}
+
+	var b strings.Builder
+	for _, r := range value {
+		next := b.String() + string(r)
+		if lipgloss.Width(next)+3 > width {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + "..."
 }

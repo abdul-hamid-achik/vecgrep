@@ -73,7 +73,7 @@ func OpenSession(ctx context.Context, startDir string) (*Session, error) {
 		DataDir:    cfg.DataDir,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("open database: %w; if this index was created by an older vecgrep/veclite version, run 'vecgrep reset --force' and then 'vecgrep index'", err)
 	}
 
 	provider, err := NewProvider(cfg)
@@ -135,4 +135,8 @@ func IsNoProject(err error) bool {
 
 func IsMigrationRequired(err error) bool {
 	return errors.Is(err, ErrMigrationRequired)
+}
+
+func IsEmbeddingProfileMismatch(err error) bool {
+	return errors.Is(err, ErrEmbeddingProfileMismatch)
 }

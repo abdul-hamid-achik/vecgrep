@@ -16,6 +16,20 @@ func NewProvider(cfg *config.Config) (embed.Provider, error) {
 			Model:      cfg.Embedding.Model,
 			Dimensions: cfg.Embedding.Dimensions,
 		}), nil
+	case "cohere":
+		return embed.NewCohereProvider(embed.CohereConfig{
+			APIKey:     cfg.Embedding.CohereAPIKey,
+			BaseURL:    cfg.Embedding.CohereBaseURL,
+			Model:      cfg.Embedding.Model,
+			Dimensions: cfg.Embedding.Dimensions,
+		}), nil
+	case "voyage":
+		return embed.NewVoyageProvider(embed.VoyageConfig{
+			APIKey:     cfg.Embedding.VoyageAPIKey,
+			BaseURL:    cfg.Embedding.VoyageBaseURL,
+			Model:      cfg.Embedding.Model,
+			Dimensions: cfg.Embedding.Dimensions,
+		}), nil
 	case "ollama", "":
 		return embed.NewOllamaProvider(embed.OllamaConfig{
 			URL:        cfg.Embedding.OllamaURL,

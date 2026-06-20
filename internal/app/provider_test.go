@@ -1,0 +1,84 @@
+package app
+
+import (
+	"testing"
+
+	"github.com/abdul-hamid-achik/vecgrep/internal/config"
+	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
+)
+
+func TestNewProviderSupportsCloudProviders(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		model    string
+		dims     int
+		wantType any
+	}{
+		{
+			name:     "openai",
+			provider: "openai",
+			model:    "text-embedding-3-small",
+			dims:     1536,
+			wantType: &embed.OpenAIProvider{},
+		},
+		{
+			name:     "cohere",
+			provider: "cohere",
+			model:    "embed-v4.0",
+			dims:     1536,
+			wantType: &embed.CohereProvider{},
+		},
+		{
+			name:     "voyage",
+			provider: "voyage",
+			model:    "voyage-code-3",
+			dims:     1024,
+			wantType: &embed.VoyageProvider{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Embedding.Provider = tt.provider
+			cfg.Embedding.Model = tt.model
+			cfg.Embedding.Dimensions = tt.dims
+
+			provider, err := NewProvider(cfg)
+			if err != nil {
+				t.Fatalf("NewProvider failed: %v", err)
+			}
+
+			switch tt.wantType.(type) {
+			case *embed.OpenAIProvider:
+				if _, ok := provider.(*embed.OpenAIProvider); !ok {
+					t.Fatalf("provider type = %T, want *embed.OpenAIProvider", provider)
+				}
+			case *embed.CohereProvider:
+				if _, ok := provider.(*embed.CohereProvider); !ok {
+					t.Fatalf("provider type = %T, want *embed.CohereProvider", provider)
+				}
+			case *embed.VoyageProvider:
+				if _, ok := provider.(*embed.VoyageProvider); !ok {
+					t.Fatalf("provider type = %T, want *embed.VoyageProvider", provider)
+				}
+			}
+			if provider.Model() != tt.model {
+				t.Fatalf("model = %q, want %q", provider.Model(), tt.model)
+			}
+			if provider.Dimensions() != tt.dims {
+				t.Fatalf("dimensions = %d, want %d", provider.Dimensions(), tt.dims)
+			}
+		})
+	}
+}
+
+func TestNewProviderRejectsUnknownProvider(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Embedding.Provider = "unknown"
+
+	if _, err := NewProvider(cfg); err == nil {
+		t.Fatal("NewProvider succeeded for unknown provider")
+	}
+}

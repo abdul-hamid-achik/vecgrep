@@ -70,7 +70,7 @@ type VecLiteConfig struct {
 
 // EmbeddingConfig holds embedding provider settings
 type EmbeddingConfig struct {
-	// Provider is the embedding provider: "ollama", "openai", "local"
+	// Provider is the embedding provider: "ollama", "openai", "cohere", or "voyage"
 	Provider string `mapstructure:"provider" yaml:"provider,omitempty"`
 	// Model is the embedding model name
 	Model string `mapstructure:"model" yaml:"model,omitempty"`
@@ -82,6 +82,14 @@ type EmbeddingConfig struct {
 	OpenAIAPIKey string `mapstructure:"openai_api_key" yaml:"openai_api_key,omitempty"`
 	// OpenAIBaseURL is the base URL for OpenAI API (can also be set via OPENAI_BASE_URL or VECGREP_OPENAI_BASE_URL env)
 	OpenAIBaseURL string `mapstructure:"openai_base_url" yaml:"openai_base_url,omitempty"`
+	// CohereAPIKey is the API key for Cohere (can also be set via COHERE_API_KEY or VECGREP_COHERE_API_KEY env)
+	CohereAPIKey string `mapstructure:"cohere_api_key" yaml:"cohere_api_key,omitempty"`
+	// CohereBaseURL is the base URL for Cohere API (can also be set via COHERE_BASE_URL or VECGREP_COHERE_BASE_URL env)
+	CohereBaseURL string `mapstructure:"cohere_base_url" yaml:"cohere_base_url,omitempty"`
+	// VoyageAPIKey is the API key for Voyage AI (can also be set via VOYAGE_API_KEY or VECGREP_VOYAGE_API_KEY env)
+	VoyageAPIKey string `mapstructure:"voyage_api_key" yaml:"voyage_api_key,omitempty"`
+	// VoyageBaseURL is the base URL for Voyage AI API (can also be set via VOYAGE_BASE_URL or VECGREP_VOYAGE_BASE_URL env)
+	VoyageBaseURL string `mapstructure:"voyage_base_url" yaml:"voyage_base_url,omitempty"`
 }
 
 // IndexingConfig holds indexing settings
@@ -208,6 +216,10 @@ func LoadLegacy(projectDir string) (*Config, error) {
 	_ = v.BindEnv("embedding.ollama_url", "VECGREP_OLLAMA_URL")
 	_ = v.BindEnv("embedding.openai_api_key", "VECGREP_OPENAI_API_KEY")
 	_ = v.BindEnv("embedding.openai_base_url", "VECGREP_OPENAI_BASE_URL")
+	_ = v.BindEnv("embedding.cohere_api_key", "VECGREP_COHERE_API_KEY")
+	_ = v.BindEnv("embedding.cohere_base_url", "VECGREP_COHERE_BASE_URL")
+	_ = v.BindEnv("embedding.voyage_api_key", "VECGREP_VOYAGE_API_KEY")
+	_ = v.BindEnv("embedding.voyage_base_url", "VECGREP_VOYAGE_BASE_URL")
 
 	// Read config file (ignore if not found)
 	if err := v.ReadInConfig(); err != nil {

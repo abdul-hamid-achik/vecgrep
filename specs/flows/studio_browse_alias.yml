@@ -1,0 +1,46 @@
+version: 1
+name: studio_browse_alias
+intent: |
+    a user can open Studio through the browse alias and quit cleanly.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; (cd \"$PROJECT\" && \"$ROOT/bin/vecgrep\" init >/dev/null); GLYPHRUN=1 TERM=xterm-256color \"$ROOT/bin/vecgrep\" browse \"$PROJECT\""
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "vecgrep"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "mode hybrid"
+        timeoutMs: 5000
+    - snapshot: browse_alias
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: workspace_visible
+      description: Studio renders through the browse alias
+      verify:
+        screen:
+            contains: "vecgrep"
+    - id: mode_visible
+      description: the active search mode is visible
+      verify:
+        screen:
+            contains: "mode hybrid"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0

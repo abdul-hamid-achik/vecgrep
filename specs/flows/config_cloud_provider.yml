@@ -1,0 +1,41 @@
+version: 1
+name: config_cloud_provider
+intent: |
+    a user can configure a cloud embedding provider from the CLI and inspect the resolved config without contacting the provider.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; export VECGREP_VOYAGE_API_KEY=test-voyage-key; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; \"$ROOT/bin/vecgrep\" config set embedding.provider voyage >/dev/null; \"$ROOT/bin/vecgrep\" config set embedding.model voyage-code-3 >/dev/null; \"$ROOT/bin/vecgrep\" config set embedding.dimensions 1024 >/dev/null; \"$ROOT/bin/vecgrep\" config show"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: config
+outcomes:
+    - id: provider_visible
+      description: the configured cloud provider is shown
+      verify:
+        screen:
+            contains: "provider: voyage"
+    - id: model_visible
+      description: the configured cloud model is shown
+      verify:
+        screen:
+            contains: "model: voyage-code-3"
+    - id: dimensions_visible
+      description: the configured dimensions are shown
+      verify:
+        screen:
+            contains: "dimensions: 1024"
+    - id: secret_status_visible
+      description: provider secret status is shown without printing the key
+      verify:
+        screen:
+            contains: "voyage_api_key: [set]"

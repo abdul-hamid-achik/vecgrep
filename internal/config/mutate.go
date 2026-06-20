@@ -18,9 +18,18 @@ func ParseConfigValue(key, value string) (any, error) {
 
 	switch key {
 	case "data_dir", "db_path",
-		"embedding.provider", "embedding.model", "embedding.ollama_url",
-		"embedding.openai_api_key", "embedding.openai_base_url":
+		"embedding.model", "embedding.ollama_url",
+		"embedding.openai_api_key", "embedding.openai_base_url",
+		"embedding.cohere_api_key", "embedding.cohere_base_url",
+		"embedding.voyage_api_key", "embedding.voyage_base_url":
 		return value, nil
+	case "embedding.provider":
+		switch value {
+		case "ollama", "openai", "cohere", "voyage":
+			return value, nil
+		default:
+			return nil, fmt.Errorf("invalid embedding.provider value %q: expected ollama, openai, cohere, or voyage", value)
+		}
 	case "embedding.dimensions":
 		return parsePositiveInt(key, value)
 	case "indexing.chunk_size", "indexing.chunk_overlap":
@@ -74,6 +83,14 @@ func ApplyConfigValue(cfg *Config, key, value string) error {
 		cfg.Embedding.OpenAIAPIKey = parsed.(string)
 	case "embedding.openai_base_url":
 		cfg.Embedding.OpenAIBaseURL = parsed.(string)
+	case "embedding.cohere_api_key":
+		cfg.Embedding.CohereAPIKey = parsed.(string)
+	case "embedding.cohere_base_url":
+		cfg.Embedding.CohereBaseURL = parsed.(string)
+	case "embedding.voyage_api_key":
+		cfg.Embedding.VoyageAPIKey = parsed.(string)
+	case "embedding.voyage_base_url":
+		cfg.Embedding.VoyageBaseURL = parsed.(string)
 	case "embedding.dimensions":
 		cfg.Embedding.Dimensions = parsed.(int)
 	case "indexing.chunk_size":

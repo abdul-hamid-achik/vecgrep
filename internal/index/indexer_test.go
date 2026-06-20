@@ -57,6 +57,24 @@ func (m *mockEmbedProvider) Ping(ctx context.Context) error {
 	return nil
 }
 
+type documentProviderMock struct {
+	*mockEmbedProvider
+	documentCalls int
+}
+
+func (m *documentProviderMock) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	m.documentCalls++
+	results := make([][]float32, len(texts))
+	for i, text := range texts {
+		embedding := make([]float32, m.dimensions)
+		for j := range embedding {
+			embedding[j] = float32((len(text)+1)%100) / 100.0
+		}
+		results[i] = embedding
+	}
+	return results, nil
+}
+
 func setupTestIndexer(t *testing.T) (*Indexer, *db.DB, string) {
 	t.Helper()
 
@@ -153,6 +171,24 @@ func TestDefaultIndexerConfig(t *testing.T) {
 	}
 	if len(cfg.IgnorePatterns) == 0 {
 		t.Error("Expected non-empty IgnorePatterns")
+	}
+}
+
+func TestEmbedDocumentsPrefersDocumentProvider(t *testing.T) {
+	provider := &documentProviderMock{mockEmbedProvider: newMockEmbedProvider(4)}
+
+	embeddings, err := embedDocuments(context.Background(), provider, []string{"alpha", "beta"})
+	if err != nil {
+		t.Fatalf("embedDocuments failed: %v", err)
+	}
+	if provider.documentCalls != 1 {
+		t.Fatalf("documentCalls = %d, want 1", provider.documentCalls)
+	}
+	if provider.embedCount != 0 {
+		t.Fatalf("embedCount = %d, want 0", provider.embedCount)
+	}
+	if len(embeddings) != 2 || len(embeddings[0]) != 4 || len(embeddings[1]) != 4 {
+		t.Fatalf("embeddings shape = %d/%d/%d, want 2/4/4", len(embeddings), len(embeddings[0]), len(embeddings[1]))
 	}
 }
 

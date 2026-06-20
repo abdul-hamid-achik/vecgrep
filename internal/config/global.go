@@ -225,6 +225,14 @@ func AddProjectToGlobal(projectPath string, name string) error {
 
 	// Derive name if not provided
 	if name == "" {
+		for existingName, entry := range globalCfg.Projects {
+			if ExpandPath(entry.Path) == projectPath {
+				name = existingName
+				break
+			}
+		}
+	}
+	if name == "" {
 		existingNames := make(map[string]bool)
 		for n := range globalCfg.Projects {
 			existingNames[n] = true

@@ -141,7 +141,7 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 
 	case SearchModeSemantic:
 		// Pure vector search
-		queryEmbedding, embedErr := s.provider.Embed(ctx, query)
+		queryEmbedding, embedErr := embedQuery(ctx, s.provider, query)
 		if embedErr != nil {
 			return nil, fmt.Errorf("embed query: %w", embedErr)
 		}
@@ -154,7 +154,7 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		fallthrough
 	default:
 		// Hybrid search: combine vector + text
-		queryEmbedding, embedErr := s.provider.Embed(ctx, query)
+		queryEmbedding, embedErr := embedQuery(ctx, s.provider, query)
 		if embedErr != nil {
 			return nil, fmt.Errorf("embed query: %w", embedErr)
 		}
@@ -195,7 +195,7 @@ func (s *Searcher) SearchWithExplain(ctx context.Context, query string, opts Sea
 	}
 
 	// Generate embedding for the query
-	queryEmbedding, err := s.provider.Embed(ctx, query)
+	queryEmbedding, err := embedQuery(ctx, s.provider, query)
 	if err != nil {
 		return nil, nil, fmt.Errorf("embed query: %w", err)
 	}
@@ -336,7 +336,7 @@ func (s *Searcher) SearchSimilarByText(ctx context.Context, text string, opts Si
 	}
 
 	// Generate embedding for the text
-	embedding, err := s.provider.Embed(ctx, text)
+	embedding, err := embedQuery(ctx, s.provider, text)
 	if err != nil {
 		return nil, fmt.Errorf("embed text: %w", err)
 	}
@@ -377,6 +377,13 @@ func (s *Searcher) SearchSimilarByText(ctx context.Context, text string, opts Si
 	}
 
 	return results, nil
+}
+
+func embedQuery(ctx context.Context, provider embed.Provider, text string) ([]float32, error) {
+	if queryProvider, ok := provider.(embed.QueryProvider); ok {
+		return queryProvider.EmbedQuery(ctx, text)
+	}
+	return provider.Embed(ctx, text)
 }
 
 // searchResultToResult converts a db.SearchResult to search.Result.

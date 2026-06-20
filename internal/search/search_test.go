@@ -12,6 +12,7 @@ type mockProvider struct {
 	embeddings map[string][]float32
 	model      string
 	dimensions int
+	embedCount int
 }
 
 func newMockProvider(dimensions int) *mockProvider {
@@ -23,6 +24,7 @@ func newMockProvider(dimensions int) *mockProvider {
 }
 
 func (m *mockProvider) Embed(ctx context.Context, text string) ([]float32, error) {
+	m.embedCount++
 	if emb, ok := m.embeddings[text]; ok {
 		return emb, nil
 	}
@@ -56,6 +58,20 @@ func (m *mockProvider) Dimensions() int {
 
 func (m *mockProvider) Ping(ctx context.Context) error {
 	return nil
+}
+
+type queryProviderMock struct {
+	*mockProvider
+	queryCalls int
+}
+
+func (m *queryProviderMock) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	m.queryCalls++
+	embedding := make([]float32, m.dimensions)
+	for i := range embedding {
+		embedding[i] = float32((len(text)+1)%100) / 100.0
+	}
+	return embedding, nil
 }
 
 func setupTestDB(t *testing.T) *db.DB {
@@ -138,6 +154,24 @@ func TestSearch_EmptyQuery(t *testing.T) {
 	_, err := searcher.Search(context.Background(), "", DefaultSearchOptions())
 	if err == nil {
 		t.Error("Expected error for empty query")
+	}
+}
+
+func TestEmbedQueryPrefersQueryProvider(t *testing.T) {
+	provider := &queryProviderMock{mockProvider: newMockProvider(4)}
+
+	embedding, err := embedQuery(context.Background(), provider, "alpha")
+	if err != nil {
+		t.Fatalf("embedQuery failed: %v", err)
+	}
+	if provider.queryCalls != 1 {
+		t.Fatalf("queryCalls = %d, want 1", provider.queryCalls)
+	}
+	if provider.embedCount != 0 {
+		t.Fatalf("embedCount = %d, want 0", provider.embedCount)
+	}
+	if len(embedding) != 4 {
+		t.Fatalf("len(embedding) = %d, want 4", len(embedding))
 	}
 }
 

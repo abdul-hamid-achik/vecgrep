@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
@@ -83,10 +85,12 @@ Returns the most relevant code chunks ranked by similarity.`,
 }
 
 var studioCmd = &cobra.Command{
-	Use:   "studio",
-	Short: "Open the interactive terminal search workspace",
-	Long:  `Open vecgrep Studio for search, inspection, indexing, and project status.`,
-	RunE:  runStudio,
+	Use:     "studio [path]",
+	Aliases: []string{"browse"},
+	Short:   "Open the interactive terminal search workspace",
+	Long:    `Open vecgrep Studio for search, inspection, indexing, and project status.`,
+	Args:    cobra.MaximumNArgs(1),
+	RunE:    runStudio,
 }
 
 var serveCmd = &cobra.Command{
@@ -182,6 +186,8 @@ var configSetCmd = &cobra.Command{
 
 Examples:
   vecgrep config set embedding.provider openai
+  vecgrep config set embedding.provider cohere
+  vecgrep config set embedding.provider voyage
   vecgrep config set --global embedding.provider openai`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConfigSet,
@@ -221,55 +227,6 @@ var projectsRemoveCmd = &cobra.Command{
 	RunE:  runProjectsRemove,
 }
 
-var profileCmd = &cobra.Command{
-	Use:   "profile",
-	Short: "Manage search profiles",
-	Long: `Manage search profiles for different content sources.
-
-Profiles allow you to search different types of content:
-- Code files in your project (default)
-- Notes from noted CLI
-- Custom sources
-
-Subcommands:
-  list    List all configured profiles
-  add     Add a new profile
-  remove  Remove a profile
-  show    Show profile details`,
-}
-
-var profileListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all configured profiles",
-	RunE:  runProfileList,
-}
-
-var profileAddCmd = &cobra.Command{
-	Use:   "add <name>",
-	Short: "Add a new profile",
-	Long: `Add a new search profile.
-
-Examples:
-  vecgrep profile add notes --type noted
-  vecgrep profile add docs --type files --path ./docs`,
-	Args: cobra.ExactArgs(1),
-	RunE: runProfileAdd,
-}
-
-var profileRemoveCmd = &cobra.Command{
-	Use:   "remove <name>",
-	Short: "Remove a profile",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runProfileRemove,
-}
-
-var profileShowCmd = &cobra.Command{
-	Use:   "show <name>",
-	Short: "Show profile details",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runProfileShow,
-}
-
 func init() {
 	// Set version template
 	rootCmd.SetVersionTemplate("vecgrep version {{.Version}}\n")
@@ -301,9 +258,6 @@ func init() {
 	searchCmd.Flags().String("lines", "", "filter by line range (e.g., '1-100')")
 	searchCmd.Flags().StringP("mode", "m", "hybrid", "search mode: semantic, keyword, or hybrid")
 	searchCmd.Flags().Bool("explain", false, "show search diagnostics")
-	searchCmd.Flags().StringP("profile", "P", "", "search a specific profile")
-	searchCmd.Flags().StringSlice("profiles", nil, "search multiple profiles (comma-separated)")
-	searchCmd.Flags().Bool("all-profiles", false, "search all configured profiles")
 
 	// Serve command flags
 	serveCmd.Flags().Bool("mcp", false, "start MCP server (stdio)")
@@ -342,15 +296,6 @@ func init() {
 	projectsCmd.AddCommand(projectsAddCmd)
 	projectsCmd.AddCommand(projectsRemoveCmd)
 
-	// Add profile subcommands
-	profileAddCmd.Flags().String("type", "files", "source type: files, noted")
-	profileAddCmd.Flags().String("path", "", "path for files source type")
-	profileAddCmd.Flags().String("description", "", "profile description")
-	profileCmd.AddCommand(profileListCmd)
-	profileCmd.AddCommand(profileAddCmd)
-	profileCmd.AddCommand(profileRemoveCmd)
-	profileCmd.AddCommand(profileShowCmd)
-
 	// Init command flags for global/local mode
 	initCmd.Flags().Bool("global", false, "register project in ~/.vecgrep/ (this is the default)")
 	initCmd.Flags().Bool("local", false, "create local .vecgrep/ directory instead of centralized storage")
@@ -370,7 +315,6 @@ func init() {
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(projectsCmd)
-	rootCmd.AddCommand(profileCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -637,7 +581,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 }
 
 func runStudio(cmd *cobra.Command, args []string) error {
-	return studio.Run(cmd.Context(), "")
+	startDir := ""
+	if len(args) > 0 {
+		startDir = args[0]
+	}
+	return studio.Run(cmd.Context(), startDir)
 }
 
 func isInteractiveTerminal() bool {
@@ -690,13 +638,26 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 // StatusOutput represents the JSON output for the status command
 type StatusOutput struct {
-	ProjectRoot    string           `json:"project_root"`
-	Database       string           `json:"database"`
-	VectorBackend  string           `json:"vector_backend"`
-	EmbeddingModel string           `json:"embedding_model"`
-	Provider       string           `json:"provider"`
-	Stats          map[string]int64 `json:"stats"`
-	PendingChanges *PendingChanges  `json:"pending_changes,omitempty"`
+	ProjectRoot    string                `json:"project_root"`
+	DataDir        string                `json:"data_dir"`
+	Database       string                `json:"database"`
+	VectorBackend  string                `json:"vector_backend"`
+	EmbeddingModel string                `json:"embedding_model"`
+	Provider       string                `json:"provider"`
+	Dimensions     int                   `json:"dimensions"`
+	ProfilePath    string                `json:"profile_path"`
+	ProfileStatus  string                `json:"profile_status"`
+	ProfileMatches bool                  `json:"profile_matches"`
+	CurrentProfile app.EmbeddingProfile  `json:"current_profile"`
+	StoredProfile  *app.EmbeddingProfile `json:"stored_profile,omitempty"`
+	VecLiteBytes   int64                 `json:"veclite_bytes"`
+	IndexedBytes   int64                 `json:"indexed_bytes"`
+	LatestIndexed  string                `json:"latest_indexed_at,omitempty"`
+	IndexFresh     bool                  `json:"index_fresh"`
+	Stats          map[string]int64      `json:"stats"`
+	Languages      map[string]int64      `json:"languages,omitempty"`
+	ChunkTypes     map[string]int64      `json:"chunk_types,omitempty"`
+	PendingChanges *PendingChanges       `json:"pending_changes,omitempty"`
 }
 
 // PendingChanges represents pending reindex changes
@@ -726,11 +687,28 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if format == "json" {
 		output := StatusOutput{
 			ProjectRoot:    status.ProjectRoot,
+			DataDir:        status.DataDir,
 			Database:       status.VecLitePath,
 			VectorBackend:  status.VectorBackend,
 			EmbeddingModel: status.Model,
 			Provider:       status.Provider,
+			Dimensions:     status.Dimensions,
+			ProfilePath:    status.ProfilePath,
+			ProfileStatus:  status.ProfileStatus,
+			ProfileMatches: status.ProfileMatches,
+			CurrentProfile: status.CurrentProfile,
+			StoredProfile:  status.StoredProfile,
+			VecLiteBytes:   status.VecLiteSizeBytes,
+			IndexedBytes:   status.IndexedBytes,
+			IndexFresh:     status.IndexFresh,
 			Stats:          status.Stats,
+		}
+		if !status.LatestIndexedAt.IsZero() {
+			output.LatestIndexed = status.LatestIndexedAt.Format(time.RFC3339)
+		}
+		if status.DetailedStats != nil {
+			output.Languages = status.DetailedStats.Languages
+			output.ChunkTypes = status.DetailedStats.ChunkTypes
 		}
 
 		if status.PendingChanges != nil {
@@ -753,17 +731,38 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Default text output
 	fmt.Printf("vecgrep status\n")
 	fmt.Printf("  Project root: %s\n", status.ProjectRoot)
-	fmt.Printf("  Database: %s\n", status.VecLitePath)
+	fmt.Printf("  Data dir:     %s\n", status.DataDir)
+	fmt.Printf("  VecLite index: %s\n", status.VecLitePath)
+	fmt.Printf("  VecLite size: %s\n", formatBytes(status.VecLiteSizeBytes))
 	fmt.Printf("  Vector backend: %s\n", status.VectorBackend)
-	fmt.Printf("  Embedding model: %s (%s)\n", status.Model, status.Provider)
+	fmt.Printf("  Embedding model: %s (%s, %d dimensions)\n", status.Model, status.Provider, status.Dimensions)
+	fmt.Printf("  Profile:     %s\n", status.ProfileStatus)
+	fmt.Printf("  Profile path: %s\n", status.ProfilePath)
 	fmt.Printf("\nIndex statistics:\n")
 	fmt.Printf("  Projects:   %d\n", status.Stats["projects"])
 	fmt.Printf("  Files:      %d\n", status.Stats["files"])
 	fmt.Printf("  Chunks:     %d\n", status.Stats["chunks"])
 	fmt.Printf("  Embeddings: %d\n", status.Stats["embeddings"])
+	fmt.Printf("  Source size: %s\n", formatBytes(status.IndexedBytes))
+	if !status.LatestIndexedAt.IsZero() {
+		fmt.Printf("  Latest:     %s\n", status.LatestIndexedAt.Format(time.RFC3339))
+	}
+	if status.DetailedStats != nil {
+		if languages := formatCountSummary(status.DetailedStats.Languages, 5); languages != "" {
+			fmt.Printf("  Languages:  %s\n", languages)
+		}
+		if chunkTypes := formatCountSummary(status.DetailedStats.ChunkTypes, 5); chunkTypes != "" {
+			fmt.Printf("  Types:      %s\n", chunkTypes)
+		}
+	}
 
 	if status.PendingChanges != nil {
 		fmt.Printf("\nReindex status:\n")
+		if status.IndexFresh {
+			fmt.Printf("  Fresh:        yes\n")
+		} else {
+			fmt.Printf("  Fresh:        no\n")
+		}
 		fmt.Printf("  New files:      %d\n", status.PendingChanges.NewFiles)
 		fmt.Printf("  Modified files: %d\n", status.PendingChanges.ModifiedFiles)
 		fmt.Printf("  Deleted files:  %d\n", status.PendingChanges.DeletedFiles)
@@ -773,6 +772,56 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+type countItem struct {
+	name  string
+	count int64
+}
+
+func formatCountSummary(counts map[string]int64, limit int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	items := make([]countItem, 0, len(counts))
+	for name, count := range counts {
+		if name == "" || count == 0 {
+			continue
+		}
+		items = append(items, countItem{name: name, count: count})
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count == items[j].count {
+			return items[i].name < items[j].name
+		}
+		return items[i].count > items[j].count
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, fmt.Sprintf("%s %d", item.name, item.count))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	value := float64(bytes)
+	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f PiB", value/unit)
 }
 
 func runDelete(cmd *cobra.Command, args []string) error {
@@ -826,6 +875,16 @@ func runReset(cmd *cobra.Command, args []string) error {
 
 	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
+		if force {
+			result, resetErr := app.ResetIndexFiles(cmd.Context(), "")
+			if resetErr != nil {
+				return fmt.Errorf("failed to reset index files after open error %q: %w", err, resetErr)
+			}
+			fmt.Printf("Index files reset for %s\n", result.ProjectRoot)
+			fmt.Printf("  VecLite index: %s\n", result.VecLitePath)
+			fmt.Println("Run 'vecgrep index' to re-index your codebase.")
+			return nil
+		}
 		return err
 	}
 	defer session.Close()
@@ -1103,130 +1162,6 @@ func runProjectsRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Project '%s' removed from global config.\n", name)
 	fmt.Println("Note: Project data directory was not deleted. Remove it manually if needed.")
-
-	return nil
-}
-
-func runProfileList(cmd *cobra.Command, args []string) error {
-	profiles, err := config.ListProfiles()
-	if err != nil {
-		return fmt.Errorf("failed to list profiles: %w", err)
-	}
-
-	if len(profiles) == 0 {
-		fmt.Println("No profiles configured.")
-		fmt.Println("Use 'vecgrep profile add <name>' to add a profile.")
-		return nil
-	}
-
-	fmt.Printf("Configured profiles (%d):\n\n", len(profiles))
-	for _, name := range profiles {
-		profile, err := config.GetProfile(name)
-		if err != nil {
-			fmt.Printf("  %s (error: %v)\n", name, err)
-			continue
-		}
-		fmt.Printf("  %s\n", name)
-		fmt.Printf("    Type: %s\n", profile.Source.Type)
-		if profile.Description != "" {
-			fmt.Printf("    Description: %s\n", profile.Description)
-		}
-		if profile.Source.Path != "" {
-			fmt.Printf("    Path: %s\n", profile.Source.Path)
-		}
-		fmt.Println()
-	}
-
-	return nil
-}
-
-func runProfileAdd(cmd *cobra.Command, args []string) error {
-	name := args[0]
-	sourceType, _ := cmd.Flags().GetString("type")
-	path, _ := cmd.Flags().GetString("path")
-	description, _ := cmd.Flags().GetString("description")
-
-	var profile config.Profile
-
-	switch sourceType {
-	case "files":
-		if path == "" {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("failed to get current directory: %w", err)
-			}
-			path = cwd
-		}
-		profile = config.DefaultFilesProfile(name, path)
-	case "noted":
-		profile = config.DefaultNotedProfile()
-		profile.Name = name
-	default:
-		return fmt.Errorf("unsupported source type: %s (use 'files' or 'noted')", sourceType)
-	}
-
-	if description != "" {
-		profile.Description = description
-	}
-
-	if err := config.AddProfile(profile); err != nil {
-		return fmt.Errorf("failed to add profile: %w", err)
-	}
-
-	fmt.Printf("Profile '%s' added successfully.\n", name)
-	fmt.Printf("  Type: %s\n", profile.Source.Type)
-	if profile.Source.Path != "" {
-		fmt.Printf("  Path: %s\n", profile.Source.Path)
-	}
-	fmt.Println()
-	fmt.Printf("Search with: vecgrep search --profile %s <query>\n", name)
-
-	return nil
-}
-
-func runProfileRemove(cmd *cobra.Command, args []string) error {
-	name := args[0]
-
-	if err := config.DeleteProfile(name); err != nil {
-		return fmt.Errorf("failed to remove profile: %w", err)
-	}
-
-	fmt.Printf("Profile '%s' removed.\n", name)
-	return nil
-}
-
-func runProfileShow(cmd *cobra.Command, args []string) error {
-	name := args[0]
-
-	profile, err := config.GetProfile(name)
-	if err != nil {
-		return fmt.Errorf("failed to get profile: %w", err)
-	}
-
-	fmt.Printf("Profile: %s\n\n", profile.Name)
-	if profile.Description != "" {
-		fmt.Printf("Description: %s\n", profile.Description)
-	}
-	fmt.Printf("Source Type: %s\n", profile.Source.Type)
-	if profile.Source.Path != "" {
-		fmt.Printf("Source Path: %s\n", profile.Source.Path)
-	}
-	if profile.Source.BinaryPath != "" {
-		fmt.Printf("Binary Path: %s\n", profile.Source.BinaryPath)
-	}
-	if profile.Source.PollInterval > 0 {
-		fmt.Printf("Poll Interval: %ds\n", profile.Source.PollInterval)
-	}
-	if profile.DataDir != "" {
-		fmt.Printf("Data Dir: %s\n", profile.DataDir)
-	}
-
-	fmt.Printf("\nIndexing Settings:\n")
-	fmt.Printf("  Chunk Size: %d\n", profile.Indexing.ChunkSize)
-	fmt.Printf("  Chunk Overlap: %d\n", profile.Indexing.ChunkOverlap)
-	if len(profile.Indexing.IgnorePatterns) > 0 {
-		fmt.Printf("  Ignore Patterns: %v\n", profile.Indexing.IgnorePatterns)
-	}
 
 	return nil
 }

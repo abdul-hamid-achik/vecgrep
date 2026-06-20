@@ -9,6 +9,8 @@
 # Build output
 /bin/
 /dist/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
 
 # Test binary
 *.test
@@ -19,6 +21,7 @@ coverage.html
 
 # Dependency directories
 vendor/
+node_modules/
 
 # Go workspace
 go.work

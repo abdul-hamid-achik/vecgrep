@@ -4,10 +4,14 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
+	"github.com/abdul-hamid-achik/vecgrep/internal/db"
+	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
 )
 
@@ -81,6 +85,24 @@ func TestModelLetsFilterInputsReceivePrintableShortcutKeys(t *testing.T) {
 	}
 }
 
+func TestModelCtrlFFromFilterFocusesQuery(t *testing.T) {
+	model := NewModel(context.Background(), "")
+	model.focus = focusDirectory
+	model.applyFocus()
+
+	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: 'f', Mod: tea.ModCtrl}))
+	m := updated.(Model)
+	if m.focus != focusQuery {
+		t.Fatalf("focus after ctrl+f = %v, want query", m.focus)
+	}
+	if !m.query.Focused() {
+		t.Fatal("query input is not focused")
+	}
+	if m.directory.Focused() {
+		t.Fatal("directory input should be blurred")
+	}
+}
+
 func TestModelTabCyclesThroughFilterFields(t *testing.T) {
 	model := NewModel(context.Background(), "")
 	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
@@ -100,6 +122,16 @@ func TestModelTabCyclesThroughFilterFields(t *testing.T) {
 	}
 }
 
+func TestModelShiftTabFromQueryWrapsToPreview(t *testing.T) {
+	model := NewModel(context.Background(), "")
+
+	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab, Mod: tea.ModShift}))
+	m := updated.(Model)
+	if m.focus != focusPreview {
+		t.Fatalf("focus after shift+tab from query = %v, want preview", m.focus)
+	}
+}
+
 func TestModelSelectionUpdatesPreview(t *testing.T) {
 	m := NewModel(context.Background(), "")
 	m.results = []search.Result{
@@ -113,6 +145,204 @@ func TestModelSelectionUpdatesPreview(t *testing.T) {
 	}
 	if got := m.preview.View(); !contains(got, "b.go:7-7") {
 		t.Fatalf("preview did not update: %q", got)
+	}
+}
+
+func TestModelRenderFilterBarShowsSelectedState(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	m.mode = search.SearchModeSemantic
+	m.langIdx = 1
+	m.typeIdx = 1
+	m.limit = 25
+
+	got := m.renderFilterBar()
+	for _, want := range []string{"mode semantic", "lang go", "type function", "limit 25"} {
+		if !contains(got, want) {
+			t.Fatalf("filter bar missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestModelRenderResultRowIncludesMetadata(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	row := m.renderResultRow(0, search.Result{
+		RelativePath: "internal/search/search.go",
+		StartLine:    42,
+		Score:        0.91,
+		Language:     "go",
+		ChunkType:    "function",
+		SymbolName:   "NewSearcher",
+	}, 120)
+
+	for _, want := range []string{"internal/search/search.go:42", "0.91", "go function NewSearcher"} {
+		if !contains(row, want) {
+			t.Fatalf("result row missing %q: %q", want, row)
+		}
+	}
+}
+
+func TestModelRenderResultRowTruncatesToWidth(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	row := m.renderResultRow(0, search.Result{
+		RelativePath: "internal/some/deeply/nested/package/with/a/very_long_file_name.go",
+		StartLine:    128,
+		Score:        0.77,
+		Language:     "go",
+		ChunkType:    "function",
+		SymbolName:   "VeryLongSymbolName",
+	}, 42)
+
+	if got := lipgloss.Width(row); got > 42 {
+		t.Fatalf("row width = %d, want <= 42: %q", got, row)
+	}
+	if !strings.HasSuffix(row, "...") {
+		t.Fatalf("truncated row should end with ellipsis: %q", row)
+	}
+}
+
+func TestModelRenderSearchShowsPolishedPanels(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	m.width = 120
+	m.height = 32
+	m.loading = false
+	m.session = &app.Session{}
+	m.results = []search.Result{{
+		RelativePath: "internal/app/search.go",
+		Content:      "func Search() {}",
+		StartLine:    12,
+		EndLine:      12,
+		Score:        0.88,
+		Language:     "go",
+		ChunkType:    "function",
+	}}
+	m.updatePreview()
+
+	got := m.renderSearch()
+	for _, want := range []string{"Search", "Directory", "File glob", "Line range", "Results 1/1", "Preview internal/app/search.go:12"} {
+		if !contains(got, want) {
+			t.Fatalf("rendered search missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestModelRenderPreviewEmptyState(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	got := m.renderPreview()
+	if !contains(got, "Select a result to preview.") {
+		t.Fatalf("preview empty state missing: %q", got)
+	}
+}
+
+func TestModelRenderUnavailableProjectDistinguishesOpenError(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	m.errMessage = "open database: failed to initialize veclite"
+
+	got := m.renderUnavailableProject()
+	if !contains(got, "Could not open this project.") {
+		t.Fatalf("database error title missing: %q", got)
+	}
+	if !contains(got, "vecgrep reset --force") {
+		t.Fatalf("rebuild guidance missing: %q", got)
+	}
+	if contains(got, "No vecgrep project found.") {
+		t.Fatalf("database error should not use no-project copy: %q", got)
+	}
+}
+
+func TestModelRenderUnavailableProjectOffersGlobalRegistration(t *testing.T) {
+	m := NewModel(context.Background(), "")
+
+	got := m.renderUnavailableProject()
+	if !contains(got, "No vecgrep project found.") {
+		t.Fatalf("no-project title missing: %q", got)
+	}
+	if !contains(got, "Press i to register") {
+		t.Fatalf("global registration guidance missing: %q", got)
+	}
+	if !contains(got, "~/.vecgrep/projects") {
+		t.Fatalf("global storage location missing: %q", got)
+	}
+}
+
+func TestModelInitShortcutWorksWithoutProject(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	m.loading = false
+	m.session = nil
+
+	updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Text: "i", Code: 'i'}))
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected init command")
+	}
+	if !next.loading {
+		t.Fatal("model should enter loading state")
+	}
+	if next.statusMessage != "registering project" {
+		t.Fatalf("status message = %q", next.statusMessage)
+	}
+}
+
+func TestModelRenderIndexProgressShowsCountersAndRecentFiles(t *testing.T) {
+	m := NewModel(context.Background(), "/repo")
+	m.width = 100
+	m.height = 30
+	m.session = &app.Session{ProjectRoot: "/repo"}
+	m.indexing = true
+	progress := index.Progress{
+		TotalFiles:     10,
+		ProcessedFiles: 4,
+		SkippedFiles:   2,
+		TotalChunks:    18,
+		CurrentFile:    "/repo/internal/search/search.go",
+		StartTime:      time.Now().Add(-2 * time.Second),
+	}
+	m.indexProgress = &progress
+	m.addIndexRecent(progress.CurrentFile)
+
+	got := m.renderResults(80)
+	for _, want := range []string{"40%", "4/10 files", "2 skipped", "18 chunks", "internal/search/search.go"} {
+		if !contains(got, want) {
+			t.Fatalf("index progress missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestModelRenderStatusShowsVectorHealth(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	m.width = 120
+	m.status = &app.StatusResponse{
+		ProjectRoot:      "/repo",
+		DataDir:          "/home/user/.vecgrep/projects/repo",
+		VecLitePath:      "/home/user/.vecgrep/projects/repo/vectors.veclite",
+		VectorBackend:    "veclite",
+		Provider:         "ollama",
+		Model:            "nomic-embed-text",
+		Dimensions:       768,
+		ProfilePath:      "/home/user/.vecgrep/projects/repo/embedding_profile.json",
+		ProfileStatus:    "ok",
+		ProfileMatches:   true,
+		VecLiteSizeBytes: 4096,
+		IndexedBytes:     2048,
+		LatestIndexedAt:  time.Now().Add(-time.Minute),
+		IndexFresh:       true,
+		Stats: map[string]int64{
+			"projects":   1,
+			"files":      3,
+			"chunks":     8,
+			"embeddings": 8,
+		},
+		DetailedStats: &db.Stats{
+			Languages:  map[string]int64{"go": 6, "markdown": 2},
+			ChunkTypes: map[string]int64{"function": 5, "generic": 3},
+		},
+		PendingChanges: &index.PendingChanges{},
+	}
+
+	got := m.renderStatus()
+	for _, want := range []string{"VecLite size: 4.0 KiB", "Profile:      ok", "Fresh:", "Source bytes: 2.0 KiB", "Languages", "go 6", "Chunk types", "function 5"} {
+		if !contains(got, want) {
+			t.Fatalf("status render missing %q: %q", want, got)
+		}
 	}
 }
 

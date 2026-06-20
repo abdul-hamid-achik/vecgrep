@@ -29,6 +29,9 @@ func (s *Service) Index(ctx context.Context, req IndexRequest, progress func(ind
 	if s.session.Provider == nil {
 		return nil, ErrProviderRequired
 	}
+	if err := s.ensureEmbeddingProfileForIndex(req.FullReindex); err != nil {
+		return nil, err
+	}
 	if err := s.session.Provider.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("embedding provider unavailable: %w", err)
 	}
@@ -39,9 +42,23 @@ func (s *Service) Index(ctx context.Context, req IndexRequest, progress func(ind
 	}
 
 	if req.FullReindex {
-		return indexer.ReindexAll(ctx, s.session.ProjectRoot)
+		result, err := indexer.ReindexAll(ctx, s.session.ProjectRoot)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.saveCurrentEmbeddingProfile(); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
-	return indexer.Index(ctx, s.session.ProjectRoot, req.Paths...)
+	result, err := indexer.Index(ctx, s.session.ProjectRoot, req.Paths...)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.saveCurrentEmbeddingProfile(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Service) DeleteFile(ctx context.Context, path string) (int64, error) {
@@ -64,10 +81,15 @@ func (s *Service) Reset(ctx context.Context, scope ResetScope) error {
 	}
 	switch scope {
 	case ResetAll:
-		return s.session.DB.ResetAll(ctx)
+		if err := s.session.DB.ResetAll(ctx); err != nil {
+			return err
+		}
 	default:
-		return s.session.DB.Reset(ctx, s.session.ProjectRoot)
+		if err := s.session.DB.Reset(ctx, s.session.ProjectRoot); err != nil {
+			return err
+		}
 	}
+	return RemoveEmbeddingProfile(s.session.Config.DataDir)
 }
 
 func (s *Service) indexerConfig(additionalIgnores []string) index.IndexerConfig {

@@ -37,6 +37,18 @@ type Provider interface {
 	Ping(ctx context.Context) error
 }
 
+// QueryProvider is implemented by providers that support retrieval-specific
+// query embeddings.
+type QueryProvider interface {
+	EmbedQuery(ctx context.Context, text string) ([]float32, error)
+}
+
+// DocumentProvider is implemented by providers that support retrieval-specific
+// document embeddings for indexed content.
+type DocumentProvider interface {
+	EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error)
+}
+
 // ProviderError wraps errors with provider context.
 type ProviderError struct {
 	Provider string

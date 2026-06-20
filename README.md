@@ -2,14 +2,14 @@
 
 Local-first semantic code search powered by embeddings.
 
-vecgrep indexes your codebase and enables natural language search using vector embeddings. All processing happens locally via Ollama, ensuring your code never leaves your machine.
+vecgrep indexes your codebase and enables natural language search using vector embeddings. It defaults to local Ollama embeddings so your code stays on your machine, with optional cloud providers when you choose them.
 
 ## Features
 
 - **Hybrid Search** - Combine semantic (vector) and keyword search for best results
 - **Three Search Modes** - Choose between semantic, keyword, or hybrid search
-- **Local-First** - All embeddings generated locally via Ollama
-- **OpenAI Support** - Optional cloud embeddings via OpenAI API
+- **Local-First** - Embeddings generated locally via Ollama by default
+- **Cloud Provider Support** - Optional OpenAI, Cohere, and Voyage AI embeddings
 - **Incremental Indexing** - Only re-index changed files
 - **Batch Operations** - Efficient bulk indexing with batch inserts
 - **Language-Aware Chunking** - Intelligent code splitting by functions, classes, and blocks
@@ -19,7 +19,6 @@ vecgrep indexes your codebase and enables natural language search using vector e
 - **Similar Code Finder** - Find semantically similar code across your codebase
 - **Search Diagnostics** - Explain mode for debugging and optimizing searches
 - **Embedding Cache** - Cache query embeddings for faster repeated searches
-- **Multi-Profile Search** - Search across code, notes, and other content sources
 - **Batch Search** - Search multiple queries in parallel via MCP
 - **Codebase Overview** - Get high-level insights about your codebase structure
 - **Related Files** - Find imports, tests, and files that depend on a given file
@@ -31,6 +30,7 @@ vecgrep indexes your codebase and enables natural language search using vector e
 
 - Go 1.25+
 - [Ollama](https://ollama.ai) with an embedding model (default: `nomic-embed-text`)
+- [Bun](https://bun.sh) for the docs site
 - [Task](https://taskfile.dev) (optional, for development)
 
 ### From Source
@@ -62,10 +62,7 @@ task install
    vecgrep init
    ```
 
-   `vecgrep init` registers the project globally by default. If you prefer project-local state, run `vecgrep init --local` and ignore `.vecgrep/`:
-   ```bash
-   echo ".vecgrep" >> .gitignore
-   ```
+   `vecgrep init` registers the project globally by default and stores index data under `~/.vecgrep/projects/<project>/`, so no repo-local `.vecgrep/` directory is created. Use `vecgrep init --local` only when you intentionally want project-local state.
 
 3. **Index your codebase:**
    ```bash
@@ -80,29 +77,49 @@ task install
    Or open Studio:
    ```bash
    vecgrep studio
+   # or: vecgrep browse
    ```
 
-### Using OpenAI (Alternative)
+### Using Cloud Embeddings (Alternative)
 
-If you prefer cloud embeddings via OpenAI:
+If you prefer managed embeddings, vecgrep supports OpenAI, Cohere, and Voyage AI.
 
 1. **Set your API key:**
    ```bash
+   # OpenAI
    export OPENAI_API_KEY=sk-your-key-here
+
+   # Cohere
+   export COHERE_API_KEY=your-cohere-key
+
+   # Voyage AI
+   export VOYAGE_API_KEY=your-voyage-key
    ```
 
-2. **Configure vecgrep to use OpenAI:**
+2. **Configure vecgrep to use a cloud provider:**
 
    ```bash
+   # OpenAI
    vecgrep config set embedding.provider openai
    vecgrep config set embedding.model text-embedding-3-small
    vecgrep config set embedding.dimensions 1536
+
+   # Cohere
+   vecgrep config set embedding.provider cohere
+   vecgrep config set embedding.model embed-v4.0
+   vecgrep config set embedding.dimensions 1536
+
+   # Voyage AI
+   vecgrep config set embedding.provider voyage
+   vecgrep config set embedding.model voyage-code-3
+   vecgrep config set embedding.dimensions 1024
    ```
 
    Or set via environment:
    ```bash
-   export VECGREP_EMBEDDING_PROVIDER=openai
-   export VECGREP_EMBEDDING_MODEL=text-embedding-3-small
+   export VECGREP_EMBEDDING_PROVIDER=voyage
+   export VECGREP_EMBEDDING_MODEL=voyage-code-3
+   export VECGREP_EMBEDDING_DIMENSIONS=1024
    ```
 
 3. **Re-index your codebase:**
@@ -118,7 +135,7 @@ If you prefer cloud embeddings via OpenAI:
 vecgrep init [--local] [--force]
 ```
 
-Registers the project globally by default. Use `--local` when you want a project-local `.vecgrep/` directory.
+Registers the project globally by default and stores data under `~/.vecgrep/projects/<project>/`. Use `--local` when you want a project-local `.vecgrep/` directory.
 
 ### Index Files
 
@@ -130,6 +147,8 @@ Options:
 - `--full` - Force full re-index (ignores file hashes)
 - `--ignore` - Additional patterns to ignore
 - `-v, --verbose` - Show detailed progress
+
+vecgrep writes an `embedding_profile.json` sidecar next to `vectors.veclite` after a successful first index or full re-index. If the active embedding provider, model, dimensions, distance, or chunker profile no longer matches the indexed vectors, incremental indexing and vector search fail with rebuild guidance. Run `vecgrep index --full` or `vecgrep reset --force` to refresh stale vectors.
 
 ### Search
 
@@ -143,7 +162,7 @@ vecgrep search <query> [options]
 |------|-------------|
 | `hybrid` | Combines vector similarity with text matching (default) |
 | `semantic` | Pure vector similarity search |
-| `keyword` | Text-based search using pattern matching |
+| `keyword` | Text-based search using VecLite BM25 |
 
 **Options:**
 
@@ -160,9 +179,6 @@ vecgrep search <query> [options]
 | `--file` | Filter by file pattern (glob) |
 | `--dir` | Filter by directory prefix |
 | `--lines` | Filter by line range (e.g., `1-100`) |
-| `-P, --profile` | Search a specific profile |
-| `--profiles` | Search multiple profiles (comma-separated) |
-| `--all-profiles` | Search all configured profiles |
 
 **Examples:**
 
@@ -207,11 +223,14 @@ Open the full-screen terminal workspace:
 
 ```bash
 vecgrep studio
+# or: vecgrep browse
+# open a specific project/folder:
+vecgrep studio /path/to/project
 ```
 
 In an interactive terminal, running `vecgrep` without a subcommand also opens Studio.
 
-Studio supports query search, result preview, status/config views, incremental indexing, full re-index confirmation, file deletion from the index, and reset confirmation.
+Studio is built on Charm v2 Bubble Tea/Bubbles/Lip Gloss libraries. It supports query search, result preview, directory/file/line filters, language and chunk-type filters, status/config views, inline global registration when no project is open, incremental indexing with progress, full re-index confirmation, file deletion from the index, and reset confirmation.
 
 ### MCP Server
 
@@ -322,39 +341,6 @@ vecgrep reset [--force]
 Options:
 - `--force` - Skip confirmation prompt
 
-### Search Profiles
-
-Profiles allow you to search across different content sources (code, notes, documentation) with separate indexes.
-
-```bash
-# List all configured profiles
-vecgrep profile list
-
-# Add a new profile
-vecgrep profile add notes --source noted --description "Personal notes"
-
-# Remove a profile
-vecgrep profile remove notes
-
-# Show profile details
-vecgrep profile show notes
-```
-
-**Searching with profiles:**
-
-```bash
-# Search a specific profile
-vecgrep search "meeting notes" --profile notes
-
-# Search multiple profiles
-vecgrep search "API design" --profiles code,notes
-
-# Search all configured profiles
-vecgrep search "authentication" --all-profiles
-```
-
-Profiles are configured in `~/.config/vecgrep/profiles.yaml`.
-
 ### Shell Completion
 
 Generate shell completion scripts:
@@ -372,19 +358,22 @@ vecgrep completion fish > ~/.config/fish/completions/vecgrep.fish
 
 ## Configuration
 
-Project configuration is usually stored in `vecgrep.yaml` at the project root. Legacy `.vecgrep/config.yaml` files are still read.
+Project configuration is usually stored in `vecgrep.yaml` at the project root. Generated index data lives under `~/.vecgrep/projects/<project>/` by default.
 
-> **Note:** Local project indexes may live in `.vecgrep/`, and legacy projects may still keep configuration at `.vecgrep/config.yaml`.
-> Add it to `.gitignore` to avoid committing it to version control.
+> **Note:** Legacy projects may still keep configuration at `.vecgrep/config.yaml`, and `vecgrep init --local` can intentionally create repo-local state. Add `.vecgrep/` to `.gitignore` only for those opt-in local setups.
 
 ```yaml
 embedding:
-  provider: ollama              # or "openai" for cloud embeddings
-  model: nomic-embed-text       # or "text-embedding-3-small" for OpenAI
-  dimensions: 768               # 1536 for text-embedding-3-small, 3072 for large
+  provider: ollama              # ollama, openai, cohere, or voyage
+  model: nomic-embed-text       # provider-specific embedding model
+  dimensions: 768               # 1536 for OpenAI/Cohere defaults, 1024 for voyage-code-3
   ollama_url: http://localhost:11434
   openai_api_key: ""            # Set via env var OPENAI_API_KEY or VECGREP_OPENAI_API_KEY
   openai_base_url: ""           # Optional: for Azure OpenAI or custom endpoints
+  cohere_api_key: ""            # Set via COHERE_API_KEY or VECGREP_COHERE_API_KEY
+  cohere_base_url: ""           # Optional: for custom Cohere-compatible endpoints
+  voyage_api_key: ""            # Set via VOYAGE_API_KEY or VECGREP_VOYAGE_API_KEY
+  voyage_base_url: ""           # Optional: for custom Voyage-compatible endpoints
 
 indexing:
   chunk_size: 512
@@ -412,12 +401,13 @@ vector:
 
 ### Vector Backend
 
-vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.11.0 as its vector storage backend with:
+vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.14.0 as its vector storage backend with:
 - **Cosine similarity** - Returns scores from 0.0 (orthogonal) to 1.0 (identical)
 - **HNSW indexing** - Fast approximate nearest neighbor search
 - **Native filtering** - Glob patterns, prefix matching, range queries
 - **Batch operations** - Efficient bulk indexing
-- **TTL support** - Automatic expiration for temporary data
+
+vecgrep owns code chunking and embedding generation. VecLite owns storage, filtering, BM25, vector search, and hybrid fusion. Current VecLite collections store one vector per record, so changing embedding provider, model, dimensions, distance metric, or chunking strategy requires a full re-index. vecgrep enforces this with an `embedding_profile.json` sidecar and reports profile status in `vecgrep status` and Studio. See `docs/veclite-integration.md` for the integration contract and future named-vector compatibility.
 
 ### Configuration Sources
 
@@ -427,22 +417,28 @@ vecgrep loads configuration from multiple sources in priority order:
 2. **Project root** `vecgrep.yaml` or `vecgrep.yml`
 3. **XDG-style** `.config/vecgrep.yaml`
 4. **Legacy** `.vecgrep/config.yaml`
-5. **Global defaults** `~/.vecgrep/config.yaml`
-6. **Built-in defaults** - Lowest priority
+5. **Global project entry** in `~/.vecgrep/config.yaml`
+6. **Global defaults** `~/.vecgrep/config.yaml`
+7. **Built-in defaults** - Lowest priority
 
 This allows you to set global defaults while overriding per-project settings.
 
 ### Environment Variables
 
-All environment variables use the `VECGREP_` prefix:
+vecgrep-specific environment variables use the `VECGREP_` prefix. Provider-standard API key aliases are also supported:
 
 | Variable | Description |
 |----------|-------------|
-| `VECGREP_EMBEDDING_PROVIDER` | Embedding provider: `ollama` (default) or `openai` |
+| `VECGREP_EMBEDDING_PROVIDER` | Embedding provider: `ollama` (default), `openai`, `cohere`, or `voyage` |
 | `VECGREP_EMBEDDING_MODEL` | Embedding model name |
+| `VECGREP_EMBEDDING_DIMENSIONS` | Embedding vector dimensions |
 | `VECGREP_OLLAMA_URL` | Ollama API URL (default: `http://localhost:11434`) |
 | `VECGREP_OPENAI_API_KEY` | OpenAI API key (or use `OPENAI_API_KEY`) |
 | `VECGREP_OPENAI_BASE_URL` | OpenAI base URL (for Azure/custom endpoints) |
+| `VECGREP_COHERE_API_KEY` | Cohere API key (or use `COHERE_API_KEY`) |
+| `VECGREP_COHERE_BASE_URL` | Cohere base URL |
+| `VECGREP_VOYAGE_API_KEY` | Voyage AI API key (or use `VOYAGE_API_KEY`) |
+| `VECGREP_VOYAGE_BASE_URL` | Voyage AI base URL |
 
 ### Global Flags
 
@@ -635,7 +631,7 @@ docker compose run --rm vecgrep vecgrep --help
 The container connects to Ollama on your host via `host.docker.internal:11434`.
 
 Volumes:
-- `./.vecgrep:/data/.vecgrep` - Persistent index database
+- `vecgrep-home:/home/vecgrep/.vecgrep` - Persistent global vecgrep config and project indexes for the container
 - `./:/workspace:ro` - Your codebase (read-only)
 
 ### Index from Container
@@ -673,6 +669,8 @@ task dev          # Run with hot reload
 task check        # Run fmt, lint, test
 task build        # Build binary
 task flows        # Run terminal Studio flows
+task site         # Start the VitePress docs site
+task site:build   # Build the docs site
 ```
 
 ## License

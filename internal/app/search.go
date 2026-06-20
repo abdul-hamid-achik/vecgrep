@@ -11,20 +11,19 @@ import (
 )
 
 type SearchRequest struct {
-	Query        string
-	Limit        int
-	Mode         search.SearchMode
-	Languages    []string
-	Language     string
-	ChunkTypes   []string
-	ChunkType    string
-	FilePattern  string
-	Directory    string
-	MinLine      int
-	MaxLine      int
-	ProjectRoot  string
-	ProfileNames []string
-	Explain      bool
+	Query       string
+	Limit       int
+	Mode        search.SearchMode
+	Languages   []string
+	Language    string
+	ChunkTypes  []string
+	ChunkType   string
+	FilePattern string
+	Directory   string
+	MinLine     int
+	MaxLine     int
+	ProjectRoot string
+	Explain     bool
 }
 
 type SearchResponse struct {
@@ -76,6 +75,11 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (*SearchRespons
 
 	if (mode == search.SearchModeSemantic || mode == search.SearchModeHybrid) && s.session.Provider == nil {
 		return nil, ErrProviderRequired
+	}
+	if mode == search.SearchModeSemantic || mode == search.SearchModeHybrid {
+		if err := s.ensureEmbeddingProfileMatches(); err != nil {
+			return nil, err
+		}
 	}
 
 	opts := search.SearchOptions{
@@ -129,6 +133,9 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (*SearchRespons
 func (s *Service) Similar(ctx context.Context, req SimilarRequest) (*SearchResponse, error) {
 	if s == nil || s.session == nil {
 		return nil, fmt.Errorf("service not initialized")
+	}
+	if err := s.ensureEmbeddingProfileMatches(); err != nil {
+		return nil, err
 	}
 
 	opts := search.SimilarOptions{

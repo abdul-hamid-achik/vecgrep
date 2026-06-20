@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -66,6 +67,13 @@ func TestSetConfigValueInFileTypedValuesResolve(t *testing.T) {
 	configPath := filepath.Join(projectRoot, "vecgrep.yaml")
 
 	settings := map[string]string{
+		"embedding.provider":             "voyage",
+		"embedding.model":                "voyage-code-3",
+		"embedding.dimensions":           "1024",
+		"embedding.voyage_api_key":       "voyage-key",
+		"embedding.voyage_base_url":      "https://example.test/voyage",
+		"embedding.cohere_api_key":       "cohere-key",
+		"embedding.cohere_base_url":      "https://example.test/cohere",
 		"indexing.ignore_patterns":       ".git/**, dist/**",
 		"indexing.max_file_size":         "2048",
 		"search.default_mode":            "keyword",
@@ -89,6 +97,27 @@ func TestSetConfigValueInFileTypedValuesResolve(t *testing.T) {
 	}
 	cfg := resolved.Config
 
+	if cfg.Embedding.Provider != "voyage" {
+		t.Fatalf("embedding.provider = %q, want voyage", cfg.Embedding.Provider)
+	}
+	if cfg.Embedding.Model != "voyage-code-3" {
+		t.Fatalf("embedding.model = %q, want voyage-code-3", cfg.Embedding.Model)
+	}
+	if cfg.Embedding.Dimensions != 1024 {
+		t.Fatalf("embedding.dimensions = %d, want 1024", cfg.Embedding.Dimensions)
+	}
+	if cfg.Embedding.VoyageAPIKey != "voyage-key" {
+		t.Fatalf("embedding.voyage_api_key = %q, want voyage-key", cfg.Embedding.VoyageAPIKey)
+	}
+	if cfg.Embedding.VoyageBaseURL != "https://example.test/voyage" {
+		t.Fatalf("embedding.voyage_base_url = %q, want https://example.test/voyage", cfg.Embedding.VoyageBaseURL)
+	}
+	if cfg.Embedding.CohereAPIKey != "cohere-key" {
+		t.Fatalf("embedding.cohere_api_key = %q, want cohere-key", cfg.Embedding.CohereAPIKey)
+	}
+	if cfg.Embedding.CohereBaseURL != "https://example.test/cohere" {
+		t.Fatalf("embedding.cohere_base_url = %q, want https://example.test/cohere", cfg.Embedding.CohereBaseURL)
+	}
 	if got := cfg.Indexing.IgnorePatterns; len(got) != 2 || got[0] != ".git/**" || got[1] != "dist/**" {
 		t.Fatalf("ignore_patterns = %v, want [.git/** dist/**]", got)
 	}
@@ -156,9 +185,89 @@ projects:
 	}
 }
 
+func TestLoadResolvedAppliesCloudProviderEnvironment(t *testing.T) {
+	isolateConfigTestEnv(t)
+	projectRoot := t.TempDir()
+
+	t.Setenv("VECGREP_EMBEDDING_PROVIDER", "cohere")
+	t.Setenv("VECGREP_EMBEDDING_MODEL", "embed-v4.0")
+	t.Setenv("VECGREP_EMBEDDING_DIMENSIONS", "512")
+	t.Setenv("COHERE_API_KEY", "standard-key")
+	t.Setenv("VECGREP_COHERE_API_KEY", "vecgrep-key")
+	t.Setenv("COHERE_BASE_URL", "https://standard.example.test/v2")
+	t.Setenv("VECGREP_COHERE_BASE_URL", "https://vecgrep.example.test/v2")
+
+	resolved, err := LoadResolved(projectRoot)
+	if err != nil {
+		t.Fatalf("LoadResolved failed: %v", err)
+	}
+
+	cfg := resolved.Config
+	if cfg.Embedding.Provider != "cohere" {
+		t.Fatalf("provider = %q, want cohere", cfg.Embedding.Provider)
+	}
+	if cfg.Embedding.Model != "embed-v4.0" {
+		t.Fatalf("model = %q, want embed-v4.0", cfg.Embedding.Model)
+	}
+	if cfg.Embedding.Dimensions != 512 {
+		t.Fatalf("dimensions = %d, want 512", cfg.Embedding.Dimensions)
+	}
+	if cfg.Embedding.CohereAPIKey != "vecgrep-key" {
+		t.Fatalf("cohere_api_key = %q, want vecgrep-key", cfg.Embedding.CohereAPIKey)
+	}
+	if cfg.Embedding.CohereBaseURL != "https://vecgrep.example.test/v2" {
+		t.Fatalf("cohere_base_url = %q, want VECGREP override", cfg.Embedding.CohereBaseURL)
+	}
+
+	output := ShowResolvedConfig(cfg, nil)
+	if !containsString(output, "cohere_api_key: [set]") {
+		t.Fatalf("ShowResolvedConfig output missing cohere key status:\n%s", output)
+	}
+	if !containsString(output, "cohere_base_url: https://vecgrep.example.test/v2") {
+		t.Fatalf("ShowResolvedConfig output missing cohere base URL:\n%s", output)
+	}
+}
+
+func TestAddProjectToGlobalReusesExistingPath(t *testing.T) {
+	home := isolateConfigTestEnv(t)
+	projectRoot := t.TempDir()
+
+	if err := AddProjectToGlobal(projectRoot, ""); err != nil {
+		t.Fatalf("first AddProjectToGlobal failed: %v", err)
+	}
+	if err := AddProjectToGlobal(projectRoot, ""); err != nil {
+		t.Fatalf("second AddProjectToGlobal failed: %v", err)
+	}
+
+	global, err := LoadGlobalConfig()
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig failed: %v", err)
+	}
+	if len(global.Projects) != 1 {
+		t.Fatalf("projects = %v, want one entry", global.Projects)
+	}
+
+	name, entry, err := FindProjectByPath(projectRoot)
+	if err != nil {
+		t.Fatalf("FindProjectByPath failed: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("project was not registered")
+	}
+	if got, want := entry.DataDir, filepath.Join(home, ".vecgrep", "projects", name); got != want {
+		t.Fatalf("data_dir = %q, want %q", got, want)
+	}
+}
+
 func TestParseConfigValueRejectsUnknownKeys(t *testing.T) {
 	if _, err := ParseConfigValue("unknown.key", "value"); err == nil {
 		t.Fatal("ParseConfigValue succeeded for an unknown key")
+	}
+}
+
+func TestParseConfigValueRejectsUnknownProvider(t *testing.T) {
+	if _, err := ParseConfigValue("embedding.provider", "not-a-provider"); err == nil {
+		t.Fatal("ParseConfigValue succeeded for an unknown provider")
 	}
 }
 
@@ -175,6 +284,18 @@ func isolateConfigTestEnv(t *testing.T) string {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("VECGREP_OPENAI_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("VECGREP_COHERE_API_KEY", "")
+	t.Setenv("COHERE_API_KEY", "")
+	t.Setenv("VECGREP_COHERE_BASE_URL", "")
+	t.Setenv("COHERE_BASE_URL", "")
+	t.Setenv("VECGREP_VOYAGE_API_KEY", "")
+	t.Setenv("VOYAGE_API_KEY", "")
+	t.Setenv("VECGREP_VOYAGE_BASE_URL", "")
+	t.Setenv("VOYAGE_BASE_URL", "")
 	t.Setenv("VECGREP_DATA_DIR", "")
 	return home
+}
+
+func containsString(s, substr string) bool {
+	return strings.Contains(s, substr)
 }

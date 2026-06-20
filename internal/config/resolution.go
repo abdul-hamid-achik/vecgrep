@@ -227,6 +227,18 @@ func mergeEmbeddingConfig(dst, src *EmbeddingConfig) {
 	if src.OpenAIBaseURL != "" {
 		dst.OpenAIBaseURL = src.OpenAIBaseURL
 	}
+	if src.CohereAPIKey != "" {
+		dst.CohereAPIKey = src.CohereAPIKey
+	}
+	if src.CohereBaseURL != "" {
+		dst.CohereBaseURL = src.CohereBaseURL
+	}
+	if src.VoyageAPIKey != "" {
+		dst.VoyageAPIKey = src.VoyageAPIKey
+	}
+	if src.VoyageBaseURL != "" {
+		dst.VoyageBaseURL = src.VoyageBaseURL
+	}
 }
 
 func mergeIndexingConfig(dst, src *IndexingConfig) {
@@ -313,6 +325,30 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 		cfg.Embedding.OpenAIBaseURL = val
 	} else if val := os.Getenv("OPENAI_BASE_URL"); val != "" {
 		cfg.Embedding.OpenAIBaseURL = val
+	}
+
+	// Cohere settings - check both VECGREP_ and standard COHERE_ prefixes
+	if val := os.Getenv("VECGREP_COHERE_API_KEY"); val != "" {
+		cfg.Embedding.CohereAPIKey = val
+	} else if val := os.Getenv("COHERE_API_KEY"); val != "" {
+		cfg.Embedding.CohereAPIKey = val
+	}
+	if val := os.Getenv("VECGREP_COHERE_BASE_URL"); val != "" {
+		cfg.Embedding.CohereBaseURL = val
+	} else if val := os.Getenv("COHERE_BASE_URL"); val != "" {
+		cfg.Embedding.CohereBaseURL = val
+	}
+
+	// Voyage settings - check both VECGREP_ and standard VOYAGE_ prefixes
+	if val := os.Getenv("VECGREP_VOYAGE_API_KEY"); val != "" {
+		cfg.Embedding.VoyageAPIKey = val
+	} else if val := os.Getenv("VOYAGE_API_KEY"); val != "" {
+		cfg.Embedding.VoyageAPIKey = val
+	}
+	if val := os.Getenv("VECGREP_VOYAGE_BASE_URL"); val != "" {
+		cfg.Embedding.VoyageBaseURL = val
+	} else if val := os.Getenv("VOYAGE_BASE_URL"); val != "" {
+		cfg.Embedding.VoyageBaseURL = val
 	}
 
 	// Data directory
@@ -413,6 +449,26 @@ func ShowResolvedConfig(cfg *Config, sources []string) string {
 		}
 		if cfg.Embedding.OpenAIBaseURL != "" {
 			fmt.Fprintf(&sb, "  openai_base_url: %s\n", cfg.Embedding.OpenAIBaseURL)
+		}
+	}
+	if cfg.Embedding.Provider == "cohere" {
+		if cfg.Embedding.CohereAPIKey != "" {
+			sb.WriteString("  cohere_api_key: [set]\n")
+		} else {
+			sb.WriteString("  cohere_api_key: [not set]\n")
+		}
+		if cfg.Embedding.CohereBaseURL != "" {
+			fmt.Fprintf(&sb, "  cohere_base_url: %s\n", cfg.Embedding.CohereBaseURL)
+		}
+	}
+	if cfg.Embedding.Provider == "voyage" {
+		if cfg.Embedding.VoyageAPIKey != "" {
+			sb.WriteString("  voyage_api_key: [set]\n")
+		} else {
+			sb.WriteString("  voyage_api_key: [not set]\n")
+		}
+		if cfg.Embedding.VoyageBaseURL != "" {
+			fmt.Fprintf(&sb, "  voyage_base_url: %s\n", cfg.Embedding.VoyageBaseURL)
 		}
 	}
 

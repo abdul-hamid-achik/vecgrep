@@ -18,6 +18,10 @@ const (
 	ProviderOllama ProviderType = "ollama"
 	// ProviderOpenAI is the OpenAI embedding provider.
 	ProviderOpenAI ProviderType = "openai"
+	// ProviderCohere is the Cohere embedding provider.
+	ProviderCohere ProviderType = "cohere"
+	// ProviderVoyage is the Voyage AI embedding provider.
+	ProviderVoyage ProviderType = "voyage"
 	// ProviderUnknown is an unknown provider type.
 	ProviderUnknown ProviderType = "unknown"
 )
@@ -63,6 +67,12 @@ func DetectProviders(ctx context.Context, cfg DetectConfig) []DetectedProvider {
 	// Check for OpenAI (via environment variable)
 	if openai := detectOpenAI(ctx); openai != nil {
 		providers = append(providers, *openai)
+	}
+	if cohere := detectCohere(ctx); cohere != nil {
+		providers = append(providers, *cohere)
+	}
+	if voyage := detectVoyage(ctx); voyage != nil {
+		providers = append(providers, *voyage)
 	}
 
 	return providers
@@ -118,9 +128,64 @@ func detectOpenAI(_ context.Context) *DetectedProvider {
 		Description: "OpenAI embedding API",
 	}
 
+	if url := os.Getenv("VECGREP_OPENAI_BASE_URL"); url != "" {
+		provider.URL = url
+	} else if url := os.Getenv("OPENAI_BASE_URL"); url != "" {
+		provider.URL = url
+	}
+
 	// Check for API key
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
+	if os.Getenv("OPENAI_API_KEY") == "" && os.Getenv("VECGREP_OPENAI_API_KEY") == "" {
+		provider.Available = false
+		return provider
+	}
+
+	provider.Available = true
+	return provider
+}
+
+// detectCohere checks if Cohere API credentials are available.
+func detectCohere(_ context.Context) *DetectedProvider {
+	provider := &DetectedProvider{
+		Type:        ProviderCohere,
+		URL:         "https://api.cohere.com/v2",
+		Model:       "embed-v4.0",
+		Dimensions:  1536,
+		Description: "Cohere Embed API",
+	}
+
+	if url := os.Getenv("VECGREP_COHERE_BASE_URL"); url != "" {
+		provider.URL = url
+	} else if url := os.Getenv("COHERE_BASE_URL"); url != "" {
+		provider.URL = url
+	}
+
+	if os.Getenv("COHERE_API_KEY") == "" && os.Getenv("VECGREP_COHERE_API_KEY") == "" {
+		provider.Available = false
+		return provider
+	}
+
+	provider.Available = true
+	return provider
+}
+
+// detectVoyage checks if Voyage AI API credentials are available.
+func detectVoyage(_ context.Context) *DetectedProvider {
+	provider := &DetectedProvider{
+		Type:        ProviderVoyage,
+		URL:         "https://api.voyageai.com/v1",
+		Model:       "voyage-code-3",
+		Dimensions:  1024,
+		Description: "Voyage AI embedding API",
+	}
+
+	if url := os.Getenv("VECGREP_VOYAGE_BASE_URL"); url != "" {
+		provider.URL = url
+	} else if url := os.Getenv("VOYAGE_BASE_URL"); url != "" {
+		provider.URL = url
+	}
+
+	if os.Getenv("VOYAGE_API_KEY") == "" && os.Getenv("VECGREP_VOYAGE_API_KEY") == "" {
 		provider.Available = false
 		return provider
 	}
@@ -130,7 +195,7 @@ func detectOpenAI(_ context.Context) *DetectedProvider {
 }
 
 // AutoDetect finds and returns the best available provider.
-// It prefers local providers (Ollama) over cloud providers (OpenAI).
+// It prefers local providers (Ollama) over cloud providers.
 func AutoDetect(ctx context.Context) (Provider, error) {
 	return AutoDetectWithConfig(ctx, DefaultDetectConfig())
 }
@@ -150,10 +215,23 @@ func AutoDetectWithConfig(ctx context.Context, cfg DetectConfig) (Provider, erro
 		}
 	}
 
-	// Fall back to OpenAI if available
+	// Fall back to cloud providers if available.
 	for _, p := range providers {
-		if p.Type == ProviderOpenAI && p.Available {
+		switch {
+		case p.Type == ProviderOpenAI && p.Available:
 			return NewOpenAIProvider(OpenAIConfig{
+				BaseURL:    p.URL,
+				Model:      p.Model,
+				Dimensions: p.Dimensions,
+			}), nil
+		case p.Type == ProviderCohere && p.Available:
+			return NewCohereProvider(CohereConfig{
+				BaseURL:    p.URL,
+				Model:      p.Model,
+				Dimensions: p.Dimensions,
+			}), nil
+		case p.Type == ProviderVoyage && p.Available:
+			return NewVoyageProvider(VoyageConfig{
 				BaseURL:    p.URL,
 				Model:      p.Model,
 				Dimensions: p.Dimensions,
@@ -217,6 +295,20 @@ func VerifyProvider(ctx context.Context, providerType ProviderType) error {
 					Dimensions: p.Dimensions,
 				})
 				return provider.Ping(ctx)
+			case ProviderCohere:
+				provider := NewCohereProvider(CohereConfig{
+					BaseURL:    p.URL,
+					Model:      p.Model,
+					Dimensions: p.Dimensions,
+				})
+				return provider.Ping(ctx)
+			case ProviderVoyage:
+				provider := NewVoyageProvider(VoyageConfig{
+					BaseURL:    p.URL,
+					Model:      p.Model,
+					Dimensions: p.Dimensions,
+				})
+				return provider.Ping(ctx)
 			}
 		}
 	}
@@ -264,6 +356,42 @@ func GetSupportedModels() []ModelInfo {
 			Provider:   ProviderOpenAI,
 			Dimensions: 3072,
 			MaxTokens:  8191,
+		},
+		{
+			Name:       "embed-v4.0",
+			Provider:   ProviderCohere,
+			Dimensions: 1536,
+			MaxTokens:  128000,
+		},
+		{
+			Name:       "embed-english-v3.0",
+			Provider:   ProviderCohere,
+			Dimensions: 1024,
+			MaxTokens:  512,
+		},
+		{
+			Name:       "embed-multilingual-v3.0",
+			Provider:   ProviderCohere,
+			Dimensions: 1024,
+			MaxTokens:  512,
+		},
+		{
+			Name:       "voyage-code-3",
+			Provider:   ProviderVoyage,
+			Dimensions: 1024,
+			MaxTokens:  120000,
+		},
+		{
+			Name:       "voyage-3.5",
+			Provider:   ProviderVoyage,
+			Dimensions: 1024,
+			MaxTokens:  320000,
+		},
+		{
+			Name:       "voyage-3.5-lite",
+			Provider:   ProviderVoyage,
+			Dimensions: 1024,
+			MaxTokens:  1000000,
 		},
 	}
 }
