@@ -188,7 +188,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_clean",
-		Description: "Remove orphaned data (chunks without files, embeddings without chunks) and vacuum the database to reclaim space.",
+		Description: "Sync the vector database to disk and report current index statistics (record/file counts). Pure veclite storage has no orphaned rows to vacuum; this is a flush-and-report operation.",
 	}, s.handleClean)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -461,8 +461,11 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 
 	// Open database
 	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
+		Dimensions:         cfg.Embedding.Dimensions,
+		DataDir:            cfg.DataDir,
+		HNSWM:              cfg.Vector.VecLite.M,
+		HNSWEfConstruction: cfg.Vector.VecLite.EfConstruction,
+		HNSWEfSearch:       cfg.Vector.VecLite.EfSearch,
 	})
 	if err != nil {
 		return &sdkmcp.CallToolResult{
@@ -1008,13 +1011,19 @@ func (s *SDKServer) handleClean(ctx context.Context, req *sdkmcp.CallToolRequest
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Database cleanup complete:\n")
-	fmt.Fprintf(&sb, "- Orphaned chunks removed: %d\n", stats.OrphanedChunks)
-	fmt.Fprintf(&sb, "- Orphaned embeddings removed: %d\n", stats.OrphanedEmbeddings)
+	sb.WriteString("Database sync complete:\n")
+	if stats.Synced {
+		sb.WriteString("- Database flushed to disk\n")
+	}
+	fmt.Fprintf(&sb, "- Records: %d\n", stats.TotalRecords)
+	fmt.Fprintf(&sb, "- Files:   %d\n", stats.TotalFiles)
+	// Legacy orphan fields are always zero with veclite-only storage; only
+	// surface them if a future backend reports real reclamation work.
+	if stats.OrphanedChunks > 0 || stats.VacuumedBytes > 0 {
+		fmt.Fprintf(&sb, "- Orphaned chunks removed: %d\n", stats.OrphanedChunks)
+	}
 	if stats.VacuumedBytes > 0 {
 		fmt.Fprintf(&sb, "- Space reclaimed: %d bytes\n", stats.VacuumedBytes)
-	} else {
-		sb.WriteString("- Database already optimized\n")
 	}
 
 	return &sdkmcp.CallToolResult{

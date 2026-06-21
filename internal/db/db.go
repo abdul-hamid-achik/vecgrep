@@ -18,7 +18,20 @@ type DB struct {
 type OpenOptions struct {
 	Dimensions int
 	DataDir    string // Directory containing vectors.veclite
+
+	// HNSW tuning. Zero values fall back to vecgrep defaults
+	// (M=16, EfConstruction=200, EfSearch=100).
+	HNSWM              int
+	HNSWEfConstruction int
+	HNSWEfSearch       int
 }
+
+// Default HNSW parameters used when config does not override them.
+const (
+	DefaultHNSWM              = 16
+	DefaultHNSWEfConstruction = 200
+	DefaultHNSWEfSearch       = 100
+)
 
 // Open opens a database connection and initializes the veclite backend.
 // The dbPath argument is kept for compatibility; veclite data is derived from dataDir.
@@ -35,11 +48,26 @@ func OpenWithOptions(opts OpenOptions) (*DB, error) {
 		return nil, fmt.Errorf("dataDir is required")
 	}
 
+	// Apply HNSW defaults for unset fields.
+	if opts.HNSWM == 0 {
+		opts.HNSWM = DefaultHNSWM
+	}
+	if opts.HNSWEfConstruction == 0 {
+		opts.HNSWEfConstruction = DefaultHNSWEfConstruction
+	}
+	if opts.HNSWEfSearch == 0 {
+		opts.HNSWEfSearch = DefaultHNSWEfSearch
+	}
+
 	// Create veclite backend
 	backend := NewVecLiteBackend(VecLitePath(opts.DataDir))
 
-	// Initialize backend
-	if err := backend.Init(opts.Dimensions); err != nil {
+	// Initialize backend with HNSW config
+	if err := backend.Init(opts.Dimensions, HNSWConfig{
+		M:              opts.HNSWM,
+		EfConstruction: opts.HNSWEfConstruction,
+		EfSearch:       opts.HNSWEfSearch,
+	}); err != nil {
 		return nil, fmt.Errorf("failed to initialize veclite: %w", err)
 	}
 
@@ -53,6 +81,23 @@ func OpenWithOptions(opts OpenOptions) (*DB, error) {
 // Backend returns the underlying VecLiteBackend for direct access.
 func (db *DB) Backend() *VecLiteBackend {
 	return db.backend
+}
+
+// SetCollectionMetadataValue stores a single metadata value on the chunks collection.
+func (db *DB) SetCollectionMetadataValue(key string, value any) error {
+	return db.backend.SetMetadataValue(key, value)
+}
+
+// CollectionMetadataValue retrieves a single metadata value from the chunks collection.
+// It returns (nil, false) when the key is absent.
+func (db *DB) CollectionMetadataValue(key string) (any, bool) {
+	return db.backend.MetadataValue(key)
+}
+
+// DeleteCollectionMetadataValue removes a single metadata value from the chunks collection.
+// Removing an absent key is a no-op.
+func (db *DB) DeleteCollectionMetadataValue(key string) error {
+	return db.backend.DeleteMetadataValue(key)
 }
 
 // InsertChunk inserts a chunk with all its metadata and embedding.
@@ -155,22 +200,49 @@ func (db *DB) ListFiles(projectRoot string) ([]FileInfo, error) {
 }
 
 // CleanStats contains statistics from a clean operation.
+//
+// With pure veclite storage there is no separate orphan/embedding table to
+// vacuum, so the "clean" command is really a sync-and-report. The fields
+// below reflect the actual work performed: the database is flushed to disk
+// and current record counts are reported so users can confirm the index is
+// consistent. The legacy Orphaned* fields are kept (always zero) for
+// backward-compatible output formatting.
 type CleanStats struct {
+	// Synced reports whether the backend flush succeeded.
+	Synced bool
+	// TotalRecords is the number of records in the collection after sync.
+	TotalRecords int64
+	// TotalFiles is the number of distinct files in the index after sync.
+	TotalFiles int64
+
+	// Legacy fields, always zero with pure veclite storage. Retained so the
+	// CLI/MCP output format stays stable; they no longer represent real work.
 	OrphanedChunks     int64
 	OrphanedEmbeddings int64
 	VacuumedBytes      int64
 }
 
-// Clean removes orphaned data.
-// With veclite-only storage, this is largely a no-op since all data is self-contained.
+// Clean syncs the database to disk and reports current index statistics.
+//
+// With veclite-only storage all data is self-contained in collection records,
+// so there are no orphaned rows to reclaim. This command is therefore an
+// explicit sync plus a stats report rather than a vacuum operation. If veclite
+// later exposes a collection-level Compact() API, real HNSW tombstone
+// compaction can be wired in here.
 func (db *DB) Clean(ctx context.Context) (*CleanStats, error) {
-	// With veclite-only storage, there are no orphans to clean
-	// Just sync to ensure consistency
 	if err := db.backend.Sync(); err != nil {
 		return nil, fmt.Errorf("sync failed: %w", err)
 	}
 
+	stats, err := db.Stats()
+	if err != nil {
+		return nil, fmt.Errorf("stats after sync: %w", err)
+	}
+
 	return &CleanStats{
+		Synced:             true,
+		TotalRecords:       stats["embeddings"],
+		TotalFiles:         stats["files"],
 		OrphanedChunks:     0,
 		OrphanedEmbeddings: 0,
 		VacuumedBytes:      0,

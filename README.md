@@ -148,7 +148,7 @@ Options:
 - `--ignore` - Additional patterns to ignore
 - `-v, --verbose` - Show detailed progress
 
-vecgrep writes an `embedding_profile.json` sidecar next to `vectors.veclite` after a successful first index or full re-index. If the active embedding provider, model, dimensions, distance, or chunker profile no longer matches the indexed vectors, incremental indexing and vector search fail with rebuild guidance. Run `vecgrep index --full` or `vecgrep reset --force` to refresh stale vectors.
+vecgrep records an embedding profile in VecLite collection metadata after a successful first index or full re-index. Existing projects with a legacy `embedding_profile.json` sidecar are migrated transparently on the next open: the sidecar is read, written into collection metadata, and removed. If the active embedding provider, model, dimensions, distance, or chunker profile no longer matches the indexed vectors, incremental indexing and vector search fail with rebuild guidance. Run `vecgrep index --full` or `vecgrep reset --force` to refresh stale vectors.
 
 ### Search
 
@@ -322,9 +322,11 @@ Example:
 vecgrep delete internal/old_file.go
 ```
 
-#### Clean Database
+#### Sync Database
 
-Remove orphaned data (chunks without files, embeddings without chunks) and optimize:
+Sync the vector database to disk and report current index statistics. With
+veclite-only storage all data is self-contained in collection records, so this
+is a flush-and-report rather than a vacuum operation:
 
 ```bash
 vecgrep clean
@@ -401,13 +403,13 @@ vector:
 
 ### Vector Backend
 
-vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.14.0 as its vector storage backend with:
+vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.17.0 as its vector storage backend with:
 - **Cosine similarity** - Returns scores from 0.0 (orthogonal) to 1.0 (identical)
 - **HNSW indexing** - Fast approximate nearest neighbor search
 - **Native filtering** - Glob patterns, prefix matching, range queries
 - **Batch operations** - Efficient bulk indexing
 
-vecgrep owns code chunking and embedding generation. VecLite owns storage, filtering, BM25, vector search, and hybrid fusion. Current VecLite collections store one vector per record, so changing embedding provider, model, dimensions, distance metric, or chunking strategy requires a full re-index. vecgrep enforces this with an `embedding_profile.json` sidecar and reports profile status in `vecgrep status` and Studio. See `docs/veclite-integration.md` for the integration contract and future named-vector compatibility.
+vecgrep owns code chunking and embedding generation. VecLite owns storage, filtering, BM25, vector search, and hybrid fusion. Current VecLite collections store one vector per record, so changing embedding provider, model, dimensions, distance metric, or chunking strategy requires a full re-index. vecgrep enforces this with an embedding profile stored in VecLite collection metadata and reports profile status in `vecgrep status` and Studio. See `docs/veclite-integration.md` for the integration contract and named-vector compatibility.
 
 ### Configuration Sources
 
@@ -462,7 +464,7 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 | `vecgrep_status` | Get index statistics (files, chunks, languages) |
 | `vecgrep_similar` | Find code similar to a chunk ID, file:line location, or text snippet |
 | `vecgrep_delete` | Delete a file and its chunks from the index |
-| `vecgrep_clean` | Remove orphaned data and optimize the database |
+| `vecgrep_clean` | Sync database to disk and report index stats (no orphans with veclite storage) |
 | `vecgrep_reset` | Reset the project database (requires confirmation) |
 | `vecgrep_overview` | Get high-level codebase structure, languages, and entry points |
 | `vecgrep_batch_search` | Search multiple queries in parallel with optional deduplication |

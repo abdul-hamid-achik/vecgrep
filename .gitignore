@@ -59,5 +59,9 @@ tmp/
 # Glyphrun artifacts
 .glyphrun/
 
+# Local implementation plans (not for commit)
+plans/
+
 # Claude Code
 .claude/
+.vercel

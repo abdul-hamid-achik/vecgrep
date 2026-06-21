@@ -311,20 +311,25 @@ func TestModelRenderStatusShowsVectorHealth(t *testing.T) {
 	m := NewModel(context.Background(), "")
 	m.width = 120
 	m.status = &app.StatusResponse{
-		ProjectRoot:      "/repo",
-		DataDir:          "/home/user/.vecgrep/projects/repo",
-		VecLitePath:      "/home/user/.vecgrep/projects/repo/vectors.veclite",
-		VectorBackend:    "veclite",
-		Provider:         "ollama",
-		Model:            "nomic-embed-text",
-		Dimensions:       768,
-		ProfilePath:      "/home/user/.vecgrep/projects/repo/embedding_profile.json",
-		ProfileStatus:    "ok",
-		ProfileMatches:   true,
-		VecLiteSizeBytes: 4096,
-		IndexedBytes:     2048,
-		LatestIndexedAt:  time.Now().Add(-time.Minute),
-		IndexFresh:       true,
+		ProjectRoot:        "/repo",
+		DataDir:            "/home/user/.vecgrep/projects/repo",
+		VecLitePath:        "/home/user/.vecgrep/projects/repo/vectors.veclite",
+		VectorBackend:      "veclite",
+		VecliteVersion:     "0.17.0",
+		Provider:           "ollama",
+		Model:              "nomic-embed-text",
+		Dimensions:         768,
+		ProfilePath:        "/home/user/.vecgrep/projects/repo/embedding_profile.json",
+		ProfileStatus:      "ok",
+		ProfileMatches:     true,
+		VecLiteSizeBytes:   4096,
+		IndexedBytes:       2048,
+		LatestIndexedAt:    time.Now().Add(-time.Minute),
+		IndexFresh:         true,
+		HNSWM:              16,
+		HNSWEfConstruction: 200,
+		HNSWEfSearch:       100,
+		MigrationWarning:   "",
 		Stats: map[string]int64{
 			"projects":   1,
 			"files":      3,
@@ -339,7 +344,18 @@ func TestModelRenderStatusShowsVectorHealth(t *testing.T) {
 	}
 
 	got := m.renderStatus()
-	for _, want := range []string{"VecLite size: 4.0 KiB", "Profile:      ok", "Fresh:", "Source bytes: 2.0 KiB", "Languages", "go 6", "Chunk types", "function 5"} {
+	for _, want := range []string{
+		"VecLite size: 4.0 KiB",
+		"Profile:      ok",
+		"Fresh:",
+		"Source bytes: 2.0 KiB",
+		"Languages",
+		"go 6",
+		"Chunk types",
+		"function 5",
+		"Veclite ver:  0.17.0",
+		"HNSW:         M=16  efConstruction=200  efSearch=100",
+	} {
 		if !contains(got, want) {
 			t.Fatalf("status render missing %q: %q", want, got)
 		}

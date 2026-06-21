@@ -4,8 +4,8 @@ package db
 // With the veclite-only architecture, this interface is primarily
 // for backwards compatibility and potential future backends.
 type VectorBackend interface {
-	// Init initializes the vector backend with the given dimensions.
-	Init(dimensions int) error
+	// Init initializes the vector backend with the given dimensions and HNSW config.
+	Init(dimensions int, hnsw HNSWConfig) error
 
 	// InsertEmbedding inserts an embedding for a chunk (legacy).
 	InsertEmbedding(chunkID int64, embedding []float32) error

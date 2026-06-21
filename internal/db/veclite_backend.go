@@ -68,6 +68,15 @@ type Stats struct {
 	ChunkTypes    map[string]int64
 }
 
+// HNSWConfig holds HNSW index parameters. It mirrors veclite's HNSWConfig
+// so callers in the db package do not need to import veclite directly for
+// configuration values.
+type HNSWConfig struct {
+	M              int
+	EfConstruction int
+	EfSearch       int
+}
+
 // VecLiteBackend implements the database layer using VecLite with HNSW indexing.
 // All metadata is stored in vector payload - no SQLite needed.
 type VecLiteBackend struct {
@@ -75,6 +84,7 @@ type VecLiteBackend struct {
 	coll       *veclite.Collection
 	dbPath     string
 	dimensions int
+	hnsw       HNSWConfig
 }
 
 // NewVecLiteBackend creates a new VecLite backend.
@@ -82,12 +92,29 @@ type VecLiteBackend struct {
 func NewVecLiteBackend(dbPath string) *VecLiteBackend {
 	return &VecLiteBackend{
 		dbPath: dbPath,
+		hnsw: HNSWConfig{
+			M:              DefaultHNSWM,
+			EfConstruction: DefaultHNSWEfConstruction,
+			EfSearch:       DefaultHNSWEfSearch,
+		},
 	}
 }
 
-// Init initializes the VecLite backend with the given dimensions.
-func (b *VecLiteBackend) Init(dimensions int) error {
+// Init initializes the VecLite backend with the given dimensions and HNSW config.
+// If hnsw is the zero value, defaults (M=16, EfConstruction=200, EfSearch=100)
+// are applied.
+func (b *VecLiteBackend) Init(dimensions int, hnsw HNSWConfig) error {
 	b.dimensions = dimensions
+	if hnsw.M <= 0 {
+		hnsw.M = DefaultHNSWM
+	}
+	if hnsw.EfConstruction <= 0 {
+		hnsw.EfConstruction = DefaultHNSWEfConstruction
+	}
+	if hnsw.EfSearch <= 0 {
+		hnsw.EfSearch = DefaultHNSWEfSearch
+	}
+	b.hnsw = hnsw
 
 	// Open VecLite database
 	db, err := veclite.Open(b.dbPath)
@@ -96,12 +123,17 @@ func (b *VecLiteBackend) Init(dimensions int) error {
 	}
 	b.db = db
 
-	// Create or get collection with HNSW index
-	// Use cosine distance which is standard for normalized embeddings
+	// Create or get collection with HNSW index.
+	// Use cosine distance which is standard for normalized embeddings.
 	coll, err := db.CreateCollection("chunks",
 		veclite.WithDimension(dimensions),
-		veclite.WithDistanceType(veclite.DistanceCosine), // Use cosine for embeddings
-		veclite.WithHNSW(16, 200),                        // M=16, efConstruction=200
+		veclite.WithDistanceType(veclite.DistanceCosine),
+		veclite.WithHNSWConfig(veclite.HNSWConfig{
+			M:              hnsw.M,
+			EfConstruction: hnsw.EfConstruction,
+			EfSearch:       hnsw.EfSearch,
+			UseHeuristic:   true,
+		}),
 		veclite.WithTextIndex("content", "symbol_name", "relative_path", "language", "chunk_type"),
 	)
 	if err != nil {
@@ -114,6 +146,63 @@ func (b *VecLiteBackend) Init(dimensions int) error {
 	b.coll = coll
 
 	return nil
+}
+
+// HNSWConfig returns the active HNSW configuration.
+func (b *VecLiteBackend) HNSWConfig() HNSWConfig {
+	return b.hnsw
+}
+
+// SetMetadataValue stores a single metadata value on the chunks collection.
+func (b *VecLiteBackend) SetMetadataValue(key string, value any) error {
+	if b.coll == nil {
+		return fmt.Errorf("backend not initialized")
+	}
+	return b.coll.SetMetadataValue(key, value)
+}
+
+// MetadataValue retrieves a single metadata value from the chunks collection.
+// It returns (nil, false) when the key is absent or the backend is unopened.
+func (b *VecLiteBackend) MetadataValue(key string) (any, bool) {
+	if b.coll == nil {
+		return nil, false
+	}
+	v, ok := b.coll.Metadata()[key]
+	return v, ok
+}
+
+// DeleteMetadataValue removes a single metadata value from the chunks collection.
+func (b *VecLiteBackend) DeleteMetadataValue(key string) error {
+	if b.coll == nil {
+		return fmt.Errorf("backend not initialized")
+	}
+	return b.coll.DeleteMetadataValue(key)
+}
+
+// collectionHNSWOptions returns the veclite collection options used by this backend.
+// Used by DeleteAll to recreate the collection with the same HNSW parameters.
+func (b *VecLiteBackend) collectionOptions() []veclite.CollectionOption {
+	return []veclite.CollectionOption{
+		veclite.WithDimension(b.dimensions),
+		veclite.WithDistanceType(veclite.DistanceCosine),
+		veclite.WithHNSWConfig(veclite.HNSWConfig{
+			M:              b.hnsw.M,
+			EfConstruction: b.hnsw.EfConstruction,
+			EfSearch:       b.hnsw.EfSearch,
+			UseHeuristic:   true,
+		}),
+		veclite.WithTextIndex("content", "symbol_name", "relative_path", "language", "chunk_type"),
+	}
+}
+
+// searchOptions builds the base search options (TopK + EfSearch) used by every
+// search call. Additional options (filters, weights) can be appended by callers.
+func (b *VecLiteBackend) searchOptions(limit int) []veclite.SearchOption {
+	opts := []veclite.SearchOption{veclite.TopK(limit)}
+	if b.hnsw.EfSearch > 0 {
+		opts = append(opts, veclite.WithEfSearch(b.hnsw.EfSearch))
+	}
+	return opts
 }
 
 // InsertChunk inserts a chunk with all its metadata and embedding.
@@ -286,9 +375,12 @@ func (b *VecLiteBackend) DeleteByProjectRoot(projectRoot string) (int64, error) 
 		return int64(deleted), err
 	}
 
-	// If the collection is now empty, recreate it to reset the HNSW index
-	// This works around a bug in veclite where the HNSW index becomes
-	// corrupted after deleting all records
+	// If the collection is now empty, recreate it to reset the HNSW index.
+	// This works around a bug in veclite (still present in v0.16.0) where the
+	// HNSW index's entry point becomes invalid after deleting all records,
+	// causing a panic ("index out of range [0] with length 0") on the next
+	// Insert. v0.16.0 fixed per-space index leaks on delete, but not this
+	// empty-collection entry-point corruption path. Re-tested 2026-06-21.
 	if b.coll.Count() == 0 {
 		if err := b.DeleteAll(); err != nil {
 			return int64(deleted), err
@@ -301,15 +393,16 @@ func (b *VecLiteBackend) DeleteByProjectRoot(projectRoot string) (int64, error) 
 // GetFileHashes returns a map of relative_path -> file_hash for a project.
 // Used for incremental indexing to detect changed files.
 func (b *VecLiteBackend) GetFileHashes(projectRoot string) (map[string]string, error) {
-	allRecords := b.coll.All()
-
 	fileHashes := make(map[string]string)
-	for _, r := range allRecords {
-		root := getStringPayload(r.Payload, "project_root")
-		if root != projectRoot {
-			continue
-		}
 
+	// Use the native project_root filter instead of scanning every record.
+	// This runs on every incremental index, so pushing the filter down matters.
+	records, err := b.coll.Find(veclite.Equal("project_root", projectRoot))
+	if err != nil {
+		return nil, fmt.Errorf("find project records: %w", err)
+	}
+
+	for _, r := range records {
 		relPath := getStringPayload(r.Payload, "relative_path")
 		hash := getStringPayload(r.Payload, "file_hash")
 
@@ -388,7 +481,7 @@ func (b *VecLiteBackend) SearchEmbeddings(queryEmbedding []float32, limit int) (
 		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), b.dimensions)
 	}
 
-	results, err := b.coll.Search(queryEmbedding, veclite.TopK(limit))
+	results, err := b.coll.Search(queryEmbedding, b.searchOptions(limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -455,8 +548,6 @@ func (b *VecLiteBackend) Count() (int64, error) {
 
 // GetStats returns comprehensive statistics about the index.
 func (b *VecLiteBackend) GetStats(projectRoot string) (*Stats, error) {
-	allRecords := b.coll.All()
-
 	stats := &Stats{
 		Languages:  make(map[string]int64),
 		ChunkTypes: make(map[string]int64),
@@ -465,13 +556,21 @@ func (b *VecLiteBackend) GetStats(projectRoot string) (*Stats, error) {
 	filesSet := make(map[string]bool)
 	projectsSet := make(map[string]bool)
 
-	for _, r := range allRecords {
-		root := getStringPayload(r.Payload, "project_root")
-
-		// Filter by project if specified
-		if projectRoot != "" && root != projectRoot {
-			continue
+	// Push the project_root filter down to veclite when a specific project is
+	// requested; only the global-stats case scans every record.
+	var records []*veclite.Record
+	if projectRoot != "" {
+		filtered, err := b.coll.Find(veclite.Equal("project_root", projectRoot))
+		if err != nil {
+			return nil, fmt.Errorf("find project records for stats: %w", err)
 		}
+		records = filtered
+	} else {
+		records = b.coll.All()
+	}
+
+	for _, r := range records {
+		root := getStringPayload(r.Payload, "project_root")
 
 		stats.TotalChunks++
 
@@ -510,12 +609,7 @@ func (b *VecLiteBackend) DeleteAll() error {
 		_ = err
 	}
 
-	coll, err := b.db.CreateCollection("chunks",
-		veclite.WithDimension(b.dimensions),
-		veclite.WithDistanceType(veclite.DistanceCosine), // Use cosine for embeddings
-		veclite.WithHNSW(16, 200),                        // M=16, efConstruction=200
-		veclite.WithTextIndex("content", "symbol_name", "relative_path", "language", "chunk_type"),
-	)
+	coll, err := b.db.CreateCollection("chunks", b.collectionOptions()...)
 	if err != nil {
 		return fmt.Errorf("failed to recreate collection: %w", err)
 	}
@@ -533,15 +627,18 @@ func (b *VecLiteBackend) DeleteOrphaned(validChunkIDs []int64) (int64, error) {
 		validMap[id] = true
 	}
 
-	// Get all records
-	allRecords := b.coll.All()
+	// Only legacy records carry a non-zero chunk_id. Push that filter down to
+	// veclite so we don't scan modern records on the hot path.
+	legacyRecords, err := b.coll.Find(veclite.GreaterThan("chunk_id", 0))
+	if err != nil {
+		return 0, fmt.Errorf("find legacy records for orphan cleanup: %w", err)
+	}
 
 	var deleted int64
-	for _, r := range allRecords {
-		// Check for legacy chunk_id
+	for _, r := range legacyRecords {
 		chunkID := getInt64Payload(r.Payload, "chunk_id")
 		if chunkID == 0 {
-			continue // Not a legacy record
+			continue // defensive: filter may include zero due to payload edge cases
 		}
 
 		if !validMap[chunkID] {
@@ -641,15 +738,22 @@ func recordToChunk(r *veclite.Record) ChunkRecord {
 
 // ListFiles returns all unique files in the index for a project.
 func (b *VecLiteBackend) ListFiles(projectRoot string) ([]FileInfo, error) {
-	allRecords := b.coll.All()
+	// Push the project_root filter down to veclite when a specific project is
+	// requested; only the global case scans every record.
+	var records []*veclite.Record
+	if projectRoot != "" {
+		filtered, err := b.coll.Find(veclite.Equal("project_root", projectRoot))
+		if err != nil {
+			return nil, fmt.Errorf("find project records for file list: %w", err)
+		}
+		records = filtered
+	} else {
+		records = b.coll.All()
+	}
 
 	filesMap := make(map[string]*FileInfo)
-	for _, r := range allRecords {
+	for _, r := range records {
 		root := getStringPayload(r.Payload, "project_root")
-		if projectRoot != "" && root != projectRoot {
-			continue
-		}
-
 		relPath := getStringPayload(r.Payload, "relative_path")
 		if relPath == "" {
 			continue
@@ -779,8 +883,8 @@ func (b *VecLiteBackend) SearchWithFilter(queryEmbedding []float32, limit int, o
 	// Build native filters
 	filters := b.buildNativeFilters(opts)
 
-	// Build search options
-	searchOpts := []veclite.SearchOption{veclite.TopK(limit)}
+	// Build search options (TopK + EfSearch + filters)
+	searchOpts := b.searchOptions(limit)
 	if len(filters) > 0 {
 		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
 	}
@@ -821,23 +925,21 @@ func (b *VecLiteBackend) SearchWithExplain(queryEmbedding []float32, limit int, 
 	// Build native filters
 	filters := b.buildNativeFilters(opts)
 
-	// Build search options
-	searchOpts := []veclite.SearchOption{veclite.TopK(limit)}
+	// Build search options (TopK + EfSearch + filters)
+	searchOpts := b.searchOptions(limit)
 	if len(filters) > 0 {
 		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
 	}
 
-	// Use SearchExplain for diagnostics
+	// Use SearchExplain for diagnostics. veclite's SearchExplanation carries
+	// the actual Results alongside the diagnostics, so we no longer need to
+	// run a second Search() call — halving the work for every --explain.
 	explanation, err := b.coll.SearchExplain(queryEmbedding, searchOpts...)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Also get the actual results
-	results, err := b.coll.Search(queryEmbedding, searchOpts...)
-	if err != nil {
-		return nil, nil, err
-	}
+	results := explanation.Results
 
 	searchResults := make([]SearchResult, 0, len(results))
 	for _, r := range results {
@@ -871,7 +973,7 @@ func (b *VecLiteBackend) SearchWithExplain(queryEmbedding []float32, limit int, 
 func (b *VecLiteBackend) TextSearch(query string, limit int, opts FilterOptions) ([]SearchResult, error) {
 	filters := b.buildNativeFilters(opts)
 
-	searchOpts := []veclite.SearchOption{veclite.TopK(limit)}
+	searchOpts := b.searchOptions(limit)
 	if len(filters) > 0 {
 		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
 	}
@@ -898,11 +1000,10 @@ func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string
 		textWeight = 0
 	}
 
-	searchOpts := []veclite.SearchOption{
-		veclite.TopK(limit),
+	searchOpts := append(b.searchOptions(limit),
 		veclite.WithVectorWeight(float64(vectorWeight)),
 		veclite.WithTextWeight(textWeight),
-	}
+	)
 	if len(filters) > 0 {
 		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
 	}

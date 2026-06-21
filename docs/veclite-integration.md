@@ -108,7 +108,7 @@ vecgrep persists and validates an embedding profile guard before indexing and ve
 
 Current implementation:
 
-- Persist the profile as `embedding_profile.json` next to `vectors.veclite` in the vecgrep data directory.
+- Persist the profile under the `embedding_profile` key in VecLite collection metadata.
 - Compute `profile_id` from provider, model, dimensions, distance, modality, and chunker version.
 - On `index`, compare the configured profile with the stored profile before writing chunks unless `--full` is used.
 - On mismatch, fail with a clear message and require `vecgrep index --full` or `vecgrep reset`.
@@ -117,18 +117,18 @@ Current implementation:
 - Write the profile after a successful first index or full re-index.
 - Report profile status through `vecgrep status` and Studio.
 
-The current vecgrep implementation keeps the sidecar while it depends on a VecLite release without metadata APIs. After upgrading to a VecLite release with collection metadata, store the same profile under a collection metadata key such as `embedding_profile`.
+Legacy `embedding_profile.json` sidecars from pre-v0.16.0 vecgrep builds are migrated transparently: on the first open after the bump, if collection metadata has no profile but the sidecar exists, vecgrep reads the sidecar, writes it to collection metadata, and removes the sidecar. New projects never create the sidecar.
 
-## Future Named Vector Spaces
+## Named Vector Spaces (Available)
 
-VecLite's accepted long-term direction is named vector spaces. When that API exists, vecgrep can stay mostly unchanged:
+VecLite v0.16.0 shipped named vector spaces. The vecgrep integration can now stay mostly unchanged when adopting them:
 
 - keep the existing `chunks` logical collection
 - map current embeddings to the default or `code_text` vector space
 - optionally add other spaces later, such as documentation summaries or symbol-level embeddings
 - keep chunking and provider orchestration in vecgrep
 
-Until named vector spaces exist, vecgrep should use separate collections or a full re-index for incompatible embedding profiles.
+Adoption is incremental. The current vecgrep build pins veclite v0.17.0 and uses the single-vector default space; named spaces remain an opt-in capability for a future vecgrep release rather than a runtime requirement. For incompatible embedding profiles before that opt-in, vecgrep still uses a full re-index.
 
 ## Related Repos
 

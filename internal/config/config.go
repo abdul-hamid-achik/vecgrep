@@ -60,13 +60,21 @@ type VectorConfig struct {
 
 // VecLiteConfig holds VecLite backend settings
 type VecLiteConfig struct {
-	// M is the HNSW max connections per node (default: 16)
+	// M is the HNSW max connections per node (default: DefaultVecLiteM = 16)
 	M int `mapstructure:"m" yaml:"m,omitempty"`
-	// EfConstruction is the HNSW build quality parameter (default: 200)
+	// EfConstruction is the HNSW build quality parameter (default: DefaultVecLiteEfConstruction = 200)
 	EfConstruction int `mapstructure:"ef_construction" yaml:"ef_construction,omitempty"`
-	// EfSearch is the HNSW search quality parameter (default: 100)
+	// EfSearch is the HNSW search quality parameter (default: DefaultVecLiteEfSearch = 100)
 	EfSearch int `mapstructure:"ef_search" yaml:"ef_search,omitempty"`
 }
+
+// Default HNSW parameters for VecLite. Exposed so callers (status views,
+// diagnostics) can distinguish user-tuned values from defaults.
+const (
+	DefaultVecLiteM              = 16
+	DefaultVecLiteEfConstruction = 200
+	DefaultVecLiteEfSearch       = 100
+)
 
 // EmbeddingConfig holds embedding provider settings
 type EmbeddingConfig struct {
@@ -147,9 +155,9 @@ func DefaultConfig() *Config {
 		},
 		Vector: VectorConfig{
 			VecLite: VecLiteConfig{
-				M:              16,
-				EfConstruction: 200,
-				EfSearch:       100,
+				M:              DefaultVecLiteM,
+				EfConstruction: DefaultVecLiteEfConstruction,
+				EfSearch:       DefaultVecLiteEfSearch,
 			},
 		},
 	}

@@ -228,6 +228,35 @@ func TestLoadResolvedAppliesCloudProviderEnvironment(t *testing.T) {
 	}
 }
 
+// TestLoadResolvedAppliesHNSWEnv verifies that the VECGREP_VECTOR_VECLITE_*
+// environment variables are resolved into the Config struct. Before the fix
+// these were collected by viper's AutomaticEnv but never read into the struct,
+// so HNSW tuning via env vars was silently ignored.
+func TestLoadResolvedAppliesHNSWEnv(t *testing.T) {
+	isolateConfigTestEnv(t)
+	projectRoot := t.TempDir()
+
+	t.Setenv("VECGREP_VECTOR_VECLITE_M", "8")
+	t.Setenv("VECGREP_VECTOR_VECLITE_EF_CONSTRUCTION", "64")
+	t.Setenv("VECGREP_VECTOR_VECLITE_EF_SEARCH", "32")
+
+	resolved, err := LoadResolved(projectRoot)
+	if err != nil {
+		t.Fatalf("LoadResolved failed: %v", err)
+	}
+
+	cfg := resolved.Config
+	if cfg.Vector.VecLite.M != 8 {
+		t.Fatalf("veclite.m = %d, want 8", cfg.Vector.VecLite.M)
+	}
+	if cfg.Vector.VecLite.EfConstruction != 64 {
+		t.Fatalf("veclite.ef_construction = %d, want 64", cfg.Vector.VecLite.EfConstruction)
+	}
+	if cfg.Vector.VecLite.EfSearch != 32 {
+		t.Fatalf("veclite.ef_search = %d, want 32", cfg.Vector.VecLite.EfSearch)
+	}
+}
+
 func TestAddProjectToGlobalReusesExistingPath(t *testing.T) {
 	home := isolateConfigTestEnv(t)
 	projectRoot := t.TempDir()
@@ -293,6 +322,9 @@ func isolateConfigTestEnv(t *testing.T) string {
 	t.Setenv("VECGREP_VOYAGE_BASE_URL", "")
 	t.Setenv("VOYAGE_BASE_URL", "")
 	t.Setenv("VECGREP_DATA_DIR", "")
+	t.Setenv("VECGREP_VECTOR_VECLITE_M", "")
+	t.Setenv("VECGREP_VECTOR_VECLITE_EF_CONSTRUCTION", "")
+	t.Setenv("VECGREP_VECTOR_VECLITE_EF_SEARCH", "")
 	return home
 }
 

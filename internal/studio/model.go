@@ -1080,8 +1080,11 @@ func (m Model) renderStatus() string {
 		fmt.Sprintf("VecLite:      %s", m.status.VecLitePath),
 		fmt.Sprintf("VecLite size: %s", formatBytes(m.status.VecLiteSizeBytes)),
 		fmt.Sprintf("Backend:      %s", m.status.VectorBackend),
+		fmt.Sprintf("Veclite ver:  %s", m.status.VecliteVersion),
 		fmt.Sprintf("Embedding:    %s / %s / %d dims", m.status.Provider, m.status.Model, m.status.Dimensions),
+		fmt.Sprintf("HNSW:         M=%d  efConstruction=%d  efSearch=%d", m.status.HNSWM, m.status.HNSWEfConstruction, m.status.HNSWEfSearch),
 		fmt.Sprintf("Profile:      %s", m.status.ProfileStatus),
+		fmt.Sprintf("Provider:     %s", providerHealthLabel(m.status.ProviderHealth)),
 		"",
 		fmt.Sprintf("Fresh:        %s", fresh),
 		fmt.Sprintf("Projects:     %d", m.status.Stats["projects"]),
@@ -1102,6 +1105,11 @@ func (m Model) renderStatus() string {
 			fmt.Sprintf("New:        %d", m.status.PendingChanges.NewFiles),
 			fmt.Sprintf("Modified:   %d", m.status.PendingChanges.ModifiedFiles),
 			fmt.Sprintf("Deleted:    %d", m.status.PendingChanges.DeletedFiles),
+		)
+	}
+	if m.status.MigrationWarning != "" {
+		lines = append(lines, "",
+			fmt.Sprintf("Warning: %s", m.status.MigrationWarning),
 		)
 	}
 	if m.status.DetailedStats != nil {
@@ -1312,6 +1320,19 @@ func formatBytes(bytes int64) string {
 		}
 	}
 	return fmt.Sprintf("%.1f PiB", value/unit)
+}
+
+// providerHealthLabel renders the ProviderHealth field for the status panel.
+// Empty means "not checked", "ok" is shown verbatim, anything else is an error
+// string and is truncated to keep the panel tidy.
+func providerHealthLabel(health string) string {
+	if health == "" {
+		return "not checked"
+	}
+	if health == "ok" {
+		return "ok"
+	}
+	return "error: " + truncateDisplay(health, 40)
 }
 
 func formatTimeAgo(t time.Time) string {

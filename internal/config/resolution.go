@@ -356,6 +356,26 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 		cfg.DataDir = val
 		cfg.DBPath = filepath.Join(val, DefaultDBFile)
 	}
+
+	// VecLite HNSW tuning. These were previously collected by viper's
+	// AutomaticEnv but never read into the Config struct, so env overrides
+	// for veclite.m / ef_construction / ef_search were silently ignored.
+	// Resolve them explicitly so the backend actually receives them.
+	if val := os.Getenv("VECGREP_VECTOR_VECLITE_M"); val != "" {
+		if m, err := strconv.Atoi(val); err == nil && m > 0 {
+			cfg.Vector.VecLite.M = m
+		}
+	}
+	if val := os.Getenv("VECGREP_VECTOR_VECLITE_EF_CONSTRUCTION"); val != "" {
+		if ef, err := strconv.Atoi(val); err == nil && ef > 0 {
+			cfg.Vector.VecLite.EfConstruction = ef
+		}
+	}
+	if val := os.Getenv("VECGREP_VECTOR_VECLITE_EF_SEARCH"); val != "" {
+		if ef, err := strconv.Atoi(val); err == nil && ef > 0 {
+			cfg.Vector.VecLite.EfSearch = ef
+		}
+	}
 }
 
 // FoundConfigFiles returns the list of config files that were found and loaded

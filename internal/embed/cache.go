@@ -4,6 +4,7 @@ package embed
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"sync"
 	"time"
 )
@@ -108,10 +109,11 @@ func (c *EmbeddingCache) Set(text string, vector []float32) {
 // evictOldest removes the oldest entries to make room.
 // Must be called with lock held.
 func (c *EmbeddingCache) evictOldest() {
-	// Simple eviction: remove 10% of entries or at least 1
+	// Evict 10% of entries (or at least 1) to amortize eviction cost.
 	toEvict := max(c.maxSize/10, 1)
 
-	// Find oldest entries
+	// Collect (key, createdAt) pairs and sort by creation time (oldest first).
+	// Replaced the previous O(n²) bubble sort with an O(n log n) sort.
 	type keyTime struct {
 		key       string
 		createdAt time.Time
@@ -120,15 +122,9 @@ func (c *EmbeddingCache) evictOldest() {
 	for k, v := range c.entries {
 		entries = append(entries, keyTime{k, v.createdAt})
 	}
-
-	// Sort by creation time (oldest first)
-	for i := 0; i < len(entries)-1; i++ {
-		for j := i + 1; j < len(entries); j++ {
-			if entries[j].createdAt.Before(entries[i].createdAt) {
-				entries[i], entries[j] = entries[j], entries[i]
-			}
-		}
-	}
+	slices.SortFunc(entries, func(a, b keyTime) int {
+		return a.createdAt.Compare(b.createdAt)
+	})
 
 	// Remove oldest entries
 	for i := 0; i < toEvict && i < len(entries); i++ {

@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
+	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 )
 
 const (
 	embeddingProfileFile          = "embedding_profile.json"
+	embeddingProfileMetaKey       = "embedding_profile"
 	embeddingProfileSchemaVersion = 1
 	embeddingProfileDistance      = "cosine"
 	embeddingProfileModality      = "text"
@@ -51,6 +54,9 @@ func (e *EmbeddingProfileMismatchError) Unwrap() error {
 	return ErrEmbeddingProfileMismatch
 }
 
+// EmbeddingProfilePath returns the path of the legacy embedding_profile.json
+// sidecar. New projects store the profile in VecLite collection metadata
+// instead; the sidecar is kept only as a migration source for existing indexes.
 func EmbeddingProfilePath(dataDir string) string {
 	return filepath.Join(dataDir, embeddingProfileFile)
 }
@@ -75,46 +81,88 @@ func CurrentEmbeddingProfile(cfg *config.Config) EmbeddingProfile {
 	return profile
 }
 
-func LoadEmbeddingProfile(dataDir string) (*EmbeddingProfile, error) {
-	data, err := os.ReadFile(EmbeddingProfilePath(dataDir))
-	if errors.Is(err, os.ErrNotExist) {
+// LoadEmbeddingProfile reads the stored embedding profile from VecLite
+// collection metadata. As a transparent migration, if the collection metadata
+// has no profile but a legacy embedding_profile.json sidecar exists on disk,
+// the sidecar is read, written into collection metadata, and the sidecar is
+// removed.
+func LoadEmbeddingProfile(database *db.DB, dataDir string) (*EmbeddingProfile, error) {
+	if database == nil {
+		return loadSidecarProfile(dataDir)
+	}
+
+	if raw, ok := database.CollectionMetadataValue(embeddingProfileMetaKey); ok {
+		return decodeProfile(raw)
+	}
+
+	// Migration path: no metadata yet, but a legacy sidecar exists.
+	sidecar, err := loadSidecarProfile(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if sidecar == nil {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read embedding profile: %w", err)
+	// Store as a gob-native map[string]any. json.RawMessage (a []byte) is
+	// NOT gob-registered in veclite's storage layer, so it fails silently
+	// on Sync. A plain map round-trips through gob correctly.
+	if err := SaveEmbeddingProfile(database, dataDir, *sidecar); err != nil {
+		return nil, fmt.Errorf("migrate embedding profile to collection metadata: %w", err)
 	}
-
-	var profile EmbeddingProfile
-	if err := json.Unmarshal(data, &profile); err != nil {
-		return nil, fmt.Errorf("parse embedding profile: %w", err)
+	if err := RemoveEmbeddingProfile(dataDir); err != nil {
+		log.Printf("embedding profile: migrated to collection metadata but failed to remove sidecar: %v", err)
 	}
-	return &profile, nil
+	return sidecar, nil
 }
 
-func SaveEmbeddingProfile(dataDir string, profile EmbeddingProfile) error {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return fmt.Errorf("create profile directory: %w", err)
+// SaveEmbeddingProfile writes the embedding profile to VecLite collection
+// metadata. The legacy sidecar is removed if present so the two storage
+// locations never diverge.
+func SaveEmbeddingProfile(database *db.DB, dataDir string, profile EmbeddingProfile) error {
+	if database == nil {
+		return saveSidecarProfile(dataDir, profile)
 	}
-	data, err := json.MarshalIndent(profile, "", "  ")
+	// Marshal to JSON then unmarshal into map[string]any. This gives a
+	// gob-encodable value (veclite's storage uses gob, and json.RawMessage
+	// / []byte are not gob-registered for the metadata map).
+	data, err := json.Marshal(profile)
 	if err != nil {
 		return fmt.Errorf("marshal embedding profile: %w", err)
 	}
-	data = append(data, '\n')
-	if err := os.WriteFile(EmbeddingProfilePath(dataDir), data, 0644); err != nil {
-		return fmt.Errorf("write embedding profile: %w", err)
+	var asMap map[string]any
+	if err := json.Unmarshal(data, &asMap); err != nil {
+		return fmt.Errorf("normalize embedding profile for storage: %w", err)
+	}
+	if err := database.SetCollectionMetadataValue(embeddingProfileMetaKey, asMap); err != nil {
+		return fmt.Errorf("write embedding profile to collection metadata: %w", err)
+	}
+	// Best-effort cleanup of any leftover legacy sidecar.
+	if err := RemoveEmbeddingProfile(dataDir); err != nil {
+		log.Printf("embedding profile: saved to collection metadata but failed to remove legacy sidecar: %v", err)
 	}
 	return nil
 }
 
+// RemoveEmbeddingProfile removes the legacy embedding_profile.json sidecar
+// from disk. Collection metadata is cleared via RemoveEmbeddingProfileMeta.
 func RemoveEmbeddingProfile(dataDir string) error {
 	err := os.Remove(EmbeddingProfilePath(dataDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("remove embedding profile: %w", err)
+		return fmt.Errorf("remove embedding profile sidecar: %w", err)
 	}
 	return nil
+}
+
+// RemoveEmbeddingProfileMeta removes the embedding profile from VecLite
+// collection metadata.
+func RemoveEmbeddingProfileMeta(database *db.DB) error {
+	if database == nil {
+		return nil
+	}
+	return database.DeleteCollectionMetadataValue(embeddingProfileMetaKey)
 }
 
 func (p EmbeddingProfile) Matches(other EmbeddingProfile) bool {
@@ -130,7 +178,7 @@ func (p EmbeddingProfile) Matches(other EmbeddingProfile) bool {
 
 func (s *Service) ensureEmbeddingProfileMatches() error {
 	current := CurrentEmbeddingProfile(s.session.Config)
-	stored, err := LoadEmbeddingProfile(s.session.Config.DataDir)
+	stored, err := LoadEmbeddingProfile(s.session.DB, s.session.Config.DataDir)
 	if err != nil {
 		return err
 	}
@@ -157,7 +205,7 @@ func (s *Service) ensureEmbeddingProfileForIndex(fullReindex bool) error {
 }
 
 func (s *Service) saveCurrentEmbeddingProfile() error {
-	return SaveEmbeddingProfile(s.session.Config.DataDir, CurrentEmbeddingProfile(s.session.Config))
+	return SaveEmbeddingProfile(s.session.DB, s.session.Config.DataDir, CurrentEmbeddingProfile(s.session.Config))
 }
 
 func (s *Service) hasIndexedChunks() bool {
@@ -166,4 +214,62 @@ func (s *Service) hasIndexedChunks() bool {
 		return true
 	}
 	return stats["chunks"] > 0
+}
+
+// loadSidecarProfile reads the legacy embedding_profile.json sidecar.
+func loadSidecarProfile(dataDir string) (*EmbeddingProfile, error) {
+	data, err := os.ReadFile(EmbeddingProfilePath(dataDir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read embedding profile sidecar: %w", err)
+	}
+	return decodeProfile(data)
+}
+
+// saveSidecarProfile writes the legacy embedding_profile.json sidecar. Used
+// only when no DB handle is available (e.g. before the collection exists).
+func saveSidecarProfile(dataDir string, profile EmbeddingProfile) error {
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("create profile directory: %w", err)
+	}
+	data, err := json.MarshalIndent(profile, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal embedding profile: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(EmbeddingProfilePath(dataDir), data, 0644); err != nil {
+		return fmt.Errorf("write embedding profile sidecar: %w", err)
+	}
+	return nil
+}
+
+func decodeProfile(raw any) (*EmbeddingProfile, error) {
+	data, err := toJSONBytes(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode embedding profile: %w", err)
+	}
+	var profile EmbeddingProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return nil, fmt.Errorf("parse embedding profile: %w", err)
+	}
+	return &profile, nil
+}
+
+// toJSONBytes normalizes a metadata value (string, []byte, json.RawMessage,
+// or an already-decoded map) into JSON bytes.
+func toJSONBytes(raw any) ([]byte, error) {
+	switch v := raw.(type) {
+	case nil:
+		return nil, fmt.Errorf("empty profile value")
+	case json.RawMessage:
+		return v, nil
+	case []byte:
+		return v, nil
+	case string:
+		return []byte(v), nil
+	default:
+		return json.Marshal(v)
+	}
 }

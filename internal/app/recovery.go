@@ -129,8 +129,11 @@ func initProjectDatabase(projectRoot, projectName, dataDir string, global bool) 
 	}
 
 	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
+		Dimensions:         cfg.Embedding.Dimensions,
+		DataDir:            cfg.DataDir,
+		HNSWM:              cfg.Vector.VecLite.M,
+		HNSWEfConstruction: cfg.Vector.VecLite.EfConstruction,
+		HNSWEfSearch:       cfg.Vector.VecLite.EfSearch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize veclite index: %w", err)
@@ -196,8 +199,11 @@ func ResetIndexFiles(ctx context.Context, startDir string) (*ResetIndexFilesResu
 	}
 
 	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
+		Dimensions:         cfg.Embedding.Dimensions,
+		DataDir:            cfg.DataDir,
+		HNSWM:              cfg.Vector.VecLite.M,
+		HNSWEfConstruction: cfg.Vector.VecLite.EfConstruction,
+		HNSWEfSearch:       cfg.Vector.VecLite.EfSearch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("recreate veclite index: %w", err)

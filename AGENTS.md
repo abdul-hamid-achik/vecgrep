@@ -34,7 +34,29 @@ internal/
   search/           # Search implementation
   studio/           # Bubble Tea Studio terminal app
   version/          # Version info (set via ldflags)
+docs/               # VitePress documentation website (deployed to Vercel)
 ```
+
+## Documentation Discipline
+
+There are two distinct documentation surfaces — do not mix them:
+
+1. **`docs/` — VitePress website (deployed to Vercel).** This is the public product
+   documentation site (user-facing guides, MCP reference, provider config, integration
+   contracts). Build with `task site` / `task site:build` / `task site:preview`. Only
+   edit files here for user-facing product documentation. **Do not use `docs/` for
+   scratch notes, session handoffs, TODO dumps, or agent working memory.**
+
+2. **`~/notes` — Obsidian vault (project notes).** All working notes, session
+   handoffs, release notes, design decisions, TODO tracking, and agent memory live
+   here. The vecgrep project folder is `~/notes/projects/vecgrep/`. When you need to
+   make a note, use the **obsidian-cli** skill (invoke `skill` with name
+   `obsidian-cli`) to read/write/search the vault rather than dropping markdown files
+   into the repo. The vault has sibling folders for related projects:
+   `~/notes/projects/veclite/` and `~/notes/projects/vidtrace/`.
+
+Never create `.md` scratch/handoff/notes files inside the vecgrep repo. Keep the
+repo clean: code, in-repo product docs (`docs/`), and specs only.
 
 ## Development Commands
 
@@ -84,7 +106,7 @@ The MCP implementation in `internal/mcp/server_sdk.go` provides:
 - `vecgrep_status` - Index statistics
 - `vecgrep_similar` - Find similar code by chunk ID, file:line, or text
 - `vecgrep_delete` - Remove file from index
-- `vecgrep_clean` - Optimize database
+- `vecgrep_clean` - Sync database to disk and report stats
 - `vecgrep_reset` - Clear database
 
 ### Configuration
@@ -149,4 +171,6 @@ The `embed.Provider` interface allows for multiple provider implementations:
 
 1. Run `task check` (formats, lints, tests)
 2. Run `task build` to verify compilation
-3. Update documentation if adding/changing features
+3. Update `docs/` only if adding/changing user-facing product features. For session
+   notes, handoffs, or design decisions, write to the Obsidian vault at
+   `~/notes/projects/vecgrep/` via the obsidian-cli skill instead.

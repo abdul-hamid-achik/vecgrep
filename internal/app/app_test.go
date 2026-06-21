@@ -109,7 +109,7 @@ func TestServiceIndexRejectsMismatchedEmbeddingProfile(t *testing.T) {
 	stored := CurrentEmbeddingProfile(session.Config)
 	stored.Model = "other-model"
 	stored.ProfileID = "ollama:other-model:768:cosine:code-chunker-v1"
-	if err := SaveEmbeddingProfile(session.Config.DataDir, stored); err != nil {
+	if err := SaveEmbeddingProfile(session.DB, session.Config.DataDir, stored); err != nil {
 		t.Fatalf("SaveEmbeddingProfile failed: %v", err)
 	}
 
@@ -130,7 +130,7 @@ func TestServiceFullIndexWritesEmbeddingProfile(t *testing.T) {
 		t.Fatalf("full index failed: %v", err)
 	}
 
-	profile, err := LoadEmbeddingProfile(session.Config.DataDir)
+	profile, err := LoadEmbeddingProfile(session.DB, session.Config.DataDir)
 	if err != nil {
 		t.Fatalf("LoadEmbeddingProfile failed: %v", err)
 	}
@@ -275,6 +275,81 @@ func TestInitLocalProjectCreatesRepoLocalSession(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(result.DataDir, config.DefaultConfigFile)); err != nil {
 		t.Fatalf("local config file was not created: %v", err)
+	}
+}
+
+func TestEmbeddingProfileSidecarMigrationToMetadata(t *testing.T) {
+	session, _ := createTestSession(t)
+
+	// Simulate a pre-migration index by writing the legacy sidecar directly
+	// and clearing any collection metadata that the session open may have set.
+	profile := CurrentEmbeddingProfile(session.Config)
+	if err := saveSidecarProfile(session.Config.DataDir, profile); err != nil {
+		t.Fatalf("saveSidecarProfile failed: %v", err)
+	}
+	if _, ok := session.DB.CollectionMetadataValue(embeddingProfileMetaKey); ok {
+		t.Fatalf("expected no metadata profile before migration, found one")
+	}
+
+	// Loading should transparently migrate the sidecar into collection metadata.
+	loaded, err := LoadEmbeddingProfile(session.DB, session.Config.DataDir)
+	if err != nil {
+		t.Fatalf("LoadEmbeddingProfile failed: %v", err)
+	}
+	if loaded == nil || !loaded.Matches(profile) {
+		t.Fatalf("loaded profile = %+v, want %+v", loaded, profile)
+	}
+
+	// The sidecar should be gone and the metadata key should now hold the profile.
+	if _, err := os.Stat(EmbeddingProfilePath(session.Config.DataDir)); !os.IsNotExist(err) {
+		t.Fatalf("expected sidecar removed after migration, stat err: %v", err)
+	}
+	raw, ok := session.DB.CollectionMetadataValue(embeddingProfileMetaKey)
+	if !ok {
+		t.Fatalf("expected profile in collection metadata after migration")
+	}
+	parsed, err := decodeProfile(raw)
+	if err != nil || parsed == nil || !parsed.Matches(profile) {
+		t.Fatalf("metadata profile = %+v, err = %v, want %+v", parsed, err, profile)
+	}
+}
+
+func TestEmbeddingProfileSurvivesReopen(t *testing.T) {
+	session, _ := createTestSession(t)
+	dataDir := session.Config.DataDir
+	projectRoot := session.ProjectRoot
+
+	// Save a profile via the service (as Index does).
+	profile := CurrentEmbeddingProfile(session.Config)
+	if err := SaveEmbeddingProfile(session.DB, dataDir, profile); err != nil {
+		t.Fatalf("SaveEmbeddingProfile failed: %v", err)
+	}
+	// Sync so the metadata hits disk.
+	if err := session.DB.Sync(); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+
+	// Close the session and reopen the same data dir.
+	if err := session.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	session2, err := OpenSession(context.Background(), projectRoot)
+	if err != nil {
+		t.Fatalf("OpenSession on reopen failed: %v", err)
+	}
+	t.Cleanup(func() { _ = session2.Close() })
+
+	// The profile must still be present in collection metadata after reload.
+	loaded, err := LoadEmbeddingProfile(session2.DB, dataDir)
+	if err != nil {
+		t.Fatalf("LoadEmbeddingProfile after reopen: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("profile missing from collection metadata after reopen (gob round-trip failed)")
+	}
+	if !loaded.Matches(profile) {
+		t.Fatalf("profile mismatch after reopen: got %+v, want %+v", loaded, profile)
 	}
 }
 

@@ -137,9 +137,14 @@ var deleteCmd = &cobra.Command{
 
 var cleanCmd = &cobra.Command{
 	Use:   "clean",
-	Short: "Remove orphaned data and optimize database",
-	Long: `Clean up orphaned data (chunks without files, embeddings without chunks)
-and vacuum the database to reclaim space.`,
+	Short: "Sync database to disk and report index stats",
+	Long: `Sync the vector database to disk and report current index statistics.
+
+With veclite-only storage all data is self-contained in collection records, so
+there are no orphaned rows to reclaim. This command flushes pending writes and
+prints record/file counts so you can confirm the index is consistent. If a
+future veclite release exposes a collection-level Compact() API, HNSW tombstone
+compaction will be wired in here.`,
 	RunE: runClean,
 }
 
@@ -735,7 +740,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  VecLite index: %s\n", status.VecLitePath)
 	fmt.Printf("  VecLite size: %s\n", formatBytes(status.VecLiteSizeBytes))
 	fmt.Printf("  Vector backend: %s\n", status.VectorBackend)
+	fmt.Printf("  Veclite version: %s\n", status.VecliteVersion)
 	fmt.Printf("  Embedding model: %s (%s, %d dimensions)\n", status.Model, status.Provider, status.Dimensions)
+	fmt.Printf("  Provider health: %s\n", providerHealthLabel(status.ProviderHealth))
+	fmt.Printf("  HNSW:         M=%d  efConstruction=%d  efSearch=%d\n", status.HNSWM, status.HNSWEfConstruction, status.HNSWEfSearch)
 	fmt.Printf("  Profile:     %s\n", status.ProfileStatus)
 	fmt.Printf("  Profile path: %s\n", status.ProfilePath)
 	fmt.Printf("\nIndex statistics:\n")
@@ -824,6 +832,22 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f PiB", value/unit)
 }
 
+// providerHealthLabel renders the ProviderHealth field for the CLI status
+// output. Empty means "not checked", "ok" is shown verbatim, anything else
+// is an error string and is truncated to keep the output tidy.
+func providerHealthLabel(health string) string {
+	if health == "" {
+		return "not checked"
+	}
+	if health == "ok" {
+		return "ok"
+	}
+	if len(health) > 60 {
+		health = health[:60] + "..."
+	}
+	return "error: " + health
+}
+
 func runDelete(cmd *cobra.Command, args []string) error {
 	filePath := args[0]
 
@@ -851,20 +875,26 @@ func runClean(cmd *cobra.Command, args []string) error {
 	defer session.Close()
 	service := app.NewService(session)
 
-	fmt.Println("Cleaning database...")
+	fmt.Println("Syncing database...")
 
 	stats, err := service.Clean(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("failed to clean database: %w", err)
 	}
 
-	fmt.Printf("Clean complete:\n")
-	fmt.Printf("  Orphaned chunks removed: %d\n", stats.OrphanedChunks)
-	fmt.Printf("  Orphaned embeddings removed: %d\n", stats.OrphanedEmbeddings)
+	fmt.Printf("Sync complete:\n")
+	if stats.Synced {
+		fmt.Printf("  Database flushed to disk\n")
+	}
+	fmt.Printf("  Records: %d\n", stats.TotalRecords)
+	fmt.Printf("  Files:   %d\n", stats.TotalFiles)
+	// Legacy orphan fields are always zero with veclite-only storage; only
+	// surface them if a future backend reports real reclamation work.
+	if stats.OrphanedChunks > 0 || stats.VacuumedBytes > 0 {
+		fmt.Printf("  Orphaned chunks removed: %d\n", stats.OrphanedChunks)
+	}
 	if stats.VacuumedBytes > 0 {
 		fmt.Printf("  Space reclaimed: %d bytes\n", stats.VacuumedBytes)
-	} else {
-		fmt.Printf("  Database already optimized\n")
 	}
 
 	return nil

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -666,10 +668,85 @@ func extractPythonImport(line string) string {
 }
 
 // findImportedBy searches for files that import the given file.
+//
+// For Go files it uses go/parser to resolve the target's import path and then
+// parses every other .go file in the tree to check its import block — this
+// avoids the false positives the previous substring matcher produced (it
+// matched on the package directory, so every file in the same package looked
+// like a reverse dependency). For non-Go files the substring fallback is
+// retained until a language-aware implementation is added.
 func findImportedBy(root, relPath, ext string) []string {
-	// This is a simplified implementation
-	// A full implementation would parse all files and check imports
+	if ext == ".go" {
+		return findImportedByGo(root, relPath)
+	}
+	return findImportedBySubstring(root, relPath, ext)
+}
 
+// findImportedByGo resolves reverse dependencies for a Go file by parsing
+// import declarations. A file F is considered to import the target T when T's
+// package import path appears in F's import block. The target's import path
+// is derived from its directory relative to the module root (the package
+// name is the directory, per Go convention).
+func findImportedByGo(root, relPath string) []string {
+	// The Go import path for the target's package. Go imports are by package
+	// (directory), not by file, so we resolve to the package path. The module
+	// path prefix is unknown here, so we match on the path suffix: a file
+	// imports the target if its import path ends with the target's package
+	// directory (relative to root).
+	targetPkgDir := filepath.Dir(relPath)
+	// Normalise to forward slashes for import-path comparison.
+	targetPkgImport := filepath.ToSlash(targetPkgDir)
+
+	var importedBy []string
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(path)) != ".go" {
+			return nil
+		}
+		// Skip test files for the reverse-dependency graph; they import
+		// everything in the package by definition and would drown out real
+		// callers. A dedicated test-file lookup is handled separately by
+		// findTestFiles.
+		if strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		pathRel, relErr := filepath.Rel(root, path)
+		if relErr != nil || pathRel == relPath {
+			return nil
+		}
+
+		fset := token.NewFileSet()
+		f, parseErr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+		if parseErr != nil {
+			return nil
+		}
+
+		for _, spec := range f.Imports {
+			impPath := strings.Trim(spec.Path.Value, `"`)
+			// Match on suffix so we don't need the module path. A target at
+			// "internal/db" is imported by anyone whose import path ends with
+			// "internal/db". This still produces the occasional false positive
+			// when two distinct modules share a trailing path segment, but
+			// within a single codebase this is accurate and a vast improvement
+			// over the previous substring-on-contents approach.
+			if impPath == targetPkgImport || strings.HasSuffix(impPath, "/"+targetPkgImport) {
+				importedBy = append(importedBy, pathRel)
+				break
+			}
+		}
+		return nil
+	})
+
+	return importedBy
+}
+
+// findImportedBySubstring is the legacy substring-based reverse-dependency
+// matcher, retained as the fallback for non-Go languages until a
+// language-aware implementation is added.
+func findImportedBySubstring(root, relPath, ext string) []string {
 	baseName := filepath.Base(relPath)
 	baseNameNoExt := strings.TrimSuffix(baseName, ext)
 	dir := filepath.Dir(relPath)
@@ -679,9 +756,6 @@ func findImportedBy(root, relPath, ext string) []string {
 	// Search patterns based on file type
 	var searchPatterns []string
 	switch ext {
-	case ".go":
-		// Go: look for package imports
-		searchPatterns = []string{filepath.Dir(relPath)}
 	case ".js", ".ts", ".jsx", ".tsx":
 		// JS/TS: look for relative imports
 		searchPatterns = []string{

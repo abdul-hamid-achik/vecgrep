@@ -213,7 +213,7 @@ Model Context Protocol server:
 - `vecgrep_status` - Get statistics
 - `vecgrep_similar` - Find similar code
 - `vecgrep_delete` - Remove file from index
-- `vecgrep_clean` - Optimize database
+- `vecgrep_clean` - Sync database to disk and report stats
 - `vecgrep_reset` - Clear database
 
 ### `internal/search/`

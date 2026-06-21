@@ -20,7 +20,7 @@ The server communicates over stdio.
 | `vecgrep_status` | Inspect index and provider status |
 | `vecgrep_similar` | Find similar code |
 | `vecgrep_delete` | Remove a file from the index |
-| `vecgrep_clean` | Optimize index data |
+| `vecgrep_clean` | Sync database to disk and report stats |
 | `vecgrep_reset` | Clear the index |
 | `vecgrep_overview` | Summarize codebase structure |
 | `vecgrep_batch_search` | Run multiple searches |

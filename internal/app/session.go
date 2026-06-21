@@ -69,8 +69,11 @@ func OpenSession(ctx context.Context, startDir string) (*Session, error) {
 	}
 
 	database, err := db.OpenWithOptions(db.OpenOptions{
-		Dimensions: cfg.Embedding.Dimensions,
-		DataDir:    cfg.DataDir,
+		Dimensions:         cfg.Embedding.Dimensions,
+		DataDir:            cfg.DataDir,
+		HNSWM:              cfg.Vector.VecLite.M,
+		HNSWEfConstruction: cfg.Vector.VecLite.EfConstruction,
+		HNSWEfSearch:       cfg.Vector.VecLite.EfSearch,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w; if this index was created by an older vecgrep/veclite version, run 'vecgrep reset --force' and then 'vecgrep index'", err)

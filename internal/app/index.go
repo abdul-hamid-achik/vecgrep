@@ -89,6 +89,9 @@ func (s *Service) Reset(ctx context.Context, scope ResetScope) error {
 			return err
 		}
 	}
+	if err := RemoveEmbeddingProfileMeta(s.session.DB); err != nil {
+		return fmt.Errorf("remove embedding profile metadata: %w", err)
+	}
 	return RemoveEmbeddingProfile(s.session.Config.DataDir)
 }
 

@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.2.0] - 2026-06-21
+
+### Added
+- Expose resolved HNSW parameters (M, efConstruction, efSearch) and veclite version in `vecgrep status` and Studio status view.
+- Expose default HNSW constants (`config.DefaultVecLiteM`, `DefaultVecLiteEfConstruction`, `DefaultVecLiteEfSearch`) so callers can distinguish user-tuned values from defaults.
+- Go-aware reverse-import lookup in the `vecgrep_related_files` MCP tool via `go/parser`, reducing false positives for same-package substring matches. Non-Go files keep the existing substring fallback.
+- Migration path from the legacy `embedding_profile.json` sidecar into veclite collection metadata (transparent on first open).
+- Provider health probe surfaced in `vecgrep status` and Studio status via `Provider.Ping`.
+- `CLAUDE.md` with Claude-specific orientation and documentation discipline (docs/ vs ~/notes vault).
+
+### Changed
+- Bump veclite dependency from v0.14.0 to v0.17.0 (storage format v4, first-class `EmbeddingProfile`, named vector spaces, per-space index cleanup on delete, `UpsertRecordByKey` and `HybridSearchSpace` APIs, errcheck lint clean).
+- Honor `vector.veclite.m`, `vector.veclite.ef_construction`, and `vector.veclite.ef_search` from config instead of silently hardcoding `WithHNSW(16, 200)`. `ef_search` is applied as a per-query `veclite.WithEfSearch` search option.
+- Store the embedding profile in veclite collection metadata instead of the `embedding_profile.json` sidecar. Existing sidecars are migrated transparently on first open and the sidecar file is removed.
+- Push `GetFileHashes`, `GetStats`, `ListFiles`, and `DeleteOrphaned` down to native veclite filters instead of full-table scans with manual Go loops. Largest incremental-index startup win.
+- Deduplicate `SearchWithExplain`: use the results returned by `SearchExplain` instead of running a second `Search` call.
+- Replace the O(n²) bubble sort in the embedding cache eviction with `slices.SortFunc` (O(n log n)).
+- Reframe `vecgrep clean` as "sync database to disk and report index stats" — the previous "remove orphaned data and optimize" framing was misleading because pure veclite storage has no orphans.
+- Document the split between `docs/` (VitePress website deployed to Vercel) and the `~/notes` Obsidian vault for session notes, handoffs, and agent memory in `AGENTS.md`.
+
+### Fixed
+- HNSW config parsed in the config layer is now actually applied to the veclite collection at creation and to every search call site. Previously the config was collected and tested but never reached the backend.
+- Resolve `VECGREP_VECTOR_VECLITE_M`, `VECGREP_VECTOR_VECLITE_EF_CONSTRUCTION`, and `VECGREP_VECTOR_VECLITE_EF_SEARCH` environment variables in `internal/config/resolution.go` so they flow into the resolved config and reach the backend.
+- Documented the retained `DeleteAll`-on-empty workaround in `DeleteByProjectRoot`: veclite v0.17.0 still exhibits empty-collection entry-point corruption (`hnsw.go` index out of range) when re-indexing after a delete-all under concurrent workers with 384-dim embeddings, so the workaround stays.
+
 ## [2.1.0] - 2026-06-20
 
 ### Added
@@ -133,6 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable chunk size and overlap
 - Ignore patterns for excluding files from indexing
 
+[2.2.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v0.3.1...v2.0.0
