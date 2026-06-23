@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
 	"github.com/abdul-hamid-achik/vecgrep/internal/studio"
 	"github.com/abdul-hamid-achik/vecgrep/internal/version"
+	"github.com/abdul-hamid-achik/veclite"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -905,6 +907,26 @@ func runReset(cmd *cobra.Command, args []string) error {
 
 	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
+		if errors.Is(err, veclite.ErrFileLocked) {
+			// Another process (e.g. studio TUI, index, or MCP server) holds the lock.
+			// With --force, delete the index files directly. Without --force, suggest it.
+			if !force {
+				fmt.Fprintln(os.Stderr, "Error: the database is locked by another process (e.g. studio, index, or MCP server).")
+				fmt.Fprintln(os.Stderr, "To force-reset and delete the index files, run:")
+				fmt.Fprintln(os.Stderr, "  vecgrep reset --force")
+				fmt.Fprintln(os.Stderr, "")
+				fmt.Fprintln(os.Stderr, "Note: this will delete all indexed data. The process holding the lock will need to re-index.")
+				return err
+			}
+			result, resetErr := app.ResetIndexFiles(cmd.Context(), "")
+			if resetErr != nil {
+				return fmt.Errorf("failed to reset index files after open error %q: %w", err, resetErr)
+			}
+			fmt.Printf("Index files reset for %s\n", result.ProjectRoot)
+			fmt.Printf("  VecLite index: %s\n", result.VecLitePath)
+			fmt.Println("Run 'vecgrep index' to re-index your codebase.")
+			return nil
+		}
 		if force {
 			result, resetErr := app.ResetIndexFiles(cmd.Context(), "")
 			if resetErr != nil {

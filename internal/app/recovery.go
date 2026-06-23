@@ -194,10 +194,17 @@ func ResetIndexFiles(ctx context.Context, startDir string) (*ResetIndexFilesResu
 	if err := os.RemoveAll(vecPath); err != nil {
 		return nil, fmt.Errorf("remove veclite index: %w", err)
 	}
+	// Also remove the stale lock file left by another process holding the DB.
+	if err := os.RemoveAll(vecPath + ".lock"); err != nil {
+		return nil, fmt.Errorf("remove veclite lock file: %w", err)
+	}
 	if err := RemoveEmbeddingProfile(cfg.DataDir); err != nil {
 		return nil, err
 	}
 
+	// Try to recreate a fresh empty index. If another process still holds the
+	// lock (it may have re-acquired it), just skip re-creation and tell the
+	// user to run 'vecgrep index' — the files are already deleted.
 	database, err := db.OpenWithOptions(db.OpenOptions{
 		Dimensions:         cfg.Embedding.Dimensions,
 		DataDir:            cfg.DataDir,
@@ -206,7 +213,10 @@ func ResetIndexFiles(ctx context.Context, startDir string) (*ResetIndexFilesResu
 		HNSWEfSearch:       cfg.Vector.VecLite.EfSearch,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("recreate veclite index: %w", err)
+		return &ResetIndexFilesResult{
+			ProjectRoot: projectRoot,
+			VecLitePath: vecPath,
+		}, nil // files deleted; user should run 'vecgrep index'
 	}
 	defer database.Close()
 
