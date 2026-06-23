@@ -104,6 +104,14 @@ func NewVecLiteBackend(dbPath string) *VecLiteBackend {
 // If hnsw is the zero value, defaults (M=16, EfConstruction=200, EfSearch=100)
 // are applied.
 func (b *VecLiteBackend) Init(dimensions int, hnsw HNSWConfig) error {
+	return b.InitWithOptions(dimensions, hnsw, false, false)
+}
+
+// InitWithOptions initializes the VecLite backend with the given dimensions, HNSW
+// config, and access mode options. readOnly prevents writes; sharedRead allows
+// multiple processes to open the same file for read-only access (requires
+// readOnly).
+func (b *VecLiteBackend) InitWithOptions(dimensions int, hnsw HNSWConfig, readOnly, sharedRead bool) error {
 	b.dimensions = dimensions
 	if hnsw.M <= 0 {
 		hnsw.M = DefaultHNSWM
@@ -117,7 +125,14 @@ func (b *VecLiteBackend) Init(dimensions int, hnsw HNSWConfig) error {
 	b.hnsw = hnsw
 
 	// Open VecLite database
-	db, err := veclite.Open(b.dbPath)
+	var openOpts []veclite.Option
+	if readOnly {
+		openOpts = append(openOpts, veclite.WithReadOnly(true))
+		if sharedRead {
+			openOpts = append(openOpts, veclite.WithSharedRead(true))
+		}
+	}
+	db, err := veclite.Open(b.dbPath, openOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to open veclite database: %w", err)
 	}

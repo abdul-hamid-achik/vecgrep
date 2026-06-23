@@ -24,6 +24,13 @@ type OpenOptions struct {
 	HNSWM              int
 	HNSWEfConstruction int
 	HNSWEfSearch       int
+
+	// ReadOnly opens the database in read-only mode. Writes will be rejected.
+	ReadOnly bool
+
+	// SharedRead allows multiple processes to open the same database file
+	// simultaneously for read-only access. Requires ReadOnly to be true.
+	SharedRead bool
 }
 
 // Default HNSW parameters used when config does not override them.
@@ -62,12 +69,12 @@ func OpenWithOptions(opts OpenOptions) (*DB, error) {
 	// Create veclite backend
 	backend := NewVecLiteBackend(VecLitePath(opts.DataDir))
 
-	// Initialize backend with HNSW config
-	if err := backend.Init(opts.Dimensions, HNSWConfig{
+	// Initialize backend with HNSW config and access mode
+	if err := backend.InitWithOptions(opts.Dimensions, HNSWConfig{
 		M:              opts.HNSWM,
 		EfConstruction: opts.HNSWEfConstruction,
 		EfSearch:       opts.HNSWEfSearch,
-	}); err != nil {
+	}, opts.ReadOnly, opts.SharedRead); err != nil {
 		return nil, fmt.Errorf("failed to initialize veclite: %w", err)
 	}
 

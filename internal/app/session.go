@@ -99,6 +99,82 @@ func OpenSession(ctx context.Context, startDir string) (*Session, error) {
 	}, nil
 }
 
+// OpenReadOnlySession opens a read-only session that uses a shared file lock,
+// allowing multiple processes to read the same database simultaneously (e.g.
+// running `vecgrep search` while the studio TUI is running). The session does
+// not create an embedding provider since no writes are needed.
+func OpenReadOnlySession(ctx context.Context, startDir string) (*Session, error) {
+	_ = ctx
+
+	if startDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("get cwd: %w", err)
+		}
+		startDir = cwd
+	}
+
+	absStart, err := filepath.Abs(startDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve start dir: %w", err)
+	}
+
+	projectRoot, err := config.FindProjectRootFrom(absStart)
+	if err != nil {
+		return nil, fmt.Errorf("%w: run 'vecgrep init' first", ErrNoProject)
+	}
+
+	resolver := config.NewConfigResolution()
+	resolved, err := resolver.Resolve(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config: %w", err)
+	}
+
+	cfg := resolved.Config
+	vecPath := db.VecLitePath(cfg.DataDir)
+	legacyPath := cfg.DBPath
+	if legacyPath == "" {
+		legacyPath = filepath.Join(cfg.DataDir, config.DefaultDBFile)
+	}
+
+	migrationWarning := detectMigrationWarning(legacyPath, vecPath)
+	if migrationWarning != "" {
+		return nil, fmt.Errorf("%w: %s", ErrMigrationRequired, migrationWarning)
+	}
+
+	database, err := db.OpenWithOptions(db.OpenOptions{
+		Dimensions:         cfg.Embedding.Dimensions,
+		DataDir:            cfg.DataDir,
+		HNSWM:              cfg.Vector.VecLite.M,
+		HNSWEfConstruction: cfg.Vector.VecLite.EfConstruction,
+		HNSWEfSearch:       cfg.Vector.VecLite.EfSearch,
+		ReadOnly:           true,
+		SharedRead:         true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open database (read-only): %w", err)
+	}
+
+	provider, err := NewProvider(cfg)
+	if err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("create provider: %w", err)
+	}
+
+	return &Session{
+		ProjectRoot:      projectRoot,
+		ProjectName:      resolved.ProjectName,
+		Config:           cfg,
+		Resolved:         resolved,
+		ConfigSources:    resolver.FoundConfigFiles(),
+		DB:               database,
+		Provider:         provider,
+		VecLitePath:      vecPath,
+		LegacyDBPath:     legacyPath,
+		MigrationWarning: migrationWarning,
+	}, nil
+}
+
 func detectMigrationWarning(legacyPath, vecPath string) string {
 	if legacyPath == "" || vecPath == "" || legacyPath == vecPath {
 		return ""

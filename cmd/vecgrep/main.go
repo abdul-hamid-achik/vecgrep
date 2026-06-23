@@ -523,7 +523,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
-	session, err := app.OpenSession(cmd.Context(), "")
+	session, err := app.OpenReadOnlySession(cmd.Context(), "")
 	if err != nil {
 		return err
 	}
@@ -676,7 +676,7 @@ type PendingChanges struct {
 func runStatus(cmd *cobra.Command, args []string) error {
 	format, _ := cmd.Flags().GetString("format")
 
-	session, err := app.OpenSession(cmd.Context(), "")
+	session, err := app.OpenReadOnlySession(cmd.Context(), "")
 	if err != nil {
 		return err
 	}
@@ -973,7 +973,7 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	session, err := app.OpenSession(cmd.Context(), "")
+	session, err := app.OpenReadOnlySession(cmd.Context(), "")
 	if err != nil {
 		return err
 	}
