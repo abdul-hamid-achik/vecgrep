@@ -252,6 +252,7 @@ func init() {
 	// Index command flags
 	indexCmd.Flags().Bool("full", false, "force full re-index")
 	indexCmd.Flags().StringSlice("ignore", nil, "additional patterns to ignore")
+	indexCmd.Flags().Bool("no-progress", false, "disable the live progress bar (useful for scripts/CI)")
 
 	// Search command flags
 	searchCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
@@ -472,17 +473,37 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	fullReindex, _ := cmd.Flags().GetBool("full")
 	additionalIgnores, _ := cmd.Flags().GetStringSlice("ignore")
 
-	// Set up progress callback
 	verbose, _ := rootCmd.PersistentFlags().GetBool("verbose")
-	progress := func(p index.Progress) {
-		if verbose {
-			fmt.Printf("\r  %s (%d/%d files, %d chunks)",
-				p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
-		}
-	}
 
 	fmt.Printf("Indexing %s...\n", session.ProjectRoot)
 	fmt.Printf("  Model: %s\n", session.Config.Embedding.Model)
+
+	// Determine whether to show the live progress bar.
+	// Show it by default in an interactive terminal; suppress when --no-progress
+	// is set, when --verbose is set (verbose uses its own format), or when stdout
+	// is not a TTY (piped/redirected output should stay line-oriented).
+	showProgress := !verbose && isInteractiveTerminal()
+	if noProgress, _ := cmd.Flags().GetBool("no-progress"); noProgress {
+		showProgress = false
+	}
+
+	// Set up progress callback
+	var progressCB index.ProgressCallback
+	if verbose {
+		progressCB = func(p index.Progress) {
+			fmt.Printf("\r  %s (%d/%d files, %d chunks)",
+				p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
+		}
+	} else if showProgress {
+		progressCB = func(p index.Progress) {
+			elapsed := time.Duration(0)
+			if !p.StartTime.IsZero() {
+				elapsed = time.Since(p.StartTime)
+			}
+			line := render.IndexProgressLine(p.ProcessedFiles, p.TotalFiles, p.TotalChunks, elapsed, render.ProgressBarWidth)
+			fmt.Printf("\r%-80s", line)
+		}
+	}
 
 	// Perform indexing
 	req := app.IndexRequest{
@@ -496,16 +517,18 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Println("  Mode: incremental")
 	}
-	result, err = service.Index(cmd.Context(), req, progress)
+	result, err = service.Index(cmd.Context(), req, progressCB)
 
 	if err != nil {
+		if showProgress {
+			fmt.Println() // newline before error so the bar isn't overwritten
+		}
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
-	if verbose {
-		fmt.Println() // New line after progress
+	if verbose || showProgress {
+		fmt.Println() // new line after progress
 	}
-
 	fmt.Printf("\nIndexing complete:\n")
 	fmt.Printf("  Files processed: %d\n", result.FilesProcessed)
 	fmt.Printf("  Files skipped (unchanged): %d\n", result.FilesSkipped)
