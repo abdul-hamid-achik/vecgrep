@@ -487,47 +487,42 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		showProgress = false
 	}
 
-	// Set up progress callback
-	var progressCB index.ProgressCallback
-	if verbose {
-		progressCB = func(p index.Progress) {
-			fmt.Printf("\r  %s (%d/%d files, %d chunks)",
-				p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
-		}
-	} else if showProgress {
-		progressCB = func(p index.Progress) {
-			elapsed := time.Duration(0)
-			if !p.StartTime.IsZero() {
-				elapsed = time.Since(p.StartTime)
-			}
-			line := render.IndexProgressLine(p.ProcessedFiles, p.TotalFiles, p.TotalChunks, elapsed, render.ProgressBarWidth)
-			fmt.Printf("\r%-80s", line)
-		}
-	}
-
 	// Perform indexing
 	req := app.IndexRequest{
 		Paths:             args,
 		FullReindex:       fullReindex,
 		AdditionalIgnores: additionalIgnores,
 	}
-	var result *index.IndexResult
 	if fullReindex {
 		fmt.Println("  Mode: full re-index")
 	} else {
 		fmt.Println("  Mode: incremental")
 	}
-	result, err = service.Index(cmd.Context(), req, progressCB)
+
+	var result *index.IndexResult
+	if showProgress {
+		// Live gradient progress bar (Bubble Tea), matching codemap's index UX.
+		result, err = runIndexWithBar(cmd.Context(), service, req)
+	} else {
+		var progressCB index.ProgressCallback
+		if verbose {
+			progressCB = func(p index.Progress) {
+				fmt.Printf("\r  %s (%d/%d files, %d chunks)",
+					p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
+			}
+		}
+		result, err = service.Index(cmd.Context(), req, progressCB)
+	}
 
 	if err != nil {
-		if showProgress {
+		if verbose {
 			fmt.Println() // newline before error so the bar isn't overwritten
 		}
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
-	if verbose || showProgress {
-		fmt.Println() // new line after progress
+	if verbose {
+		fmt.Println() // new line after the verbose \r line
 	}
 	fmt.Printf("\nIndexing complete:\n")
 	fmt.Printf("  Files processed: %d\n", result.FilesProcessed)
