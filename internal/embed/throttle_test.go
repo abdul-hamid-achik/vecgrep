@@ -51,15 +51,15 @@ func TestThrottledProviderEmbedCaches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first embed: %v", err)
 	}
-	calls1 := mock.embedCalls
+	calls1 := mock.embedCalls.Load()
 
 	// Second call with same text should use cache
 	_, err = p.Embed(ctx, "test query")
 	if err != nil {
 		t.Fatalf("second embed: %v", err)
 	}
-	if mock.embedCalls != calls1 {
-		t.Errorf("expected %d embed calls (cached), got %d", calls1, mock.embedCalls)
+	if mock.embedCalls.Load() != calls1 {
+		t.Errorf("expected %d embed calls (cached), got %d", calls1, mock.embedCalls.Load())
 	}
 }
 

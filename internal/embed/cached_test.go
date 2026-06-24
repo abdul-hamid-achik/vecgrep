@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -13,12 +14,12 @@ type mockProvider struct {
 	embedBatchFunc func(ctx context.Context, texts []string) ([][]float32, error)
 	model          string
 	dimensions     int
-	embedCalls     int
-	batchCalls     int
+	embedCalls     atomic.Int32
+	batchCalls     atomic.Int32
 }
 
 func (m *mockProvider) Embed(ctx context.Context, text string) ([]float32, error) {
-	m.embedCalls++
+	m.embedCalls.Add(1)
 	if m.embedFunc != nil {
 		return m.embedFunc(ctx, text)
 	}
@@ -26,7 +27,7 @@ func (m *mockProvider) Embed(ctx context.Context, text string) ([]float32, error
 }
 
 func (m *mockProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	m.batchCalls++
+	m.batchCalls.Add(1)
 	if m.embedBatchFunc != nil {
 		return m.embedBatchFunc(ctx, texts)
 	}
@@ -86,8 +87,8 @@ func TestCachedProvider_Embed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if mock.embedCalls != 1 {
-		t.Errorf("embedCalls = %d, want 1", mock.embedCalls)
+	if mock.embedCalls.Load() != 1 {
+		t.Errorf("embedCalls = %d, want 1", mock.embedCalls.Load())
 	}
 
 	// Second call with same text should use cache
@@ -95,8 +96,8 @@ func TestCachedProvider_Embed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if mock.embedCalls != 1 {
-		t.Errorf("embedCalls = %d, want 1 (should use cache)", mock.embedCalls)
+	if mock.embedCalls.Load() != 1 {
+		t.Errorf("embedCalls = %d, want 1 (should use cache)", mock.embedCalls.Load())
 	}
 
 	// Results should be equal
@@ -109,8 +110,8 @@ func TestCachedProvider_Embed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if mock.embedCalls != 2 {
-		t.Errorf("embedCalls = %d, want 2", mock.embedCalls)
+	if mock.embedCalls.Load() != 2 {
+		t.Errorf("embedCalls = %d, want 2", mock.embedCalls.Load())
 	}
 }
 
@@ -145,8 +146,8 @@ func TestCachedProvider_EmbedBatch(t *testing.T) {
 	if len(results1) != 3 {
 		t.Errorf("results length = %d, want 3", len(results1))
 	}
-	if mock.batchCalls != 1 {
-		t.Errorf("batchCalls = %d, want 1", mock.batchCalls)
+	if mock.batchCalls.Load() != 1 {
+		t.Errorf("batchCalls = %d, want 1", mock.batchCalls.Load())
 	}
 
 	// Same batch should use cache entirely
@@ -154,8 +155,8 @@ func TestCachedProvider_EmbedBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if mock.batchCalls != 1 {
-		t.Errorf("batchCalls = %d, want 1 (all cached)", mock.batchCalls)
+	if mock.batchCalls.Load() != 1 {
+		t.Errorf("batchCalls = %d, want 1 (all cached)", mock.batchCalls.Load())
 	}
 	if len(results2) != 3 {
 		t.Errorf("results length = %d, want 3", len(results2))
@@ -169,7 +170,7 @@ func TestCachedProvider_EmbedBatchPartialCache(t *testing.T) {
 
 	// Cache one query
 	_, _ = cached.Embed(ctx, "query1")
-	mock.embedCalls = 0 // Reset
+	mock.embedCalls.Store(0) // Reset
 
 	// Batch with mix of cached and uncached
 	texts := []string{"query1", "query2", "query3"}
@@ -179,8 +180,8 @@ func TestCachedProvider_EmbedBatchPartialCache(t *testing.T) {
 	}
 
 	// Should only call batch for uncached (2 items)
-	if mock.batchCalls != 1 {
-		t.Errorf("batchCalls = %d, want 1", mock.batchCalls)
+	if mock.batchCalls.Load() != 1 {
+		t.Errorf("batchCalls = %d, want 1", mock.batchCalls.Load())
 	}
 }
 
@@ -243,9 +244,9 @@ func TestCachedProvider_ClearCache(t *testing.T) {
 	}
 
 	// After clear, should call provider again
-	mock.embedCalls = 0
+	mock.embedCalls.Store(0)
 	_, _ = cached.Embed(ctx, "test1")
-	if mock.embedCalls != 1 {
+	if mock.embedCalls.Load() != 1 {
 		t.Error("should call provider after cache clear")
 	}
 }

@@ -149,7 +149,7 @@ func NewThrottledProvider(inner Provider, cfg ThrottleConfig) *ThrottledProvider
 }
 
 // Embed generates an embedding for the given text with throttling.
-func (p *ThrottledProvider) Embed(ctx context.Context, text string) ([]float32, error) {
+func (p *ThrottledProvider) Embed(ctx context.Context, text string) (vec []float32, err error) {
 	if text == "" {
 		return nil, ErrEmptyText
 	}
@@ -161,12 +161,13 @@ func (p *ThrottledProvider) Embed(ctx context.Context, text string) ([]float32, 
 		}
 	}
 
-	// Dedup: if the same text is already in flight, wait for it
+	// Dedup: atomically check if the same text is already in flight. If so,
+	// wait for the leader's result. If not, we become the leader.
 	key := ""
 	if p.cache != nil {
 		key = p.cache.Key(text)
 	}
-	if entry := p.joinInFlight(key); entry != nil {
+	if entry := p.joinOrRegisterInFlight(key); entry != nil {
 		select {
 		case <-entry.done:
 			return entry.result, entry.err
@@ -174,10 +175,8 @@ func (p *ThrottledProvider) Embed(ctx context.Context, text string) ([]float32, 
 			return nil, ErrContextCanceled
 		}
 	}
-
-	// Register ourselves as the in-flight request for this key
-	p.registerInFlight(key)
-	defer p.leaveInFlight(key)
+	// We are the leader. Signal waiters with our result when we return.
+	defer p.leaveInFlight(key, vec, err)
 
 	priority := priorityFromContext(ctx)
 
@@ -349,39 +348,36 @@ func (p *ThrottledProvider) worker() {
 	}
 }
 
-// joinInFlight checks if there's already an in-flight request for the given
-// cache key. If so, it returns the dedup entry so the caller can wait.
-// If not, the caller should call registerInFlight to claim the slot.
-func (p *ThrottledProvider) joinInFlight(key string) *dedupEntry {
+// joinOrRegisterInFlight atomically checks if there's already an in-flight
+// request for the given cache key. If so, it returns the existing dedup entry
+// (the caller should wait on it). If not, it creates and registers a new entry
+// and returns nil (the caller is the leader and should proceed to embed).
+//
+// This is a single atomic operation to avoid the race where two goroutines
+// both see no entry and both proceed to embed.
+func (p *ThrottledProvider) joinOrRegisterInFlight(key string) *dedupEntry {
 	if key == "" {
 		return nil
 	}
 	p.dedupMu.Lock()
 	defer p.dedupMu.Unlock()
-	return p.dedup[key]
+	if entry, ok := p.dedup[key]; ok {
+		return entry // someone else is the leader
+	}
+	p.dedup[key] = &dedupEntry{done: make(chan struct{})}
+	return nil // we are the leader
 }
 
-// registerInFlight claims the in-flight slot for the given cache key.
-// If the key is empty, this is a no-op.
-func (p *ThrottledProvider) registerInFlight(key string) {
-	if key == "" {
-		return
-	}
-	p.dedupMu.Lock()
-	if _, exists := p.dedup[key]; !exists {
-		p.dedup[key] = &dedupEntry{done: make(chan struct{})}
-	}
-	p.dedupMu.Unlock()
-}
-
-// leaveInFlight removes the in-flight dedup entry for the given key and
-// signals any waiters.
-func (p *ThrottledProvider) leaveInFlight(key string) {
+// leaveInFlight records the result, removes the in-flight dedup entry for
+// the given key, and signals any waiters.
+func (p *ThrottledProvider) leaveInFlight(key string, result []float32, err error) {
 	if key == "" {
 		return
 	}
 	p.dedupMu.Lock()
 	if entry, ok := p.dedup[key]; ok {
+		entry.result = result
+		entry.err = err
 		close(entry.done)
 		delete(p.dedup, key)
 	}
