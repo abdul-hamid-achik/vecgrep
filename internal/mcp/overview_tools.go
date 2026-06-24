@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -435,6 +436,23 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 	var sb strings.Builder
 	relPath, _ := filepath.Rel(s.projectRoot, filePath)
 	fmt.Fprintf(&sb, "# Related Files for: %s\n\n", relPath)
+
+	// Try codemap integration first when available
+	if s.codemap != nil && s.codemap.Available() {
+		ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+		related, err := s.codemap.RelatedFiles(ctx2, s.projectRoot, relPath, limit)
+		cancel()
+		if err == nil && len(related) > 0 {
+			sb.WriteString("## Graph-Based Related Files (via codemap)\n\n")
+			for _, rf := range related {
+				fmt.Fprintf(&sb, "- `%s` (confidence: %.2f) — %s\n", rf.RelativePath, rf.Confidence, rf.Reason)
+			}
+			sb.WriteString("\n")
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+			}, nil, nil
+		}
+	}
 
 	// Detect language
 	ext := strings.ToLower(filepath.Ext(filePath))

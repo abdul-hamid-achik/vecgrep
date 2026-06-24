@@ -156,6 +156,21 @@ func GetProjectDataDir(projectName string) (string, error) {
 	return filepath.Join(projectsDir, projectName), nil
 }
 
+// GetProjectBranchDataDir returns the data directory for a specific branch
+// of a project stored globally. The branch name is sanitized to be
+// filesystem-safe. When branch is empty, this returns the same path as
+// GetProjectDataDir (the legacy flat layout).
+func GetProjectBranchDataDir(projectName, branch string) (string, error) {
+	base, err := GetProjectDataDir(projectName)
+	if err != nil {
+		return "", err
+	}
+	if branch == "" {
+		return base, nil
+	}
+	return filepath.Join(base, "branches", branch), nil
+}
+
 // DeriveProjectName derives a unique project name from a directory path.
 // Uses the directory name, prepending parent if needed to avoid collisions.
 func DeriveProjectName(dirPath string, existingNames map[string]bool) string {

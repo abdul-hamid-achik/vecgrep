@@ -325,6 +325,16 @@ func isolateConfigTestEnv(t *testing.T) string {
 	t.Setenv("VECGREP_VECTOR_VECLITE_M", "")
 	t.Setenv("VECGREP_VECTOR_VECLITE_EF_CONSTRUCTION", "")
 	t.Setenv("VECGREP_VECTOR_VECLITE_EF_SEARCH", "")
+	t.Setenv("VECGREP_CODEMAP_ENABLED", "")
+	t.Setenv("VECGREP_CODEMAP_BIN", "")
+	t.Setenv("VECGREP_CODEMAP_MCP_ENDPOINT", "")
+	t.Setenv("VECGREP_CODEMAP_STRUCTURAL_WEIGHT", "")
+	t.Setenv("VECGREP_DAEMON_AUTOSTART", "")
+	t.Setenv("VECGREP_DAEMON_IDLE_TIMEOUT", "")
+	t.Setenv("VECGREP_DAEMON_EMBED_WORKERS", "")
+	t.Setenv("VECGREP_DAEMON_EMBED_RPS", "")
+	t.Setenv("VECGREP_DAEMON_EMBED_MAX_IN_FLIGHT", "")
+	t.Setenv("VECGREP_DAEMON_DEBOUNCE", "")
 	return home
 }
 

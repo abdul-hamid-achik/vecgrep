@@ -1,0 +1,31 @@
+version: 1
+name: config_codemap_enabled
+intent: |
+    a user can enable the codemap integration from the CLI and inspect the resolved config.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; \"$ROOT/bin/vecgrep\" config set codemap.enabled true >/dev/null; \"$ROOT/bin/vecgrep\" config set codemap.structural_weight 0.3 >/dev/null; \"$ROOT/bin/vecgrep\" config show"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: config_codemap
+outcomes:
+    - id: codemap_enabled_visible
+      description: codemap enabled is shown in config
+      verify:
+        screen:
+            contains: "codemap.enabled: true"
+    - id: codemap_weight_visible
+      description: codemap structural weight is shown in config
+      verify:
+        screen:
+            contains: "codemap.structural_weight: 0.30"

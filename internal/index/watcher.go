@@ -372,9 +372,18 @@ func WatchAndIndex(ctx context.Context, indexer *Indexer, rootPath string, cfg W
 			}
 		}
 
-		// Handle removed files
-		// Note: File removal from index is handled by the indexer
-		// when it can't find the file during next index operation
+		// Handle removed files — delete them from the index
+		if len(toRemove) > 0 {
+			for p := range toRemove {
+				relPath, err := filepath.Rel(rootPath, p)
+				if err != nil {
+					relPath = p
+				}
+				if _, err := indexer.db.DeleteFile(ctx, relPath); err != nil {
+					log.Printf("auto-reindex: delete removed file %s: %v", relPath, err)
+				}
+			}
+		}
 	})
 
 	if err := watcher.Start(ctx); err != nil {

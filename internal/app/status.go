@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
@@ -54,6 +56,13 @@ type StatusResponse struct {
 	// is surfaced in Studio status so users can see at a glance whether
 	// semantic search will work before issuing a query.
 	ProviderHealth string
+
+	// HasCodemapGraph reports whether codemap has an index for this project
+	// (checked by stat-ing codemap's XDG registry). When true, the codemap
+	// integration can use real call-graph data for related-files and
+	// structural re-ranking. This is best-effort — a false value does not mean
+	// codemap is uninstalled, just that no graph index was found.
+	HasCodemapGraph bool
 }
 
 func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {
@@ -138,6 +147,11 @@ func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {
 		}
 	}
 
+	// Check whether codemap has an index for this project by stat-ing its
+	// XDG registry directory. Best-effort: missing registry or missing
+	// codemap installation simply reports false.
+	hasCodemapGraph := checkCodemapRegistry(s.session.ProjectRoot)
+
 	return &StatusResponse{
 		ProjectRoot:      s.session.ProjectRoot,
 		ProjectName:      s.session.ProjectName,
@@ -170,6 +184,7 @@ func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {
 		HNSWEfSearch:       hnswEfSearch,
 		VecliteVersion:     veclite.Version,
 		ProviderHealth:     providerHealth,
+		HasCodemapGraph:    hasCodemapGraph,
 	}, nil
 }
 
@@ -179,4 +194,64 @@ func fileSize(path string) int64 {
 		return 0
 	}
 	return info.Size()
+}
+
+// checkCodemapRegistry reports whether codemap has registered an index for
+// the given project root. It checks codemap's XDG data directory for a
+// registry entry matching the project path. Best-effort: any error (missing
+// XDG dir, missing codemap installation, unreadable registry) returns false.
+func checkCodemapRegistry(projectRoot string) bool {
+	// Resolve the XDG data directory for codemap
+	xdgData := os.Getenv("XDG_DATA_HOME")
+	if xdgData == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		xdgData = filepath.Join(home, ".local", "share")
+	}
+	// codemap stores its registry under <xdg>/codemap/
+	codemapDir := filepath.Join(xdgData, "codemap")
+	// Check for a projects registry file or a per-project index directory.
+	// codemap uses a SQLite registry at <codemapDir>/codemap.db or a
+	// projects subdirectory. We stat for the directory existence as a
+	// lightweight signal.
+	if info, err := os.Stat(codemapDir); err != nil || !info.IsDir() {
+		return false
+	}
+	// Look for a projects registry that might reference this project.
+	// The codemap registry is at <codemapDir>/projects/ or a SQLite file.
+	// We check for any file containing the project path hash.
+	// For now, a simple heuristic: if the codemap directory exists and
+	// contains any .db or index files, assume codemap is active for some
+	// project. A more precise check would parse the registry.
+	projectsDir := filepath.Join(codemapDir, "projects")
+	if info, err := os.Stat(projectsDir); err == nil && info.IsDir() {
+		// Check if there's an entry matching the project root
+		absRoot, _ := filepath.Abs(projectRoot)
+		entries, err := os.ReadDir(projectsDir)
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() && entry.Name() == sanitizeForPath(absRoot) {
+					return true
+				}
+			}
+		}
+	}
+	// Fall back: codemap.db exists means codemap is installed and has data
+	dbFile := filepath.Join(codemapDir, "codemap.db")
+	if _, err := os.Stat(dbFile); err == nil {
+		return true
+	}
+	return false
+}
+
+// sanitizeForPath converts a filesystem path into a safe directory name
+// component (replacing path separators with dashes). This is a best-effort
+// match against codemap's registry naming convention.
+func sanitizeForPath(path string) string {
+	s := filepath.ToSlash(path)
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, " ", "-")
+	return strings.Trim(s, "-")
 }

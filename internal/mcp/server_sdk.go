@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
@@ -110,6 +111,9 @@ type RelatedFilesInput struct {
 	Limit        int    `json:"limit,omitempty" jsonschema:"Maximum number of related files to return (default: 10)."`
 }
 
+// BranchStatusInput is the input for vecgrep_branch_status (empty).
+type BranchStatusInput struct{}
+
 // SDKServer wraps the official MCP SDK server.
 type SDKServer struct {
 	server      *sdkmcp.Server
@@ -118,6 +122,10 @@ type SDKServer struct {
 	projectRoot string
 	searcher    *search.Searcher
 	initialized bool
+
+	// Codemap integration client (nil when codemap is disabled or unavailable)
+	codemap    *CodemapClient
+	codemapCfg config.CodemapConfig
 
 	// Memory store (lazy initialized)
 	memoryStore   *memory.MemoryStore
@@ -130,6 +138,7 @@ type SDKServerConfig struct {
 	DB          *db.DB
 	Provider    embed.Provider
 	ProjectRoot string
+	Codemap     config.CodemapConfig
 }
 
 // NewSDKServer creates a new MCP server using the official SDK.
@@ -139,6 +148,8 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		provider:    cfg.Provider,
 		projectRoot: cfg.ProjectRoot,
 		initialized: cfg.DB != nil && cfg.ProjectRoot != "",
+		codemap:     NewCodemapClient(cfg.Codemap),
+		codemapCfg:  cfg.Codemap,
 	}
 	if s.initialized {
 		s.searcher = search.NewSearcher(cfg.DB, cfg.Provider)
@@ -210,6 +221,11 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Name:        "vecgrep_related_files",
 		Description: "Find files related to a given file (imports, tests, configs). Useful for understanding code dependencies.",
 	}, s.handleRelatedFiles)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_branch_status",
+		Description: "Show per-branch index status: current git branch, HEAD SHA, and all known branch indexes with their vector counts and snapshot IDs.",
+	}, s.handleBranchStatus)
 
 	// Memory tools (global, not project-specific)
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -489,6 +505,8 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	s.projectRoot = projectPath
 	s.searcher = search.NewSearcher(database, provider)
 	s.initialized = true
+	s.codemap = NewCodemapClient(cfg.Codemap)
+	s.codemapCfg = cfg.Codemap
 
 	// Get vector backend info
 	vecVersion, _ := database.VecVersion()
@@ -672,7 +690,9 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 			}
 		}
 
+		s.rerankWithCodemap(ctx, results, s.codemapStructuralWeight())
 		formatSearchResults(&sb, results)
+		s.annotateSearchHits(ctx, results, input.Query)
 	} else {
 		results, err := s.searcher.Search(ctx, input.Query, opts)
 		if err != nil {
@@ -689,7 +709,9 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 			}
 		}
 
+		s.rerankWithCodemap(ctx, results, s.codemapStructuralWeight())
 		formatSearchResults(&sb, results)
+		s.annotateSearchHits(ctx, results, input.Query)
 	}
 
 	return &sdkmcp.CallToolResult{
@@ -830,6 +852,24 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 				sb.WriteString("\n**Action needed:** Run vecgrep_index to update the index.\n")
 			}
 		}
+
+		// Report codemap integration status
+		if cfg.Codemap.Enabled {
+			sb.WriteString("\nCodemap integration: enabled\n")
+			if s.codemap != nil && s.codemap.Available() {
+				sb.WriteString("  Status: connected\n")
+				if status, _ := s.codemap.Status(ctx, s.projectRoot); status != nil && status.Indexed {
+					fmt.Fprintf(&sb, "  Graph: %d nodes, %d edges\n", status.Nodes, status.Edges)
+					if status.Stale > 0 {
+						fmt.Fprintf(&sb, "  Stale files: %d\n", status.Stale)
+					}
+				} else {
+					sb.WriteString("  Graph: not indexed (run 'codemap index' to build)\n")
+				}
+			} else {
+				sb.WriteString("  Status: codemap binary not found\n")
+			}
+		}
 	}
 
 	return &sdkmcp.CallToolResult{
@@ -959,6 +999,8 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 		sb.WriteString("\n```\n\n")
 	}
 
+	s.annotateSearchHits(ctx, results, "similar")
+
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
 	}, nil, nil
@@ -1058,4 +1100,162 @@ func (s *SDKServer) handleReset(ctx context.Context, req *sdkmcp.CallToolRequest
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Database reset complete. All indexed data has been cleared.\nRun vecgrep_index to re-index your codebase."}},
 	}, nil, nil
+}
+
+// handleBranchStatus handles the vecgrep_branch_status tool.
+func (s *SDKServer) handleBranchStatus(ctx context.Context, req *sdkmcp.CallToolRequest, input BranchStatusInput) (*sdkmcp.CallToolResult, any, error) {
+	if err := s.ensureInitialized(ctx); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	idx, info, err := app.BranchStatus(ctx, s.projectRoot, s.projectName())
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Branch status error: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Branch Index Status:\n\n")
+	sb.WriteString("Git:\n")
+	if info != nil {
+		fmt.Fprintf(&sb, "  Repo root: %s\n", info.Root)
+		if info.Detached {
+			fmt.Fprintf(&sb, "  HEAD: detached (%s)\n", info.Head)
+		} else {
+			fmt.Fprintf(&sb, "  Branch: %s\n", info.Branch)
+			fmt.Fprintf(&sb, "  HEAD: %s\n", info.Head)
+		}
+	} else {
+		sb.WriteString("  Not a git repository\n")
+	}
+
+	sb.WriteString("\nBranch Indexes:\n")
+	if idx == nil || len(idx.Branches) == 0 {
+		sb.WriteString("  No branch indexes found.\n")
+	} else {
+		fmt.Fprintf(&sb, "  Active: %s\n", idx.ActiveBranch)
+		for name, entry := range idx.Branches {
+			fmt.Fprintf(&sb, "\n  %s:\n", name)
+			fmt.Fprintf(&sb, "    Base SHA: %s\n", entry.BaseSHA)
+			fmt.Fprintf(&sb, "    Vectors: %d\n", entry.VectorCount)
+			if entry.StashID != "" {
+				fmt.Fprintf(&sb, "    Stash ID: %s\n", entry.StashID)
+			}
+		}
+	}
+
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+	}, nil, nil
+}
+
+// projectName returns the current project name from the resolved config.
+func (s *SDKServer) projectName() string {
+	if s.db == nil {
+		return ""
+	}
+	resolved, err := config.LoadResolved(s.projectRoot)
+	if err != nil || resolved == nil {
+		return ""
+	}
+	return resolved.ProjectName
+}
+
+// annotateSearchHits pins search/similar results as codemap annotations
+// so they persist across reindex and surface in codemap's context views.
+// This is best-effort: errors are silently ignored and never affect the
+// search response returned to the caller.
+func (s *SDKServer) annotateSearchHits(ctx context.Context, results []search.Result, query string) {
+	if s.codemap == nil || !s.codemap.Available() || len(results) == 0 {
+		return
+	}
+	// Use a background context so annotation outlives the request
+	annotateCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	for _, r := range results {
+		if r.SymbolName == "" {
+			continue
+		}
+		note := fmt.Sprintf("vecgrep semantic hit (score %.2f): %s", r.Score, truncate(query, 120))
+		_ = s.codemap.Annotate(annotateCtx, s.projectRoot, r.SymbolName, note, "vecgrep", map[string]any{
+			"score":      r.Score,
+			"query":      query,
+			"file":       r.RelativePath,
+			"start_line": r.StartLine,
+			"end_line":   r.EndLine,
+			"language":   r.Language,
+			"chunk_type": r.ChunkType,
+		})
+	}
+}
+
+// truncate clips a string to n characters, appending an ellipsis if truncated.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "..."
+}
+
+// codemapStructuralWeight returns the configured structural re-ranking
+// weight, defaulting to 0.15 when not explicitly set.
+func (s *SDKServer) codemapStructuralWeight() float32 {
+	if s.codemapCfg.StructuralWeight > 0 {
+		return s.codemapCfg.StructuralWeight
+	}
+	return 0.15
+}
+
+// rerankWithCodemap re-orders search results using codemap's structural
+// importance data (fan-in hub scores). The re-ranked results are written
+// back into the slice in-place. This is best-effort: if codemap is
+// unavailable or returns no data, results are left in their original order.
+func (s *SDKServer) rerankWithCodemap(ctx context.Context, results []search.Result, structuralWeight float32) {
+	if s.codemap == nil || !s.codemap.Available() || structuralWeight <= 0 || len(results) <= 1 {
+		return
+	}
+
+	rerankInput := make([]CodemapRerankResult, len(results))
+	for i, r := range results {
+		rerankInput[i] = CodemapRerankResult{
+			Result: codemapSearchResult{
+				RelativePath: r.RelativePath,
+				SymbolName:   r.SymbolName,
+				StartLine:    r.StartLine,
+				Score:        r.Score,
+			},
+		}
+	}
+
+	reranked := s.codemap.Rerank(ctx, s.projectRoot, rerankInput, structuralWeight)
+
+	// Reorder the original results slice to match reranked order.
+	// We find each reranked item's original index by matching path+line.
+	used := make([]bool, len(results))
+	reordered := make([]search.Result, 0, len(results))
+	for _, rr := range reranked {
+		for j, orig := range results {
+			if used[j] {
+				continue
+			}
+			if orig.RelativePath == rr.Result.RelativePath && orig.StartLine == rr.Result.StartLine {
+				reordered = append(reordered, orig)
+				used[j] = true
+				break
+			}
+		}
+	}
+	// Append any unmatched results at the end
+	for j, u := range used {
+		if !u {
+			reordered = append(reordered, results[j])
+		}
+	}
+	copy(results, reordered)
 }

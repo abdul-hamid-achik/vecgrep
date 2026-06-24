@@ -1,12 +1,15 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/abdul-hamid-achik/vecgrep/internal/git"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
@@ -52,6 +55,14 @@ type ResolvedConfig struct {
 	ProjectName  string
 	Sources      map[string]ConfigSource // which source each key came from
 	IsGlobalMode bool                    // whether using global project management
+
+	// Branch is the detected git branch name (empty for non-git repos or
+	// detached HEAD). When non-empty, DataDir is redirected to a
+	// branch-specific subdirectory so each branch has its own index.
+	Branch    string
+	GitHead   string // short HEAD SHA
+	Detached  bool   // true when HEAD is detached
+	IsGitRepo bool   // true when the project root is inside a git repository
 }
 
 // ConfigResolution handles the multi-level config resolution
@@ -162,6 +173,32 @@ func (r *ConfigResolution) Resolve(projectDir string) (*ResolvedConfig, error) {
 	// Step 5: Apply environment variables (highest priority)
 	r.applyEnvironment(result.Config)
 
+	// Step 5b: Detect git branch and redirect DataDir to a branch-specific
+	// subdirectory when in global mode. This ensures each branch has its
+	// own index, so switching branches doesn't produce stale results.
+	// Non-git repos and detached HEAD fall back to the legacy flat layout.
+	if projectDir != "" && result.IsGlobalMode && result.ProjectName != "" {
+		branchInfo, err := git.Detect(r.resolveCtx(), projectDir)
+		if err == nil && branchInfo != nil && !branchInfo.Detached && branchInfo.Branch != "" {
+			result.Branch = branchInfo.Branch
+			result.GitHead = branchInfo.Head
+			result.IsGitRepo = true
+
+			// Redirect DataDir to the branch-specific subdirectory
+			sanitized := git.SanitizeBranch(branchInfo.Branch)
+			branchDir, dirErr := GetProjectBranchDataDir(result.ProjectName, sanitized)
+			if dirErr == nil {
+				result.Config.DataDir = branchDir
+				result.Config.DBPath = filepath.Join(branchDir, DefaultDBFile)
+			}
+		} else if err == nil && branchInfo != nil {
+			// Git repo but detached HEAD — use legacy flat dir
+			result.GitHead = branchInfo.Head
+			result.IsGitRepo = true
+			result.Detached = branchInfo.Detached
+		}
+	}
+
 	// Update paths relative to project directory if not absolute
 	if projectDir != "" {
 		result.ProjectRoot = projectDir
@@ -174,6 +211,14 @@ func (r *ConfigResolution) Resolve(projectDir string) (*ResolvedConfig, error) {
 	}
 
 	return result, nil
+}
+
+// resolveCtx returns a context for git operations during config resolution.
+// Uses a short timeout so git detection never blocks the caller for long.
+func (r *ConfigResolution) resolveCtx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = cancel // The caller doesn't need to cancel; timeout handles it.
+	return ctx
 }
 
 // loadYAMLConfig loads a config from a YAML file
@@ -206,6 +251,8 @@ func (r *ConfigResolution) mergeConfig(dst, src *Config) {
 	mergeSearchConfig(dst, src)
 	mergeServerConfigWithPresence(dst, src)
 	mergeVectorConfig(dst, src)
+	mergeCodemapConfig(dst, src)
+	mergeDaemonConfig(dst, src)
 }
 
 func mergeEmbeddingConfig(dst, src *EmbeddingConfig) {
@@ -292,6 +339,42 @@ func mergeVectorConfig(dst, src *Config) {
 	}
 }
 
+func mergeCodemapConfig(dst, src *Config) {
+	if src.Codemap.Enabled || src.has("codemap.enabled") {
+		dst.Codemap.Enabled = src.Codemap.Enabled
+	}
+	if src.Codemap.Bin != "" {
+		dst.Codemap.Bin = src.Codemap.Bin
+	}
+	if src.Codemap.MCPEndpoint != "" {
+		dst.Codemap.MCPEndpoint = src.Codemap.MCPEndpoint
+	}
+	if src.Codemap.StructuralWeight > 0 {
+		dst.Codemap.StructuralWeight = src.Codemap.StructuralWeight
+	}
+}
+
+func mergeDaemonConfig(dst, src *Config) {
+	if src.Daemon.Autostart || src.has("daemon.autostart") {
+		dst.Daemon.Autostart = src.Daemon.Autostart
+	}
+	if src.Daemon.IdleTimeout != 0 || src.has("daemon.idle_timeout") {
+		dst.Daemon.IdleTimeout = src.Daemon.IdleTimeout
+	}
+	if src.Daemon.EmbedWorkers != 0 || src.has("daemon.embed_workers") {
+		dst.Daemon.EmbedWorkers = src.Daemon.EmbedWorkers
+	}
+	if src.Daemon.EmbedRPS > 0 || src.has("daemon.embed_rps") {
+		dst.Daemon.EmbedRPS = src.Daemon.EmbedRPS
+	}
+	if src.Daemon.EmbedMaxInFlight != 0 || src.has("daemon.embed_max_in_flight") {
+		dst.Daemon.EmbedMaxInFlight = src.Daemon.EmbedMaxInFlight
+	}
+	if src.Daemon.Debounce != 0 || src.has("daemon.debounce") {
+		dst.Daemon.Debounce = src.Daemon.Debounce
+	}
+}
+
 // applyEnvironment applies VECGREP_* environment variables
 func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 	// Use viper for environment variable binding
@@ -374,6 +457,56 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 	if val := os.Getenv("VECGREP_VECTOR_VECLITE_EF_SEARCH"); val != "" {
 		if ef, err := strconv.Atoi(val); err == nil && ef > 0 {
 			cfg.Vector.VecLite.EfSearch = ef
+		}
+	}
+
+	// Codemap integration settings
+	if val := os.Getenv("VECGREP_CODEMAP_ENABLED"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			cfg.Codemap.Enabled = enabled
+		}
+	}
+	if val := os.Getenv("VECGREP_CODEMAP_BIN"); val != "" {
+		cfg.Codemap.Bin = val
+	}
+	if val := os.Getenv("VECGREP_CODEMAP_MCP_ENDPOINT"); val != "" {
+		cfg.Codemap.MCPEndpoint = val
+	}
+	if val := os.Getenv("VECGREP_CODEMAP_STRUCTURAL_WEIGHT"); val != "" {
+		if w, err := strconv.ParseFloat(val, 32); err == nil {
+			cfg.Codemap.StructuralWeight = float32(w)
+		}
+	}
+
+	// Daemon settings
+	if val := os.Getenv("VECGREP_DAEMON_AUTOSTART"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			cfg.Daemon.Autostart = enabled
+		}
+	}
+	if val := os.Getenv("VECGREP_DAEMON_IDLE_TIMEOUT"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil {
+			cfg.Daemon.IdleTimeout = n
+		}
+	}
+	if val := os.Getenv("VECGREP_DAEMON_EMBED_WORKERS"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.Daemon.EmbedWorkers = n
+		}
+	}
+	if val := os.Getenv("VECGREP_DAEMON_EMBED_RPS"); val != "" {
+		if r, err := strconv.ParseFloat(val, 64); err == nil {
+			cfg.Daemon.EmbedRPS = r
+		}
+	}
+	if val := os.Getenv("VECGREP_DAEMON_EMBED_MAX_IN_FLIGHT"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.Daemon.EmbedMaxInFlight = n
+		}
+	}
+	if val := os.Getenv("VECGREP_DAEMON_DEBOUNCE"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+			cfg.Daemon.Debounce = n
 		}
 	}
 }
@@ -514,6 +647,26 @@ func ShowResolvedConfig(cfg *Config, sources []string) string {
 	fmt.Fprintf(&sb, "  veclite.m: %d\n", cfg.Vector.VecLite.M)
 	fmt.Fprintf(&sb, "  veclite.ef_construction: %d\n", cfg.Vector.VecLite.EfConstruction)
 	fmt.Fprintf(&sb, "  veclite.ef_search: %d\n", cfg.Vector.VecLite.EfSearch)
+
+	// Codemap settings
+	sb.WriteString("\nCodemap:\n")
+	fmt.Fprintf(&sb, "  codemap.enabled: %t\n", cfg.Codemap.Enabled)
+	if cfg.Codemap.Bin != "" {
+		fmt.Fprintf(&sb, "  codemap.bin: %s\n", cfg.Codemap.Bin)
+	}
+	if cfg.Codemap.MCPEndpoint != "" {
+		fmt.Fprintf(&sb, "  codemap.mcp_endpoint: %s\n", cfg.Codemap.MCPEndpoint)
+	}
+	fmt.Fprintf(&sb, "  codemap.structural_weight: %.2f\n", cfg.Codemap.StructuralWeight)
+
+	// Daemon settings
+	sb.WriteString("\nDaemon:\n")
+	fmt.Fprintf(&sb, "  daemon.autostart: %t\n", cfg.Daemon.Autostart)
+	fmt.Fprintf(&sb, "  daemon.idle_timeout: %d\n", cfg.Daemon.IdleTimeout)
+	fmt.Fprintf(&sb, "  daemon.embed_workers: %d\n", cfg.Daemon.EmbedWorkers)
+	fmt.Fprintf(&sb, "  daemon.embed_rps: %.1f\n", cfg.Daemon.EmbedRPS)
+	fmt.Fprintf(&sb, "  daemon.embed_max_in_flight: %d\n", cfg.Daemon.EmbedMaxInFlight)
+	fmt.Fprintf(&sb, "  daemon.debounce: %d\n", cfg.Daemon.Debounce)
 
 	// Sources
 	if len(sources) > 0 {

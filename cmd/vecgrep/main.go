@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,7 +16,9 @@ import (
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
+	"github.com/abdul-hamid-achik/vecgrep/internal/daemon"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
+	"github.com/abdul-hamid-achik/vecgrep/internal/git"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 	"github.com/abdul-hamid-achik/vecgrep/internal/mcp"
 	"github.com/abdul-hamid-achik/vecgrep/internal/render"
@@ -234,6 +237,82 @@ var projectsRemoveCmd = &cobra.Command{
 	RunE:  runProjectsRemove,
 }
 
+// --- branch commands ---
+
+var branchCmd = &cobra.Command{
+	Use:   "branch",
+	Short: "Manage per-branch indexes",
+	Long: `Manage per-branch vector indexes.
+
+When inside a git repository, vecgrep keeps a separate index per branch
+so switching branches doesn't produce stale results. Branch indexes are
+stored under ~/.vecgrep/projects/{name}/branches/{branch}/.
+
+Subcommands:
+  switch       Switch the active index to the current (or specified) branch
+  snapshot     Snapshot the current branch's index to fcheap
+  status       Show branch index status
+  install-hook Install a post-checkout git hook for automatic branch switching`,
+}
+
+var branchSwitchCmd = &cobra.Command{
+	Use:   "switch [branch]",
+	Short: "Switch the active index to the current (or specified) branch",
+	RunE:  runBranchSwitch,
+}
+
+var branchSnapshotCmd = &cobra.Command{
+	Use:   "snapshot",
+	Short: "Snapshot the current branch's index to fcheap",
+	RunE:  runBranchSnapshot,
+}
+
+var branchStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show branch index status",
+	RunE:  runBranchStatus,
+}
+
+var branchInstallHookCmd = &cobra.Command{
+	Use:   "install-hook",
+	Short: "Install a post-checkout git hook for automatic branch switching",
+	RunE:  runBranchInstallHook,
+}
+
+var daemonCmd = &cobra.Command{
+	Use:   "daemon",
+	Short: "Manage the background indexing daemon",
+	Long: `Manage the background indexing daemon.
+
+The daemon watches files for changes, throttles Ollama embedding
+requests, and serves MCP queries over a unix socket. It is the sole
+writer to the index database — the CLI and MCP server connect to it
+over the socket or fall back to read-only sessions.
+
+Subcommands:
+  start    Start the daemon (foreground unless --detach)
+  stop     Stop the running daemon
+  status   Show daemon status`,
+}
+
+var daemonStartCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the background indexing daemon",
+	RunE:  runDaemonStart,
+}
+
+var daemonStopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the running daemon",
+	RunE:  runDaemonStop,
+}
+
+var daemonStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show daemon status",
+	RunE:  runDaemonStatus,
+}
+
 func init() {
 	// Set version template
 	rootCmd.SetVersionTemplate("vecgrep version {{.Version}}\n")
@@ -323,6 +402,19 @@ func init() {
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(projectsCmd)
+	rootCmd.AddCommand(branchCmd)
+	rootCmd.AddCommand(daemonCmd)
+
+	// Daemon subcommands
+	daemonCmd.AddCommand(daemonStartCmd)
+	daemonCmd.AddCommand(daemonStopCmd)
+	daemonCmd.AddCommand(daemonStatusCmd)
+
+	// Branch subcommands
+	branchCmd.AddCommand(branchSwitchCmd)
+	branchCmd.AddCommand(branchSnapshotCmd)
+	branchCmd.AddCommand(branchStatusCmd)
+	branchCmd.AddCommand(branchInstallHookCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -1232,6 +1324,375 @@ func runProjectsRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Project '%s' removed from global config.\n", name)
 	fmt.Println("Note: Project data directory was not deleted. Remove it manually if needed.")
+
+	return nil
+}
+
+// --- branch command runners ---
+
+func runBranchSwitch(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+
+	projectRoot, err := config.FindProjectRootFrom(cwd)
+	if err != nil {
+		return fmt.Errorf("no vecgrep project found: %w; run 'vecgrep init' first", err)
+	}
+
+	projectName, _, _ := config.FindProjectByPath(projectRoot)
+	if projectName == "" {
+		return fmt.Errorf("project not registered globally; branch switching requires global mode")
+	}
+
+	// Determine target branch
+	targetBranch := ""
+	if len(args) > 0 {
+		targetBranch = args[0]
+	} else {
+		// Use current branch
+		info, err := git.Detect(ctx, projectRoot)
+		if err != nil {
+			return fmt.Errorf("not a git repository: %w", err)
+		}
+		if info.Detached {
+			return fmt.Errorf("detached HEAD — specify a branch name explicitly")
+		}
+		targetBranch = info.Branch
+	}
+
+	result, err := app.BranchSwitch(ctx, projectRoot, projectName, targetBranch)
+	if err != nil {
+		return fmt.Errorf("branch switch failed: %w", err)
+	}
+
+	fmt.Printf("Switched index from '%s' to '%s'\n", result.FromBranch, result.ToBranch)
+	if result.Restored {
+		fmt.Printf("  Restored from fcheap snapshot (stash ID: %s)\n", result.SnapshotID)
+	} else {
+		fmt.Println("  Fresh index — run 'vecgrep index' to build the index for this branch")
+	}
+	fmt.Printf("  Duration: %s\n", result.Duration)
+	fmt.Println("\nNote: The index will use the branch-specific directory on next search/index/status.")
+
+	return nil
+}
+
+func runBranchSnapshot(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+
+	projectRoot, err := config.FindProjectRootFrom(cwd)
+	if err != nil {
+		return fmt.Errorf("no vecgrep project found: %w; run 'vecgrep init' first", err)
+	}
+
+	projectName, _, _ := config.FindProjectByPath(projectRoot)
+	if projectName == "" {
+		return fmt.Errorf("project not registered globally; branch snapshotting requires global mode")
+	}
+
+	result, err := app.BranchSnapshot(ctx, projectRoot, projectName)
+	if err != nil {
+		return fmt.Errorf("branch snapshot failed: %w", err)
+	}
+
+	fmt.Printf("Snapshotted branch '%s' (SHA: %s)\n", result.ToBranch, result.ToSHA)
+	if result.SnapshotID != "" {
+		fmt.Printf("  fcheap stash ID: %s\n", result.SnapshotID)
+	} else {
+		fmt.Println("  fcheap not available — snapshot stored as branch index pointer only")
+	}
+	fmt.Printf("  Vectors: %d\n", result.VectorCount)
+	fmt.Printf("  Duration: %s\n", result.Duration)
+
+	return nil
+}
+
+func runBranchStatus(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+
+	projectRoot, err := config.FindProjectRootFrom(cwd)
+	if err != nil {
+		return fmt.Errorf("no vecgrep project found: %w; run 'vecgrep init' first", err)
+	}
+
+	projectName, _, _ := config.FindProjectByPath(projectRoot)
+	if projectName == "" {
+		return fmt.Errorf("project not registered globally")
+	}
+
+	idx, info, err := app.BranchStatus(ctx, projectRoot, projectName)
+	if err != nil {
+		return fmt.Errorf("branch status failed: %w", err)
+	}
+
+	fmt.Printf("Branch Index Status for: %s\n\n", projectName)
+	fmt.Printf("Git:\n")
+	fmt.Printf("  Repo root: %s\n", info.Root)
+	if info.Detached {
+		fmt.Printf("  HEAD: detached (%s)\n", info.Head)
+	} else {
+		fmt.Printf("  Branch: %s\n", info.Branch)
+		fmt.Printf("  HEAD: %s\n", info.Head)
+	}
+
+	fmt.Printf("\nBranch Indexes:\n")
+	if idx == nil || len(idx.Branches) == 0 {
+		fmt.Println("  No branch indexes found. Run 'vecgrep branch switch' to create one.")
+	} else {
+		fmt.Printf("  Active branch: %s\n", idx.ActiveBranch)
+		for name, entry := range idx.Branches {
+			fmt.Printf("\n  %s:\n", name)
+			fmt.Printf("    Base SHA: %s\n", entry.BaseSHA)
+			fmt.Printf("    Vectors: %d\n", entry.VectorCount)
+			if entry.StashID != "" {
+				fmt.Printf("    Stash ID: %s\n", entry.StashID)
+			}
+			fmt.Printf("    Profile: %s/%s (%dd)\n", entry.EmbeddingProfile.Provider, entry.EmbeddingProfile.Model, entry.EmbeddingProfile.Dimensions)
+			fmt.Printf("    Last switched: %s\n", entry.LastSwitchedAt.Format(time.RFC3339))
+		}
+	}
+
+	return nil
+}
+
+func runBranchInstallHook(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+
+	info, err := git.Detect(ctx, cwd)
+	if err != nil {
+		return fmt.Errorf("not a git repository: %w", err)
+	}
+
+	hookPath := filepath.Join(info.Root, ".git", "hooks", "post-checkout")
+
+	// Check if hook already exists
+	if _, err := os.Stat(hookPath); err == nil {
+		// Check if it's already a vecgrep hook
+		data, _ := os.ReadFile(hookPath)
+		if strings.Contains(string(data), "vecgrep branch switch") {
+			fmt.Println("post-checkout hook already installed for vecgrep.")
+			return nil
+		}
+		return fmt.Errorf("post-checkout hook already exists (not a vecgrep hook); remove it first or merge manually")
+	}
+
+	// Write the hook
+	hookContent := `#!/bin/sh
+# vecgrep post-checkout hook — auto-switches the branch index
+# arg1 = previous HEAD, arg2 = new HEAD, arg3 = flag (1=branch checkout, 0=file checkout)
+prev="$1"
+new="$2"
+flag="$3"
+
+# Only fire on branch checkout (flag=1), not file checkout (flag=0)
+if [ "$flag" = "1" ]; then
+    vecgrep branch switch >/dev/null 2>&1 || true
+fi
+`
+
+	// Ensure hooks directory exists
+	hooksDir := filepath.Dir(hookPath)
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		return fmt.Errorf("create hooks directory: %w", err)
+	}
+
+	if err := os.WriteFile(hookPath, []byte(hookContent), 0755); err != nil {
+		return fmt.Errorf("write hook: %w", err)
+	}
+
+	fmt.Printf("Installed post-checkout hook at: %s\n", hookPath)
+	fmt.Println("The hook will auto-switch the vecgrep index on branch checkout.")
+	fmt.Println("To remove: delete the .git/hooks/post-checkout file.")
+
+	return nil
+}
+
+// --- daemon command runners ---
+
+func runDaemonStart(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+
+	projectRoot, err := config.FindProjectRootFrom(cwd)
+	if err != nil {
+		return fmt.Errorf("no vecgrep project found: %w; run 'vecgrep init' first", err)
+	}
+
+	// Open a writable session (the daemon is the sole writer)
+	session, err := app.OpenSession(ctx, projectRoot)
+	if err != nil {
+		return fmt.Errorf("open session: %w", err)
+	}
+	defer session.Close()
+
+	// Check if a daemon is already running
+	if daemon.IsRunning(session.Config.DataDir) {
+		return fmt.Errorf("daemon already running for this project")
+	}
+
+	d, err := daemon.New(daemon.Config{
+		Session:        session,
+		ResolvedConfig: session.Config,
+	})
+	if err != nil {
+		return fmt.Errorf("create daemon: %w", err)
+	}
+
+	fmt.Printf("Starting daemon for project: %s\n", session.ProjectName)
+	fmt.Printf("  Socket: %s\n", d.SocketPath())
+	fmt.Printf("  PID: %d\n", os.Getpid())
+
+	// Handle signals for graceful shutdown
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		d.Stop()
+	}()
+
+	return d.Start(ctx)
+}
+
+func runDaemonStop(cmd *cobra.Command, args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+
+	projectRoot, err := config.FindProjectRootFrom(cwd)
+	if err != nil {
+		return fmt.Errorf("no vecgrep project found: %w", err)
+	}
+
+	// Load config to get data dir
+	resolved, err := config.LoadResolved(projectRoot)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	dataDir := resolved.Config.DataDir
+
+	// Check if the daemon is running
+	if !daemon.IsRunning(dataDir) {
+		fmt.Println("No daemon running for this project.")
+		return nil
+	}
+
+	// Send stop via socket
+	socketPath := filepath.Join(dataDir, "daemon.sock")
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return fmt.Errorf("connect to daemon socket: %w", err)
+	}
+	defer conn.Close()
+
+	enc := json.NewEncoder(conn)
+	dec := json.NewDecoder(conn)
+
+	if err := enc.Encode(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+	}{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "daemon.ping",
+	}); err != nil {
+		return fmt.Errorf("send stop: %w", err)
+	}
+
+	// Read response (ping confirms it's alive, then it will shut down)
+	var resp json.RawMessage
+	_ = dec.Decode(&resp)
+
+	// TODO: send a proper "daemon.stop" method once the handler supports it.
+	// For now, the signal handler in the daemon process handles SIGTERM.
+	// Kill via PID from state file.
+	state, err := daemon.ReadState(dataDir)
+	if err != nil {
+		return fmt.Errorf("read daemon state: %w", err)
+	}
+
+	if state.PID > 0 {
+		p, err := os.FindProcess(state.PID)
+		if err != nil {
+			return fmt.Errorf("find process: %w", err)
+		}
+		if err := p.Signal(syscall.SIGTERM); err != nil {
+			return fmt.Errorf("send SIGTERM: %w", err)
+		}
+	}
+
+	fmt.Println("Daemon stopped.")
+	return nil
+}
+
+func runDaemonStatus(cmd *cobra.Command, args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+
+	projectRoot, err := config.FindProjectRootFrom(cwd)
+	if err != nil {
+		return fmt.Errorf("no vecgrep project found: %w", err)
+	}
+
+	resolved, err := config.LoadResolved(projectRoot)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	dataDir := resolved.Config.DataDir
+
+	running := daemon.IsRunning(dataDir)
+	if running {
+		fmt.Println("Daemon: running")
+	} else {
+		fmt.Println("Daemon: not running")
+	}
+
+	// Read state file (may exist even if daemon is stopped)
+	state, err := daemon.ReadState(dataDir)
+	if err == nil && state != nil {
+		fmt.Printf("  PID: %d\n", state.PID)
+		fmt.Printf("  Project: %s\n", state.ProjectName)
+		fmt.Printf("  Started: %s\n", state.StartedAt.Format(time.RFC3339))
+		fmt.Printf("  Last activity: %s\n", state.LastActivity.Format(time.RFC3339))
+		if state.ActiveBranch != "" {
+			fmt.Printf("  Active branch: %s\n", state.ActiveBranch)
+		}
+		if !state.LastReindex.IsZero() {
+			fmt.Printf("  Last reindex: %s\n", state.LastReindex.Format(time.RFC3339))
+		}
+	}
+
+	if running {
+		fmt.Printf("  Socket: %s\n", filepath.Join(dataDir, "daemon.sock"))
+	}
 
 	return nil
 }

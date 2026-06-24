@@ -1,0 +1,26 @@
+version: 1
+name: daemon_status_not_running
+intent: |
+    a user can check the daemon status and see it is not running in a freshly initialized project.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; \"$ROOT/bin/vecgrep\" daemon status"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: daemon_status
+outcomes:
+    - id: daemon_not_running
+      description: the daemon status shows not running
+      verify:
+        screen:
+            contains: "Daemon: not running"

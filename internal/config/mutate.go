@@ -55,6 +55,37 @@ func ParseConfigValue(key, value string) (any, error) {
 		return parsed, nil
 	case "vector.veclite.m", "vector.veclite.ef_construction", "vector.veclite.ef_search":
 		return parsePositiveInt(key, value)
+	case "codemap.enabled":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid codemap.enabled value %q: %w", value, err)
+		}
+		return parsed, nil
+	case "codemap.bin", "codemap.mcp_endpoint":
+		return value, nil
+	case "codemap.structural_weight":
+		w, err := strconv.ParseFloat(value, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid codemap.structural_weight value %q: %w", value, err)
+		}
+		return float32(w), nil
+	case "daemon.autostart":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid daemon.autostart value %q: %w", value, err)
+		}
+		return parsed, nil
+	case "daemon.idle_timeout", "daemon.embed_workers", "daemon.embed_max_in_flight", "daemon.debounce":
+		return parseNonNegativeInt(key, value)
+	case "daemon.embed_rps":
+		r, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid daemon.embed_rps value %q: %w", value, err)
+		}
+		if r < 0 {
+			return nil, fmt.Errorf("invalid daemon.embed_rps value %q: must be zero or greater", value)
+		}
+		return r, nil
 	default:
 		return nil, fmt.Errorf("unknown config key: %s", key)
 	}
@@ -115,6 +146,26 @@ func ApplyConfigValue(cfg *Config, key, value string) error {
 		cfg.Vector.VecLite.EfConstruction = parsed.(int)
 	case "vector.veclite.ef_search":
 		cfg.Vector.VecLite.EfSearch = parsed.(int)
+	case "codemap.enabled":
+		cfg.Codemap.Enabled = parsed.(bool)
+	case "codemap.bin":
+		cfg.Codemap.Bin = parsed.(string)
+	case "codemap.mcp_endpoint":
+		cfg.Codemap.MCPEndpoint = parsed.(string)
+	case "codemap.structural_weight":
+		cfg.Codemap.StructuralWeight = parsed.(float32)
+	case "daemon.autostart":
+		cfg.Daemon.Autostart = parsed.(bool)
+	case "daemon.idle_timeout":
+		cfg.Daemon.IdleTimeout = parsed.(int)
+	case "daemon.embed_workers":
+		cfg.Daemon.EmbedWorkers = parsed.(int)
+	case "daemon.embed_rps":
+		cfg.Daemon.EmbedRPS = parsed.(float64)
+	case "daemon.embed_max_in_flight":
+		cfg.Daemon.EmbedMaxInFlight = parsed.(int)
+	case "daemon.debounce":
+		cfg.Daemon.Debounce = parsed.(int)
 	}
 
 	cfg.markPresent(key)

@@ -39,6 +39,12 @@ type Config struct {
 	// Vector configuration
 	Vector VectorConfig `mapstructure:"vector" yaml:"vector,omitempty"`
 
+	// Codemap integration configuration
+	Codemap CodemapConfig `mapstructure:"codemap" yaml:"codemap,omitempty"`
+
+	// Daemon configuration for the background indexing daemon
+	Daemon DaemonConfig `mapstructure:"daemon" yaml:"daemon,omitempty"`
+
 	present map[string]bool `mapstructure:"-" yaml:"-"`
 }
 
@@ -118,6 +124,57 @@ type ServerConfig struct {
 	MCPEnabled bool `mapstructure:"mcp_enabled" yaml:"mcp_enabled,omitempty"`
 }
 
+// CodemapConfig holds settings for the codemap graph integration. When
+// enabled, vecgrep delegates related-files lookups and structural
+// re-ranking to codemap's real call graph via its MCP tools. When
+// codemap is unavailable or not indexed, vecgrep falls back to its
+// built-in text-based heuristics.
+type CodemapConfig struct {
+	// Enabled controls whether vecgrep attempts to use codemap.
+	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// Bin is the path to the codemap CLI binary (resolved via $PATH if empty).
+	Bin string `mapstructure:"bin" yaml:"bin,omitempty"`
+	// MCPEndpoint is the codemap MCP server endpoint (stdio or HTTP). If
+	// empty, vecgrep shells out to the codemap binary for each query.
+	MCPEndpoint string `mapstructure:"mcp_endpoint" yaml:"mcp_endpoint,omitempty"`
+	// StructuralWeight is the weight for codemap's structural importance
+	// score when re-ranking hybrid search results (0-1). 0 disables
+	// re-ranking. Default 0.15.
+	StructuralWeight float32 `mapstructure:"structural_weight" yaml:"structural_weight,omitempty"`
+}
+
+// DaemonConfig holds settings for the background indexing daemon. The
+// daemon watches files, throttles Ollama embedding requests, and serves
+// MCP queries over a unix socket so that the CLI and MCP server never
+// contend for the exclusive write lock.
+type DaemonConfig struct {
+	// Autostart starts the daemon automatically on the first search or
+	// index operation if it is not already running.
+	Autostart bool `mapstructure:"autostart" yaml:"autostart,omitempty"`
+	// IdleTimeout is how long the daemon stays alive without activity
+	// before shutting down. Zero means no idle shutdown.
+	IdleTimeout int `mapstructure:"idle_timeout" yaml:"idle_timeout,omitempty"`
+	// EmbedWorkers is the number of concurrent embedding workers for
+	// background indexing (default 2).
+	EmbedWorkers int `mapstructure:"embed_workers" yaml:"embed_workers,omitempty"`
+	// EmbedRPS is the maximum embedding requests per second to Ollama
+	// (token-bucket rate limit). Zero means no limit.
+	EmbedRPS float64 `mapstructure:"embed_rps" yaml:"embed_rps,omitempty"`
+	// EmbedMaxInFlight is the maximum number of concurrent embedding
+	// requests in flight to Ollama (default 4).
+	EmbedMaxInFlight int `mapstructure:"embed_max_in_flight" yaml:"embed_max_in_flight,omitempty"`
+	// Debounce is the watcher debounce duration in milliseconds (default 500).
+	Debounce int `mapstructure:"debounce" yaml:"debounce,omitempty"`
+}
+
+// Default daemon constants.
+const (
+	DefaultDaemonIdleTimeout      = 30 // minutes
+	DefaultDaemonEmbedWorkers     = 2
+	DefaultDaemonEmbedMaxInFlight = 4
+	DefaultDaemonDebounceMs       = 500
+)
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -159,6 +216,12 @@ func DefaultConfig() *Config {
 				EfConstruction: DefaultVecLiteEfConstruction,
 				EfSearch:       DefaultVecLiteEfSearch,
 			},
+		},
+		Daemon: DaemonConfig{
+			IdleTimeout:      DefaultDaemonIdleTimeout,
+			EmbedWorkers:     DefaultDaemonEmbedWorkers,
+			EmbedMaxInFlight: DefaultDaemonEmbedMaxInFlight,
+			Debounce:         DefaultDaemonDebounceMs,
 		},
 	}
 }

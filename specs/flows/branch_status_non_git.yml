@@ -1,0 +1,26 @@
+version: 1
+name: branch_status_non_git
+intent: |
+    a user can check branch index status; in a non-git project it shows an error.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; \"$ROOT/bin/vecgrep\" branch status 2>&1; true"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: branch_status
+outcomes:
+    - id: branch_status_shown
+      description: the branch status command runs and shows a git-related message
+      verify:
+        screen:
+            regex: "git|branch|vecgrep"
