@@ -252,3 +252,158 @@ func TestThrottledProviderNoCacheWhenSizeZero(t *testing.T) {
 		t.Fatal("expected nil cache when CacheSize is 0")
 	}
 }
+
+// --- Batch delegation tests (Phase 4) ---
+
+func TestThrottledProviderEmbedBatchDelegatesToDocuments(t *testing.T) {
+	// When the inner provider implements DocumentProvider, EmbedBatch should
+	// delegate to EmbedDocuments (one call) instead of calling Embed per text.
+	var docsCallCount int32
+	mock := &mockProvider{
+		embedDocsFunc: func(ctx context.Context, texts []string) ([][]float32, error) {
+			atomic.AddInt32(&docsCallCount, 1)
+			results := make([][]float32, len(texts))
+			for i := range texts {
+				results[i] = []float32{float32(i), float32(i + 1)}
+			}
+			return results, nil
+		},
+	}
+	cfg := DefaultThrottleConfig()
+	p := NewThrottledProvider(mock, cfg)
+	defer p.Close()
+
+	texts := []string{"alpha", "bravo", "charlie"}
+	results, err := p.EmbedBatch(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+
+	// EmbedDocuments should have been called exactly once (single batch request).
+	if atomic.LoadInt32(&docsCallCount) != 1 {
+		t.Errorf("expected 1 EmbedDocuments call, got %d", atomic.LoadInt32(&docsCallCount))
+	}
+	// Embed (per-text) should NOT have been called.
+	if mock.embedCalls.Load() != 0 {
+		t.Errorf("expected 0 Embed calls, got %d", mock.embedCalls.Load())
+	}
+}
+
+func TestThrottledProviderEmbedDocuments(t *testing.T) {
+	mock := &mockProvider{}
+	cfg := DefaultThrottleConfig()
+	p := NewThrottledProvider(mock, cfg)
+	defer p.Close()
+
+	texts := []string{"one", "two", "three"}
+	results, err := p.EmbedDocuments(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	for i, r := range results {
+		if r == nil {
+			t.Fatalf("results[%d] is nil", i)
+		}
+	}
+	// Should delegate to inner EmbedDocuments, not per-text Embed.
+	if mock.docsCalls.Load() != 1 {
+		t.Errorf("expected 1 inner EmbedDocuments call, got %d", mock.docsCalls.Load())
+	}
+}
+
+func TestThrottledProviderEmbedDocumentsCacheHit(t *testing.T) {
+	mock := &mockProvider{}
+	cfg := DefaultThrottleConfig()
+	cfg.CacheSize = 100
+	p := NewThrottledProvider(mock, cfg)
+	defer p.Close()
+
+	ctx := context.Background()
+
+	// Pre-populate cache by embedding one text.
+	_, err := p.Embed(ctx, "cached-text")
+	if err != nil {
+		t.Fatalf("pre-populate cache: %v", err)
+	}
+
+	mock.docsCalls.Store(0)
+	mock.embedCalls.Store(0)
+
+	// Batch with one cached and one uncached text.
+	results, err := p.EmbedDocuments(ctx, []string{"cached-text", "new-text"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	// EmbedDocuments should be called once but only for the uncached text.
+	// The inner provider receives only the misses.
+	if mock.docsCalls.Load() != 1 {
+		t.Errorf("expected 1 EmbedDocuments call, got %d", mock.docsCalls.Load())
+	}
+}
+
+func TestThrottledProviderEmbedDocumentsEmptyText(t *testing.T) {
+	mock := &mockProvider{}
+	cfg := DefaultThrottleConfig()
+	p := NewThrottledProvider(mock, cfg)
+	defer p.Close()
+
+	_, err := p.EmbedDocuments(context.Background(), []string{"ok", ""})
+	if err == nil {
+		t.Fatal("expected error for empty text in batch")
+	}
+}
+
+func TestThrottledProviderEmbedBatchFallbackWithoutDocumentProvider(t *testing.T) {
+	// When inner provider does NOT implement DocumentProvider, EmbedBatch
+	// should fall back to per-text Embed calls.
+	mock := &noDocsProvider{}
+	cfg := DefaultThrottleConfig()
+	p := NewThrottledProvider(mock, cfg)
+	defer p.Close()
+
+	texts := []string{"a", "b", "c"}
+	results, err := p.EmbedBatch(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	// Should have used per-text Embed (3 calls), not EmbedDocuments.
+	if mock.embedCalls.Load() != 3 {
+		t.Errorf("expected 3 Embed calls (fallback), got %d", mock.embedCalls.Load())
+	}
+}
+
+// noDocsProvider implements Provider but NOT DocumentProvider, to test the
+// fallback path in ThrottledProvider.EmbedBatch.
+type noDocsProvider struct {
+	embedCalls atomic.Int32
+}
+
+func (m *noDocsProvider) Embed(ctx context.Context, text string) ([]float32, error) {
+	m.embedCalls.Add(1)
+	return []float32{1.0, 2.0, 3.0}, nil
+}
+
+func (m *noDocsProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	results := make([][]float32, len(texts))
+	for i := range texts {
+		results[i] = []float32{1.0, 2.0, 3.0}
+	}
+	return results, nil
+}
+
+func (m *noDocsProvider) Model() string                  { return "no-docs-model" }
+func (m *noDocsProvider) Dimensions() int                { return 768 }
+func (m *noDocsProvider) Ping(ctx context.Context) error { return nil }

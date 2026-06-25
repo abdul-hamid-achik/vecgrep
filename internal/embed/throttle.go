@@ -60,8 +60,8 @@ type ThrottleConfig struct {
 // DefaultThrottleConfig returns sensible defaults for the throttle layer.
 func DefaultThrottleConfig() ThrottleConfig {
 	return ThrottleConfig{
-		Workers:     2,
-		MaxInFlight: 4,
+		Workers:     4,
+		MaxInFlight: 8,
 		CacheSize:   1000,
 	}
 }
@@ -118,10 +118,10 @@ type throttleResult struct {
 // NewThrottledProvider wraps the given provider with the throttle layer.
 func NewThrottledProvider(inner Provider, cfg ThrottleConfig) *ThrottledProvider {
 	if cfg.Workers <= 0 {
-		cfg.Workers = 2
+		cfg.Workers = 4
 	}
 	if cfg.MaxInFlight <= 0 {
-		cfg.MaxInFlight = 4
+		cfg.MaxInFlight = 8
 	}
 
 	p := &ThrottledProvider{
@@ -201,19 +201,22 @@ func (p *ThrottledProvider) Embed(ctx context.Context, text string) (vec []float
 }
 
 // EmbedBatch generates embeddings for multiple texts with throttling.
-// It deduplicates texts within the batch and reuses cached results.
+// When the inner provider implements DocumentProvider, the entire batch
+// is delegated to a single inner.EmbedDocuments call (one HTTP request for
+// the Ollama /api/embed endpoint), bypassing the per-text worker queue.
+// Otherwise it falls back to processing each text through Embed.
 func (p *ThrottledProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
 
-	results := make([][]float32, len(texts))
+	// Fast path: inner provider supports native batch embedding.
+	if docProvider, ok := p.inner.(DocumentProvider); ok {
+		return p.embedBatchDelegated(ctx, docProvider, texts)
+	}
 
-	// Process each text through the throttle. We use Embed (which handles
-	// cache + dedup) so identical texts in the batch share a single request.
-	// For better throughput we could batch at the inner provider level, but
-	// the primary goal of the throttle is to limit concurrency, not to
-	// batch at the protocol level.
+	// Fallback: process each text through the per-text throttle queue.
+	results := make([][]float32, len(texts))
 	var wg sync.WaitGroup
 	errs := make([]error, len(texts))
 
@@ -239,6 +242,78 @@ func (p *ThrottledProvider) EmbedBatch(ctx context.Context, texts []string) ([][
 	for i, err := range errs {
 		if err != nil {
 			return results, NewProviderError("throttle", "embedBatch", fmt.Errorf("text %d: %w", i, err))
+		}
+	}
+
+	return results, nil
+}
+
+// EmbedDocuments implements the DocumentProvider interface.
+// It delegates to the inner provider's EmbedDocuments when available,
+// applying cache dedup as a pre-filter to skip texts we already have.
+func (p *ThrottledProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	docProvider, ok := p.inner.(DocumentProvider)
+	if !ok {
+		// Inner doesn't support batch — fall back to EmbedBatch.
+		return p.EmbedBatch(ctx, texts)
+	}
+	return p.embedBatchDelegated(ctx, docProvider, texts)
+}
+
+// embedBatchDelegated sends the batch to the inner DocumentProvider in a
+// single call, using the cache to skip texts whose embeddings we already
+// have. This bypasses the per-text worker queue — the batch endpoint
+// handles concurrency internally.
+func (p *ThrottledProvider) embedBatchDelegated(ctx context.Context, docProvider DocumentProvider, texts []string) ([][]float32, error) {
+	results := make([][]float32, len(texts))
+
+	// Phase 1: serve everything we can from cache, collect misses.
+	missIndices := make([]int, 0, len(texts))
+	missTexts := make([]string, 0, len(texts))
+	for i, text := range texts {
+		if text == "" {
+			return nil, NewProviderError("throttle", "embedDocuments", fmt.Errorf("text %d: %w", i, ErrEmptyText))
+		}
+		if p.cache != nil {
+			if v, ok := p.cache.Get(text); ok {
+				results[i] = v
+				continue
+			}
+		}
+		missIndices = append(missIndices, i)
+		missTexts = append(missTexts, text)
+	}
+
+	if len(missTexts) == 0 {
+		return results, nil
+	}
+
+	// Phase 2: acquire a single in-flight slot and delegate the entire
+	// batch to the inner provider's native batch endpoint.
+	p.inFlight <- struct{}{}
+	defer func() { <-p.inFlight }()
+
+	if p.limiter != nil {
+		_ = p.limiter.Wait(ctx)
+	}
+
+	missed, err := docProvider.EmbedDocuments(ctx, missTexts)
+	if err != nil {
+		return nil, NewProviderError("throttle", "embedDocuments", err)
+	}
+	if len(missed) != len(missTexts) {
+		return nil, NewProviderError("throttle", "embedDocuments",
+			fmt.Errorf("expected %d embeddings, got %d", len(missTexts), len(missed)))
+	}
+
+	// Phase 3: scatter results back, populate cache.
+	for j, idx := range missIndices {
+		results[idx] = missed[j]
+		if p.cache != nil && missed[j] != nil {
+			p.cache.Set(missTexts[j], missed[j])
 		}
 	}
 

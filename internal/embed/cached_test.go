@@ -12,10 +12,12 @@ import (
 type mockProvider struct {
 	embedFunc      func(ctx context.Context, text string) ([]float32, error)
 	embedBatchFunc func(ctx context.Context, texts []string) ([][]float32, error)
+	embedDocsFunc  func(ctx context.Context, texts []string) ([][]float32, error)
 	model          string
 	dimensions     int
 	embedCalls     atomic.Int32
 	batchCalls     atomic.Int32
+	docsCalls      atomic.Int32
 }
 
 func (m *mockProvider) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -34,6 +36,21 @@ func (m *mockProvider) EmbedBatch(ctx context.Context, texts []string) ([][]floa
 	results := make([][]float32, len(texts))
 	for i := range texts {
 		results[i] = []float32{float32(i), float32(i + 1)}
+	}
+	return results, nil
+}
+
+// EmbedDocuments implements the DocumentProvider interface.
+// Only callable when embedDocsFunc is set; otherwise returns an error.
+func (m *mockProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	m.docsCalls.Add(1)
+	if m.embedDocsFunc != nil {
+		return m.embedDocsFunc(ctx, texts)
+	}
+	// Default: return per-text embeddings with index-based values.
+	results := make([][]float32, len(texts))
+	for i := range texts {
+		results[i] = []float32{float32(i), float32(i + 1), float32(i + 2)}
 	}
 	return results, nil
 }

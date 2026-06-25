@@ -48,7 +48,7 @@ func DefaultIndexerConfig() IndexerConfig {
 			"yarn.lock",
 		},
 		MaxFileSize: 1024 * 1024, // 1MB
-		BatchSize:   32,
+		BatchSize:   64,
 		Workers:     4,
 	}
 }

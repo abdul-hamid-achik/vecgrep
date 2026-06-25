@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,7 +20,7 @@ const (
 	defaultTimeout       = 30 * time.Second
 	defaultMaxRetries    = 3
 	defaultRetryInterval = 500 * time.Millisecond
-	maxBatchSize         = 32
+	maxBatchSize         = 64
 )
 
 // OllamaConfig holds configuration for the Ollama embedding provider.
@@ -50,15 +51,34 @@ type OllamaProvider struct {
 	client *http.Client
 }
 
-// ollamaEmbeddingRequest is the request body for Ollama's embedding endpoint.
+// ollamaEmbeddingRequest is the request body for Ollama's legacy /api/embeddings
+// endpoint (single prompt). Superseded by /api/embed which supports batch input.
 type ollamaEmbeddingRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
 }
 
-// ollamaEmbeddingResponse is the response from Ollama's embedding endpoint.
+// ollamaEmbeddingResponse is the response from Ollama's legacy /api/embeddings
+// endpoint.
 type ollamaEmbeddingResponse struct {
 	Embedding []float64 `json:"embedding"`
+}
+
+// ollamaBatchEmbedRequest is the request body for Ollama's /api/embed endpoint
+// which accepts a string or a list of strings as input.
+type ollamaBatchEmbedRequest struct {
+	Model    string   `json:"model"`
+	Input    []string `json:"input"`
+	Truncate bool     `json:"truncate"`
+}
+
+// ollamaBatchEmbedResponse is the response from Ollama's /api/embed endpoint.
+type ollamaBatchEmbedResponse struct {
+	Model           string      `json:"model"`
+	Embeddings      [][]float64 `json:"embeddings"`
+	TotalDuration   int64       `json:"total_duration,omitempty"`
+	LoadDuration    int64       `json:"load_duration,omitempty"`
+	PromptEvalCount int         `json:"prompt_eval_count,omitempty"`
 }
 
 // ollamaErrorResponse represents an error response from Ollama.
@@ -200,23 +220,198 @@ func (p *OllamaProvider) doEmbed(ctx context.Context, text string) ([]float32, e
 	return embedding, nil
 }
 
+// EmbedDocuments generates embeddings for multiple texts using Ollama's
+// native batch endpoint (/api/embed). This is far more efficient than
+// EmbedBatch because it sends a single HTTP request for up to maxBatchSize
+// texts instead of one request per text.
+func (p *OllamaProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
+	// Filter out empty texts and track their positions.
+	type indexedText struct {
+		idx  int
+		text string
+	}
+	var nonEmpty []indexedText
+	for i, t := range texts {
+		if t == "" {
+			return nil, NewProviderError("ollama", "embedDocuments", fmt.Errorf("text %d: %w", i, ErrEmptyText))
+		}
+		nonEmpty = append(nonEmpty, indexedText{idx: i, text: t})
+	}
+
+	results := make([][]float32, len(texts))
+
+	// Process in sub-batches to keep HTTP request sizes reasonable.
+	for start := 0; start < len(nonEmpty); start += maxBatchSize {
+		end := start + maxBatchSize
+		if end > len(nonEmpty) {
+			end = len(nonEmpty)
+		}
+
+		batch := nonEmpty[start:end]
+		input := make([]string, len(batch))
+		for j, b := range batch {
+			input[j] = b.text
+		}
+
+		embeddings, err := p.doEmbedBatch(ctx, input)
+		if err != nil {
+			return results, NewProviderError("ollama", "embedDocuments", err)
+		}
+
+		for j, emb := range embeddings {
+			results[batch[j].idx] = emb
+		}
+	}
+
+	return results, nil
+}
+
+// doEmbedBatch sends a single HTTP request to /api/embed with multiple texts
+// and returns the embeddings in the same order.
+func (p *OllamaProvider) doEmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	reqBody := ollamaBatchEmbedRequest{
+		Model:    p.config.Model,
+		Input:    texts,
+		Truncate: true,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < p.config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ErrContextCanceled
+			case <-time.After(p.config.RetryInterval * time.Duration(attempt)):
+			}
+		}
+
+		embeddings, err := p.doEmbedBatchRequest(ctx, jsonBody)
+		if err == nil {
+			return embeddings, nil
+		}
+
+		lastErr = err
+		if err == ErrContextCanceled || err == ErrModelNotFound {
+			return nil, err
+		}
+	}
+
+	return nil, lastErr
+}
+
+// doEmbedBatchRequest performs a single batch embedding HTTP request to /api/embed.
+func (p *OllamaProvider) doEmbedBatchRequest(ctx context.Context, jsonBody []byte) ([][]float32, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", p.config.URL+"/api/embed", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ErrContextCanceled
+		}
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		// If /api/embed is not available (very old Ollama), fall back to
+		// the legacy concurrent path.
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, errBatchEndpointUnavailable
+		}
+		var errResp ollamaErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			if strings.Contains(errResp.Error, "model") && strings.Contains(errResp.Error, "not found") {
+				return nil, ErrModelNotFound
+			}
+			if strings.Contains(errResp.Error, "not found") {
+				return nil, errBatchEndpointUnavailable
+			}
+			return nil, fmt.Errorf("ollama error: %s", errResp.Error)
+		}
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var batchResp ollamaBatchEmbedResponse
+	if err := json.Unmarshal(body, &batchResp); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if len(batchResp.Embeddings) == 0 {
+		return nil, fmt.Errorf("no embeddings returned")
+	}
+
+	// Convert and validate each embedding.
+	results := make([][]float32, len(batchResp.Embeddings))
+	for i, raw := range batchResp.Embeddings {
+		if len(raw) == 0 {
+			return nil, fmt.Errorf("empty embedding at index %d", i)
+		}
+		emb := float64sToFloat32s(raw)
+		if len(emb) != p.config.Dimensions {
+			return nil, fmt.Errorf("%w: expected %d, got %d", ErrDimensionMismatch, p.config.Dimensions, len(emb))
+		}
+		results[i] = emb
+	}
+
+	return results, nil
+}
+
 // EmbedBatch generates embeddings for multiple texts.
-// Ollama doesn't support native batch embeddings, so we process them concurrently.
+// It delegates to EmbedDocuments (native batch endpoint) and falls back to
+// concurrent single requests if the batch endpoint is unavailable (very old Ollama).
 func (p *OllamaProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
 
-	// Process in batches to avoid overwhelming the server
+	// Try the native batch endpoint first.
+	embeddings, err := p.EmbedDocuments(ctx, texts)
+	if err == nil {
+		return embeddings, nil
+	}
+
+	// Fall back to concurrent single requests if the batch endpoint is unavailable.
+	if errors.Is(err, errBatchEndpointUnavailable) {
+		return p.embedBatchConcurrent(ctx, texts)
+	}
+
+	return embeddings, err
+}
+
+// errBatchEndpointUnavailable signals that /api/embed is not available on the
+// Ollama server (very old versions) and the caller should fall back to the
+// legacy concurrent single-request path.
+var errBatchEndpointUnavailable = fmt.Errorf("batch embedding endpoint unavailable")
+
+// embedBatchConcurrent is the legacy fallback: sends N concurrent single
+// requests to /api/embeddings. Used only when /api/embed is unavailable.
+func (p *OllamaProvider) embedBatchConcurrent(ctx context.Context, texts []string) ([][]float32, error) {
+	results := make([][]float32, len(texts))
+	errors := make([]error, len(texts))
+
 	batchSize := maxBatchSize
 	if len(texts) < batchSize {
 		batchSize = len(texts)
 	}
 
-	results := make([][]float32, len(texts))
-	errors := make([]error, len(texts))
-
-	// Use a semaphore to limit concurrent requests
 	sem := make(chan struct{}, batchSize)
 	var wg sync.WaitGroup
 
@@ -230,7 +425,6 @@ func (p *OllamaProvider) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 		go func(idx int, t string) {
 			defer wg.Done()
 
-			// Acquire semaphore
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
@@ -250,7 +444,6 @@ func (p *OllamaProvider) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 
 	wg.Wait()
 
-	// Check for errors
 	for i, err := range errors {
 		if err != nil {
 			return results, NewProviderError("ollama", "embedBatch", fmt.Errorf("text %d: %w", i, err))

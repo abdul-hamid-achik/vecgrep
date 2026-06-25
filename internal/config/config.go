@@ -170,8 +170,8 @@ type DaemonConfig struct {
 // Default daemon constants.
 const (
 	DefaultDaemonIdleTimeout      = 30 // minutes
-	DefaultDaemonEmbedWorkers     = 2
-	DefaultDaemonEmbedMaxInFlight = 4
+	DefaultDaemonEmbedWorkers     = 4
+	DefaultDaemonEmbedMaxInFlight = 8
 	DefaultDaemonDebounceMs       = 500
 )
 
