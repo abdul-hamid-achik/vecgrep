@@ -104,6 +104,17 @@ func TestCodemapClientRelatedFilesUnavailableReturnsErr(t *testing.T) {
 	}
 }
 
+func TestCodemapClientImpactUnavailableReturnsErr(t *testing.T) {
+	var c *CodemapClient
+	res, err := c.Impact(context.Background(), "/tmp", "pkg.Foo", 3)
+	if !errors.Is(err, ErrCodemapUnavailable) {
+		t.Fatalf("expected ErrCodemapUnavailable, got %v", err)
+	}
+	if res != nil {
+		t.Fatal("expected nil result when client is unavailable")
+	}
+}
+
 func TestCodemapClientRerankUnavailableReturnsOriginal(t *testing.T) {
 	var c *CodemapClient
 	input := []CodemapRerankResult{

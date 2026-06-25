@@ -398,6 +398,8 @@ func init() {
 	searchCmd.Flags().String("lines", "", "filter by line range (e.g., '1-100')")
 	searchCmd.Flags().StringP("mode", "m", "hybrid", "search mode: semantic, keyword, or hybrid")
 	searchCmd.Flags().Bool("explain", false, "show search diagnostics")
+	searchCmd.Flags().StringSlice("scope-files", nil, "restrict search to these relative paths (comma-separated)")
+	searchCmd.Flags().String("symbol", "", "scope search to a symbol's blast radius via codemap impact")
 
 	// Serve command flags
 	serveCmd.Flags().Bool("mcp", false, "start MCP server (stdio)")
@@ -764,6 +766,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	linesRange, _ := cmd.Flags().GetString("lines")
 	modeStr, _ := cmd.Flags().GetString("mode")
 	explain, _ := cmd.Flags().GetBool("explain")
+	scopeFiles, _ := cmd.Flags().GetStringSlice("scope-files")
+	symbol, _ := cmd.Flags().GetString("symbol")
 
 	// Parse line range
 	var minLine, maxLine int
@@ -775,7 +779,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	// this avoids opening a separate read-only session and re-initializing
 	// the embedding provider. Falls back transparently if the socket is
 	// unavailable or the request fails.
-	if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, explain, format); ok {
+	if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, explain, format, scopeFiles, symbol); ok {
 		return nil
 	}
 
@@ -790,6 +794,20 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	// Parse search mode
 	mode := app.ParseSearchMode(modeStr, session.Config.Search.DefaultMode)
 
+	// Resolve file scoping. When --symbol is set, use codemap impact to
+	// compute the blast radius. When --scope-files is set, use it directly.
+	var filePaths []string
+	if len(scopeFiles) > 0 {
+		filePaths = scopeFiles
+		fmt.Printf("Scope: restricted to %d file(s)\n", len(filePaths))
+	} else if symbol != "" {
+		resolvedPaths, scopeNote := resolveSymbolScope(cmd.Context(), session, symbol)
+		if scopeNote != "" {
+			fmt.Println(scopeNote)
+		}
+		filePaths = resolvedPaths
+	}
+
 	resp, err := service.Search(cmd.Context(), app.SearchRequest{
 		Query:       query,
 		Limit:       limit,
@@ -799,6 +817,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		ChunkTypes:  chunkTypes,
 		FilePattern: filePattern,
 		Directory:   directory,
+		FilePaths:   filePaths,
 		MinLine:     minLine,
 		MaxLine:     maxLine,
 		Mode:        mode,
@@ -859,13 +878,15 @@ func tryDaemonSearch(
 	minLine, maxLine int,
 	explain bool,
 	format string,
+	scopeFiles []string,
+	symbol string,
 ) bool {
 	_ = ctx // reserved for future context-aware socket dial
 
 	// The daemon search protocol currently supports query, limit, mode, and
 	// language. If more complex filters are requested, fall back to the
 	// read-only session which has full filter support.
-	if len(languages) > 0 || len(chunkTypes) > 0 || chunkType != "" || filePattern != "" || directory != "" || minLine != 0 || maxLine != 0 || explain {
+	if len(languages) > 0 || len(chunkTypes) > 0 || chunkType != "" || filePattern != "" || directory != "" || minLine != 0 || maxLine != 0 || explain || len(scopeFiles) > 0 || symbol != "" {
 		return false
 	}
 
@@ -939,6 +960,44 @@ func tryDaemonSearch(
 
 	printSearchResults(resp.Result.Results, format)
 	return true
+}
+
+// resolveSymbolScope uses codemap impact to compute the blast radius of a
+// symbol and returns the affected file set. When codemap is unavailable or
+// not indexed, it returns nil files and a human-readable note so the caller
+// can fall back to unscoped search.
+func resolveSymbolScope(ctx context.Context, session *app.Session, symbol string) ([]string, string) {
+	cfg := session.Config.Codemap
+	if !cfg.Enabled {
+		return nil, fmt.Sprintf("Scope: codemap not enabled — searching unscoped for symbol %q", symbol)
+	}
+
+	client := mcp.NewCodemapClient(cfg)
+	if !client.Available() {
+		return nil, fmt.Sprintf("Scope: codemap binary not found — searching unscoped for symbol %q", symbol)
+	}
+
+	depth := int(cfg.ImpactDepth)
+	result, err := client.Impact(ctx, session.ProjectRoot, symbol, depth)
+	if err != nil {
+		return nil, fmt.Sprintf("Scope: codemap impact failed for %q (%v) — searching unscoped", symbol, err)
+	}
+	if !result.Indexed {
+		return nil, fmt.Sprintf("Scope: codemap graph not indexed for %q — searching unscoped", symbol)
+	}
+
+	var files []string
+	for _, f := range result.Files {
+		if f.RelativePath != "" {
+			files = append(files, f.RelativePath)
+		}
+	}
+
+	if len(files) == 0 {
+		return nil, fmt.Sprintf("Scope: codemap impact for %q returned no affected files — searching unscoped", symbol)
+	}
+
+	return files, fmt.Sprintf("Scope: codemap impact for %q — %d file(s) in blast radius (radius: %d)", symbol, len(files), result.BlastRadius)
 }
 
 func runServe(cmd *cobra.Command, args []string) error {

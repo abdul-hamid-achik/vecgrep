@@ -216,6 +216,10 @@ type CodemapConfig struct {
 	// score when re-ranking hybrid search results (0-1). 0 disables
 	// re-ranking. Default 0.15.
 	StructuralWeight float32 `mapstructure:"structural_weight" yaml:"structural_weight,omitempty"`
+	// ImpactDepth is the transitive traversal depth for codemap impact
+	// (blast-radius) queries. 0 means use codemap's default (typically 3).
+	// Higher values find more affected files at the cost of a larger scope.
+	ImpactDepth int `mapstructure:"impact_depth" yaml:"impact_depth,omitempty"`
 }
 
 // DaemonConfig holds settings for the background indexing daemon. The

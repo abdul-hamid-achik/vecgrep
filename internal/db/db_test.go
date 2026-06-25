@@ -382,6 +382,64 @@ func TestSearchWithFilter(t *testing.T) {
 	}
 }
 
+func TestSearchWithFilePathsFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	dimensions := 768
+
+	db, err := Open(tmpDir+"/test.db", dimensions, tmpDir)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer db.Close()
+
+	// Insert chunks across multiple files
+	embedding := make([]float32, dimensions)
+	files := []string{"auth.go", "login.go", "models.go", "auth.go"}
+	for i, rel := range files {
+		chunk := NewChunkRecord(
+			"/tmp/test/"+rel,
+			rel,
+			"hash"+string(rune('0'+i)),
+			100,
+			"go",
+			"content for "+rel,
+			i*10+1, i*10+10, 0, 20,
+			"function",
+			"",
+			"/tmp/test",
+		)
+		_, err = db.InsertChunk(chunk, embedding)
+		if err != nil {
+			t.Fatalf("InsertChunk failed: %v", err)
+		}
+	}
+
+	// Scope to a 2-file allow-list (auth.go + login.go)
+	results, err := db.SearchWithFilter(embedding, 10, FilterOptions{
+		FilePaths: []string{"auth.go", "login.go"},
+	})
+	if err != nil {
+		t.Fatalf("SearchWithFilter failed: %v", err)
+	}
+
+	allowed := map[string]bool{"auth.go": true, "login.go": true}
+	for _, r := range results {
+		if r.Chunk == nil {
+			continue
+		}
+		if !allowed[r.Chunk.RelativePath] {
+			t.Errorf("expected result in {auth.go, login.go}, got %q", r.Chunk.RelativePath)
+		}
+	}
+
+	// models.go should never appear
+	for _, r := range results {
+		if r.Chunk != nil && r.Chunk.RelativePath == "models.go" {
+			t.Error("models.go should have been filtered out by FilePaths")
+		}
+	}
+}
+
 func TestNewChunkRecord(t *testing.T) {
 	before := time.Now()
 	chunk := NewChunkRecord(

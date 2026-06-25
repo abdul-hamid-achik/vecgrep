@@ -20,6 +20,7 @@ type SearchRequest struct {
 	ChunkType   string
 	FilePattern string
 	Directory   string
+	FilePaths   []string // Allow-list of relative paths (blast-radius scoping)
 	MinLine     int
 	MaxLine     int
 	ProjectRoot string
@@ -58,6 +59,7 @@ type SimilarRequest struct {
 	ChunkTypes      []string
 	FilePattern     string
 	Directory       string
+	FilePaths       []string // Allow-list of relative paths (blast-radius scoping)
 	MinLine         int
 	MaxLine         int
 	ExcludeSameFile bool
@@ -90,6 +92,7 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (*SearchRespons
 		ChunkTypes:   req.ChunkTypes,
 		FilePattern:  req.FilePattern,
 		Directory:    req.Directory,
+		FilePaths:    req.FilePaths,
 		MinLine:      req.MinLine,
 		MaxLine:      req.MaxLine,
 		ProjectRoot:  req.ProjectRoot,
@@ -147,6 +150,7 @@ func (s *Service) Similar(ctx context.Context, req SimilarRequest) (*SearchRespo
 			ChunkTypes:  req.ChunkTypes,
 			FilePattern: req.FilePattern,
 			Directory:   req.Directory,
+			FilePaths:   req.FilePaths,
 			MinLine:     req.MinLine,
 			MaxLine:     req.MaxLine,
 			ProjectRoot: s.session.ProjectRoot,

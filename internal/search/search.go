@@ -52,6 +52,7 @@ type SearchOptions struct {
 	ChunkTypes  []string // Filter by multiple chunk types (OR)
 	FilePattern string   // Filter by file path pattern (glob)
 	Directory   string   // Filter by directory prefix
+	FilePaths   []string // Filter by an allow-list of relative paths (blast-radius scoping)
 	MinLine     int      // Filter by minimum start line
 	MaxLine     int      // Filter by maximum start line
 	MinScore    float32  // Minimum similarity score (0-1)
@@ -123,6 +124,7 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		ChunkTypes:  opts.ChunkTypes,
 		FilePattern: opts.FilePattern,
 		Directory:   opts.Directory,
+		FilePaths:   opts.FilePaths,
 		MinLine:     opts.MinLine,
 		MaxLine:     opts.MaxLine,
 		ProjectRoot: opts.ProjectRoot,
@@ -208,6 +210,7 @@ func (s *Searcher) SearchWithExplain(ctx context.Context, query string, opts Sea
 		ChunkTypes:  opts.ChunkTypes,
 		FilePattern: opts.FilePattern,
 		Directory:   opts.Directory,
+		FilePaths:   opts.FilePaths,
 		MinLine:     opts.MinLine,
 		MaxLine:     opts.MaxLine,
 		ProjectRoot: opts.ProjectRoot,
@@ -266,6 +269,7 @@ func (s *Searcher) SearchSimilarByID(ctx context.Context, chunkID int64, opts Si
 		ChunkTypes:  opts.ChunkTypes,
 		FilePattern: opts.FilePattern,
 		Directory:   opts.Directory,
+		FilePaths:   opts.FilePaths,
 		MinLine:     opts.MinLine,
 		MaxLine:     opts.MaxLine,
 		ProjectRoot: opts.ProjectRoot,
@@ -349,6 +353,7 @@ func (s *Searcher) SearchSimilarByText(ctx context.Context, text string, opts Si
 		ChunkTypes:  opts.ChunkTypes,
 		FilePattern: opts.FilePattern,
 		Directory:   opts.Directory,
+		FilePaths:   opts.FilePaths,
 		MinLine:     opts.MinLine,
 		MaxLine:     opts.MaxLine,
 		ProjectRoot: opts.ProjectRoot,

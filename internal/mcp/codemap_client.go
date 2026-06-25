@@ -410,6 +410,90 @@ func (c *CodemapClient) RelatedFiles(ctx context.Context, projectPath, relPath s
 	return &RelatedFilesResult{Indexed: true, Files: files}, nil
 }
 
+// ImpactFile represents a single file in a symbol's blast radius.
+type ImpactFile struct {
+	RelativePath string `json:"relative_path"`
+	Reason       string `json:"reason"` // e.g. "caller", "callee", "test"
+}
+
+// ImpactResult holds the output of `codemap impact <symbol> --json`: the
+// affected file set (blast radius) and the covering tests. This is the
+// structural pre-filter that narrows vecgrep's semantic search scope.
+//
+// Return contract mirrors RelatedFiles:
+//   - ErrCodemapUnavailable: client is nil / binary missing → fall back.
+//   - any other non-nil error: codemap exited non-zero or emitted unparseable
+//     JSON → fall back and log.
+//   - (*ImpactResult, nil): a real answer. Check Indexed: false means
+//     not-indexed (fall back); true with empty Files is a valid empty answer.
+type ImpactResult struct {
+	Indexed     bool         // whether codemap has a graph for this project
+	Symbol      string       // the resolved symbol
+	Files       []ImpactFile // affected files in the blast radius
+	Tests       []string     // covering test files
+	BlastRadius int          // total transitive symbols affected
+}
+
+// impactEnvelope mirrors codemap's `impact --json` output:
+//
+//	{ "project":"demo", "symbol":"pkg.Foo", "indexed":true,
+//	  "files":[{"relative_path":"app/login.go","reason":"caller"}],
+//	  "tests":["app/login_test.go"],
+//	  "blast_radius":42 }
+type impactEnvelope struct {
+	Project     string       `json:"project"`
+	Symbol      string       `json:"symbol"`
+	Indexed     bool         `json:"indexed"`
+	Files       []ImpactFile `json:"files"`
+	Tests       []string     `json:"tests"`
+	BlastRadius int          `json:"blast_radius"`
+}
+
+// Impact runs `codemap impact <symbol> --json` to compute the blast radius
+// of a changed symbol: the set of files transitively affected by a change to
+// that symbol, plus the tests that cover those paths. The returned file set
+// is used to scope vecgrep's semantic search so only files within the blast
+// radius are ranked.
+//
+// depth controls the transitive traversal depth (0 = use codemap's default,
+// typically 3). When depth > 0, `--depth N` is passed.
+//
+// Degrades silently: when codemap is unavailable, returns ErrCodemapUnavailable
+// so the caller can fall back to unscoped search.
+func (c *CodemapClient) Impact(ctx context.Context, projectPath, symbol string, depth int) (*ImpactResult, error) {
+	if !c.Available() {
+		return nil, ErrCodemapUnavailable
+	}
+
+	args := []string{"impact", symbol, "--json"}
+	if depth > 0 {
+		args = append(args, "--depth", fmt.Sprintf("%d", depth))
+	}
+	cmd := exec.CommandContext(ctx, c.bin, args...)
+	cmd.Dir = projectPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("codemap impact %q: %w", symbol, err)
+	}
+
+	var env impactEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		return nil, fmt.Errorf("codemap impact %q: parse: %w", symbol, err)
+	}
+
+	if !env.Indexed {
+		return &ImpactResult{Indexed: false, Symbol: env.Symbol}, nil
+	}
+
+	return &ImpactResult{
+		Indexed:     true,
+		Symbol:      env.Symbol,
+		Files:       env.Files,
+		Tests:       env.Tests,
+		BlastRadius: env.BlastRadius,
+	}, nil
+}
+
 // CodemapRerankResult holds a search result with structural metadata from codemap.
 type CodemapRerankResult struct {
 	Result          codemapSearchResult

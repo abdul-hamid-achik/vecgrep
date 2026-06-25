@@ -826,6 +826,7 @@ type FilterOptions struct {
 	ChunkTypes  []string // Filter by multiple chunk types (OR)
 	FilePattern string   // Filter by file pattern (glob)
 	Directory   string   // Filter by directory prefix
+	FilePaths   []string // Filter by an allow-list of relative paths (OR). Used for blast-radius scoping.
 	MinLine     int      // Filter by minimum start line (0 = no filter)
 	MaxLine     int      // Filter by maximum start line (0 = no filter)
 	ProjectRoot string   // Filter by project root
@@ -875,6 +876,18 @@ func (b *VecLiteBackend) buildNativeFilters(opts FilterOptions) []veclite.Filter
 			dir += "/"
 		}
 		filters = append(filters, veclite.Prefix("relative_path", dir))
+	}
+
+	// File allow-list filter (blast-radius scoping). When FilePaths is
+	// non-empty, restrict results to chunks whose relative_path is in the
+	// set. This is an OR filter — a chunk matches if its path is any of
+	// the listed files.
+	if len(opts.FilePaths) > 0 {
+		paths := make([]any, len(opts.FilePaths))
+		for i, p := range opts.FilePaths {
+			paths[i] = p
+		}
+		filters = append(filters, veclite.In("relative_path", paths...))
 	}
 
 	// Line range filter

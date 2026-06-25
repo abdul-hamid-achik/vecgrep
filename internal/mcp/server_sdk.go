@@ -41,6 +41,8 @@ type SearchInput struct {
 	ChunkTypes   []string `json:"chunk_types,omitempty" jsonschema:"Filter results by multiple chunk types (OR)."`
 	FilePattern  string   `json:"file_pattern,omitempty" jsonschema:"Filter results by file path pattern (glob)."`
 	Directory    string   `json:"directory,omitempty" jsonschema:"Filter results by directory prefix."`
+	FilePaths    []string `json:"file_paths,omitempty" jsonschema:"Restrict search to these relative paths (allow-list). Used for blast-radius scoping from codemap impact."`
+	Symbol       string   `json:"symbol,omitempty" jsonschema:"When set, uses codemap impact to compute the blast radius of this symbol and scopes the search to affected files. Falls back to unscoped search if codemap is unavailable."`
 	MinLine      int      `json:"min_line,omitempty" jsonschema:"Filter by minimum start line."`
 	MaxLine      int      `json:"max_line,omitempty" jsonschema:"Filter by maximum start line."`
 	Mode         string   `json:"mode,omitempty" jsonschema:"Search mode: 'semantic' (vector only), 'keyword' (text only), or 'hybrid' (combined, default)."`
@@ -52,6 +54,15 @@ type SearchInput struct {
 type IndexInput struct {
 	Paths []string `json:"paths,omitempty" jsonschema:"Specific paths to index. If empty indexes the entire project."`
 	Force bool     `json:"force,omitempty" jsonschema:"Force re-indexing of all files even if unchanged."`
+}
+
+// InvestigateInput is the input for vecgrep_investigate.
+type InvestigateInput struct {
+	Symbol       string `json:"symbol" jsonschema:"The symbol to compute the blast radius for (e.g., 'pkg.FuncName' or 'FuncName'). codemap impact finds all files transitively affected by a change to this symbol."`
+	Query        string `json:"query" jsonschema:"The semantic search query to run within the scoped file set."`
+	Limit        int    `json:"limit,omitempty" jsonschema:"Maximum number of results to return (default: 10)."`
+	Mode         string `json:"mode,omitempty" jsonschema:"Search mode: 'semantic' (vector only), 'keyword' (text only), or 'hybrid' (combined, default)."`
+	ContextLines int    `json:"context_lines,omitempty" jsonschema:"Number of lines to include before and after each result (default: 0)."`
 }
 
 // StatusInput is the input for vecgrep_status (empty).
@@ -226,6 +237,11 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Name:        "vecgrep_branch_status",
 		Description: "Show per-branch index status: current git branch, HEAD SHA, and all known branch indexes with their vector counts and snapshot IDs.",
 	}, s.handleBranchStatus)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name:        "vecgrep_investigate",
+		Description: "Investigate a changed symbol's blast radius: runs codemap impact to find all affected files, then scopes a semantic search to that file set. Falls back to unscoped search when codemap is unavailable or not indexed.",
+	}, s.handleInvestigate)
 
 	// Memory tools (global, not project-specific)
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -652,6 +668,13 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		opts.MaxLine = input.MaxLine
 	}
 
+	// Apply file scoping. Direct file_paths take precedence; otherwise,
+	// when symbol is set, resolve the blast radius via codemap impact.
+	scopeFiles, scopeNote := s.resolveSearchScope(ctx, input)
+	if len(scopeFiles) > 0 {
+		opts.FilePaths = scopeFiles
+	}
+
 	// Parse search mode
 	switch strings.ToLower(input.Mode) {
 	case "semantic":
@@ -665,6 +688,12 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	}
 
 	var sb strings.Builder
+
+	// Report scoping status so the caller knows whether codemap was used
+	if scopeNote != "" {
+		sb.WriteString(scopeNote)
+		sb.WriteString("\n\n")
+	}
 
 	// Perform search with or without explanation
 	if input.Explain {
@@ -1294,4 +1323,138 @@ func (s *SDKServer) rerankWithCodemap(ctx context.Context, results []search.Resu
 		}
 	}
 	copy(results, reordered)
+}
+
+// resolveSearchScope determines the file allow-list for a search. When
+// input.FilePaths is set, it is used directly. When input.Symbol is set,
+// codemap impact is called to compute the blast radius and the affected file
+// set becomes the scope. Returns (files, note) where note is a human-readable
+// status line for the caller's output (empty when no scoping was requested).
+// Degrades silently: if codemap is unavailable or unindexed, returns an empty
+// file list and a note explaining the fallback.
+func (s *SDKServer) resolveSearchScope(ctx context.Context, input SearchInput) (files []string, note string) {
+	// Direct file_paths take precedence
+	if len(input.FilePaths) > 0 {
+		return input.FilePaths, fmt.Sprintf("**Scope:** restricted to %d file(s)", len(input.FilePaths))
+	}
+
+	if input.Symbol == "" {
+		return nil, ""
+	}
+
+	if s.codemap == nil || !s.codemap.Available() {
+		return nil, fmt.Sprintf("**Scope:** symbol %q requested but codemap is unavailable — searching unscoped", input.Symbol)
+	}
+
+	depth := int(s.codemapCfg.ImpactDepth)
+	result, err := s.codemap.Impact(ctx, s.projectRoot, input.Symbol, depth)
+	if err != nil {
+		return nil, fmt.Sprintf("**Scope:** codemap impact failed for %q (%v) — searching unscoped", input.Symbol, err)
+	}
+	if !result.Indexed {
+		return nil, fmt.Sprintf("**Scope:** codemap graph not indexed for %q — searching unscoped", input.Symbol)
+	}
+
+	// Extract relative paths from the blast radius
+	for _, f := range result.Files {
+		if f.RelativePath != "" {
+			files = append(files, f.RelativePath)
+		}
+	}
+
+	if len(files) == 0 {
+		return nil, fmt.Sprintf("**Scope:** codemap impact for %q returned no affected files — searching unscoped", input.Symbol)
+	}
+
+	return files, fmt.Sprintf("**Scope:** codemap impact for %q — %d file(s) in blast radius (radius: %d)", input.Symbol, len(files), result.BlastRadius)
+}
+
+// handleInvestigate handles the vecgrep_investigate tool. It runs codemap
+// impact to compute the blast radius of a symbol, then scopes a semantic
+// search to the affected file set. When codemap is unavailable or not
+// indexed, it falls back to an unscoped search with a note.
+func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolRequest, input InvestigateInput) (*sdkmcp.CallToolResult, any, error) {
+	if err := s.ensureInitialized(ctx); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	if errResult := s.checkProvider(ctx); errResult != nil {
+		return errResult, nil, nil
+	}
+
+	if input.Symbol == "" {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "symbol parameter is required"}},
+			IsError: true,
+		}, nil, nil
+	}
+	if input.Query == "" {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "query parameter is required"}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Build search options from the investigate input
+	opts := search.DefaultSearchOptions()
+	opts.ProjectRoot = s.projectRoot
+	if input.Limit > 0 {
+		opts.Limit = input.Limit
+	}
+
+	// Parse search mode
+	switch strings.ToLower(input.Mode) {
+	case "semantic":
+		opts.Mode = search.SearchModeSemantic
+	case "keyword":
+		opts.Mode = search.SearchModeKeyword
+	case "hybrid", "":
+		opts.Mode = search.SearchModeHybrid
+	default:
+		opts.Mode = search.SearchModeHybrid
+	}
+
+	// Resolve blast radius scope via codemap
+	scopeInput := SearchInput{
+		Symbol: input.Symbol,
+	}
+	scopeFiles, scopeNote := s.resolveSearchScope(ctx, scopeInput)
+	if len(scopeFiles) > 0 {
+		opts.FilePaths = scopeFiles
+	}
+
+	var sb strings.Builder
+
+	// Report scoping status
+	if scopeNote != "" {
+		sb.WriteString(scopeNote)
+		sb.WriteString("\n\n")
+	}
+
+	// Perform the scoped search
+	results, err := s.searcher.Search(ctx, input.Query, opts)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Expand context lines if requested
+	if input.ContextLines > 0 {
+		for i := range results {
+			results[i].Content = expandContextLines(s.projectRoot, results[i], input.ContextLines)
+		}
+	}
+
+	s.rerankWithCodemap(ctx, results, s.codemapStructuralWeight())
+	formatSearchResults(&sb, results)
+	s.annotateSearchHits(ctx, results, input.Query)
+
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+	}, nil, nil
 }
