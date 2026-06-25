@@ -1,0 +1,36 @@
+version: 1
+name: config_cache_throttle
+intent: |
+    a user can configure cache and throttle settings from the CLI and inspect them in the resolved config without contacting the embedding provider.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; \"$ROOT/bin/vecgrep\" config set embedding.max_batch_size 32 >/dev/null; \"$ROOT/bin/vecgrep\" config set embedding.keep_alive 30m >/dev/null; \"$ROOT/bin/vecgrep\" config set cache.fcheap_ttl 30d >/dev/null; \"$ROOT/bin/vecgrep\" config show"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 55
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: config_cache
+outcomes:
+    - id: max_batch_size_visible
+      description: the configured max_batch_size is shown
+      verify:
+        screen:
+            contains: "max_batch_size: 32"
+    - id: keep_alive_visible
+      description: the configured keep_alive is shown
+      verify:
+        screen:
+            contains: "keep_alive: 30m"
+    - id: fcheap_ttl_visible
+      description: the configured fcheap_ttl is shown
+      verify:
+        screen:
+            contains: "fcheap_ttl: 30d"

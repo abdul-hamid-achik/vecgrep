@@ -1,0 +1,26 @@
+version: 1
+name: cache_status
+intent: |
+    a user can check the embedding cache status to see whether the disk cache is enabled and whether fcheap integration is active.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; \"$ROOT/bin/vecgrep\" cache status"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: cache_status
+outcomes:
+    - id: cache_status_output
+      description: the cache status command runs and shows cache-related information
+      verify:
+        screen:
+            regex: "cache|Cache|fcheap|disk"

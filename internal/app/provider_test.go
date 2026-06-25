@@ -45,9 +45,12 @@ func TestNewProviderSupportsCloudProviders(t *testing.T) {
 			cfg.Embedding.Model = tt.model
 			cfg.Embedding.Dimensions = tt.dims
 
-			provider, err := NewProvider(cfg)
+			// Use newInnerProvider to get the raw provider without the
+			// throttle wrapper — NewProvider wraps everything in a
+			// ThrottledProvider.
+			provider, err := newInnerProvider(cfg)
 			if err != nil {
-				t.Fatalf("NewProvider failed: %v", err)
+				t.Fatalf("newInnerProvider failed: %v", err)
 			}
 
 			switch tt.wantType.(type) {

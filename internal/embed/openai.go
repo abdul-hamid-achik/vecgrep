@@ -368,3 +368,9 @@ func (p *OpenAIProvider) Ping(ctx context.Context) error {
 
 	return nil
 }
+
+// Warmup is a no-op for the OpenAI provider. Cloud-hosted models are
+// always loaded, so there is no cold-start penalty to avoid.
+func (p *OpenAIProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return 0, nil
+}

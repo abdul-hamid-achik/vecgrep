@@ -57,6 +57,11 @@ func (m *mockEmbedProvider) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Warmup implements the Provider interface for the test mock.
+func (m *mockEmbedProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return 0, nil
+}
+
 type documentProviderMock struct {
 	*mockEmbedProvider
 	documentCalls int
@@ -436,7 +441,7 @@ func TestHashFile(t *testing.T) {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
 
-	hash1, err := hashFile(testFile)
+	hash1, _, err := hashFile(testFile)
 	if err != nil {
 		t.Fatalf("hashFile failed: %v", err)
 	}
@@ -446,7 +451,7 @@ func TestHashFile(t *testing.T) {
 	}
 
 	// Same content should produce same hash
-	hash2, err := hashFile(testFile)
+	hash2, _, err := hashFile(testFile)
 	if err != nil {
 		t.Fatalf("hashFile failed: %v", err)
 	}
@@ -460,7 +465,7 @@ func TestHashFile(t *testing.T) {
 		t.Fatalf("Failed to write test file: %v", err)
 	}
 
-	hash3, err := hashFile(testFile)
+	hash3, _, err := hashFile(testFile)
 	if err != nil {
 		t.Fatalf("hashFile failed: %v", err)
 	}

@@ -253,6 +253,7 @@ func (r *ConfigResolution) mergeConfig(dst, src *Config) {
 	mergeVectorConfig(dst, src)
 	mergeCodemapConfig(dst, src)
 	mergeDaemonConfig(dst, src)
+	mergeCacheConfig(dst, src)
 }
 
 func mergeEmbeddingConfig(dst, src *EmbeddingConfig) {
@@ -285,6 +286,29 @@ func mergeEmbeddingConfig(dst, src *EmbeddingConfig) {
 	}
 	if src.VoyageBaseURL != "" {
 		dst.VoyageBaseURL = src.VoyageBaseURL
+	}
+	mergeThrottleConfig(&dst.Throttle, &src.Throttle)
+
+	if src.MaxBatchSize != 0 {
+		dst.MaxBatchSize = src.MaxBatchSize
+	}
+	if src.KeepAlive != "" {
+		dst.KeepAlive = src.KeepAlive
+	}
+}
+
+// mergeThrottleConfig merges non-zero throttle settings from src into dst.
+// The Enabled pointer is copied when non-nil so callers can explicitly opt
+// in or out of the throttled provider wrapper.
+func mergeThrottleConfig(dst, src *ThrottleConfig) {
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
+	if src.MaxInFlight != 0 {
+		dst.MaxInFlight = src.MaxInFlight
+	}
+	if src.RateLimit > 0 {
+		dst.RateLimit = src.RateLimit
 	}
 }
 
@@ -354,6 +378,21 @@ func mergeCodemapConfig(dst, src *Config) {
 	}
 }
 
+// mergeCacheConfig merges non-zero cache settings from src into dst.
+// The FcheapStash pointer is copied when non-nil so callers can explicitly
+// enable or disable fcheap embedding-cache stashing.
+func mergeCacheConfig(dst, src *Config) {
+	if src.Cache.FcheapStash != nil || src.has("cache.fcheap_stash") {
+		dst.Cache.FcheapStash = src.Cache.FcheapStash
+	}
+	if src.Cache.FcheapTTL != "" || src.has("cache.fcheap_ttl") {
+		dst.Cache.FcheapTTL = src.Cache.FcheapTTL
+	}
+	if src.Cache.Path != "" || src.has("cache.path") {
+		dst.Cache.Path = src.Cache.Path
+	}
+}
+
 func mergeDaemonConfig(dst, src *Config) {
 	if src.Daemon.Autostart || src.has("daemon.autostart") {
 		dst.Daemon.Autostart = src.Daemon.Autostart
@@ -372,6 +411,9 @@ func mergeDaemonConfig(dst, src *Config) {
 	}
 	if src.Daemon.Debounce != 0 || src.has("daemon.debounce") {
 		dst.Daemon.Debounce = src.Daemon.Debounce
+	}
+	if src.Daemon.SweepInterval != "" || src.has("daemon.sweep_interval") {
+		dst.Daemon.SweepInterval = src.Daemon.SweepInterval
 	}
 }
 
@@ -432,6 +474,33 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 		cfg.Embedding.VoyageBaseURL = val
 	} else if val := os.Getenv("VOYAGE_BASE_URL"); val != "" {
 		cfg.Embedding.VoyageBaseURL = val
+	}
+
+	// Embedding throttle settings
+	if val := os.Getenv("VECGREP_EMBEDDING_THROTTLE_ENABLED"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			cfg.Embedding.Throttle.Enabled = &enabled
+		}
+	}
+	if val := os.Getenv("VECGREP_EMBEDDING_THROTTLE_MAX_IN_FLIGHT"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			cfg.Embedding.Throttle.MaxInFlight = n
+		}
+	}
+	if val := os.Getenv("VECGREP_EMBEDDING_THROTTLE_RATE_LIMIT"); val != "" {
+		if r, err := strconv.ParseFloat(val, 64); err == nil && r >= 0 {
+			cfg.Embedding.Throttle.RateLimit = r
+		}
+	}
+
+	// Embedding extras
+	if val := os.Getenv("VECGREP_EMBEDDING_MAX_BATCH_SIZE"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+			cfg.Embedding.MaxBatchSize = n
+		}
+	}
+	if val := os.Getenv("VECGREP_EMBEDDING_KEEP_ALIVE"); val != "" {
+		cfg.Embedding.KeepAlive = val
 	}
 
 	// Data directory
@@ -508,6 +577,22 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
 			cfg.Daemon.Debounce = n
 		}
+	}
+	if val := os.Getenv("VECGREP_DAEMON_SWEEP_INTERVAL"); val != "" {
+		cfg.Daemon.SweepInterval = val
+	}
+
+	// Cache settings
+	if val := os.Getenv("VECGREP_CACHE_FCHEAP_STASH"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			cfg.Cache.FcheapStash = &enabled
+		}
+	}
+	if val := os.Getenv("VECGREP_CACHE_FCHEAP_TTL"); val != "" {
+		cfg.Cache.FcheapTTL = val
+	}
+	if val := os.Getenv("VECGREP_CACHE_PATH"); val != "" {
+		cfg.Cache.Path = val
 	}
 }
 
@@ -625,6 +710,38 @@ func ShowResolvedConfig(cfg *Config, sources []string) string {
 		}
 	}
 
+	// Embedding throttle settings
+	sb.WriteString("\nEmbedding throttle:\n")
+	if cfg.Embedding.Throttle.Enabled != nil {
+		fmt.Fprintf(&sb, "  throttle.enabled: %t\n", *cfg.Embedding.Throttle.Enabled)
+	} else {
+		sb.WriteString("  throttle.enabled: [unset - default wrap]\n")
+	}
+	fmt.Fprintf(&sb, "  throttle.max_in_flight: %d\n", cfg.Embedding.Throttle.MaxInFlight)
+	fmt.Fprintf(&sb, "  throttle.rate_limit: %.1f\n", cfg.Embedding.Throttle.RateLimit)
+
+	// Embedding extras
+	if cfg.Embedding.MaxBatchSize > 0 {
+		fmt.Fprintf(&sb, "  max_batch_size: %d\n", cfg.Embedding.MaxBatchSize)
+	}
+	if cfg.Embedding.KeepAlive != "" {
+		fmt.Fprintf(&sb, "  keep_alive: %s\n", cfg.Embedding.KeepAlive)
+	}
+
+	// Cache settings
+	sb.WriteString("\nCache:\n")
+	if cfg.Cache.FcheapStash != nil {
+		fmt.Fprintf(&sb, "  fcheap_stash: %t\n", *cfg.Cache.FcheapStash)
+	} else {
+		sb.WriteString("  fcheap_stash: true (default)\n")
+	}
+	if cfg.Cache.FcheapTTL != "" {
+		fmt.Fprintf(&sb, "  fcheap_ttl: %s\n", cfg.Cache.FcheapTTL)
+	}
+	if cfg.Cache.Path != "" {
+		fmt.Fprintf(&sb, "  path: %s\n", cfg.Cache.Path)
+	}
+
 	// Indexing settings
 	sb.WriteString("\nIndexing:\n")
 	fmt.Fprintf(&sb, "  chunk_size: %d\n", cfg.Indexing.ChunkSize)
@@ -667,6 +784,9 @@ func ShowResolvedConfig(cfg *Config, sources []string) string {
 	fmt.Fprintf(&sb, "  daemon.embed_rps: %.1f\n", cfg.Daemon.EmbedRPS)
 	fmt.Fprintf(&sb, "  daemon.embed_max_in_flight: %d\n", cfg.Daemon.EmbedMaxInFlight)
 	fmt.Fprintf(&sb, "  daemon.debounce: %d\n", cfg.Daemon.Debounce)
+	if cfg.Daemon.SweepInterval != "" {
+		fmt.Fprintf(&sb, "  daemon.sweep_interval: %s\n", cfg.Daemon.SweepInterval)
+	}
 
 	// Sources
 	if len(sources) > 0 {

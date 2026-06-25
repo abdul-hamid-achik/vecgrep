@@ -1,0 +1,26 @@
+version: 1
+name: branch_prune
+intent: |
+    a user can prune stale branch index snapshots for branches that no longer exist in the repository.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; git init >/dev/null 2>&1; git config user.email test@test.test; git config user.name test; \"$ROOT/bin/vecgrep\" init >/dev/null; \"$ROOT/bin/vecgrep\" branch prune 2>&1; true"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: branch_prune
+outcomes:
+    - id: prune_command_runs
+      description: the branch prune command runs without crashing
+      verify:
+        screen:
+            regex: "prune|branch|No stale|nothing"

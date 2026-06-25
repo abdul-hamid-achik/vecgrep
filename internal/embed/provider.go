@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Common errors for embedding providers.
@@ -35,6 +36,12 @@ type Provider interface {
 
 	// Ping checks if the provider is available and the model is loaded.
 	Ping(ctx context.Context) error
+
+	// Warmup preloads the embedding model so the first real request avoids
+	// cold-start latency. It returns the load_duration (time the backend
+	// spent loading the model) that callers may log. Providers that have no
+	// concept of model loading return a zero duration and nil error.
+	Warmup(ctx context.Context) (time.Duration, error)
 }
 
 // QueryProvider is implemented by providers that support retrieval-specific

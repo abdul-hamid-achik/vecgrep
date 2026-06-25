@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
@@ -36,29 +37,74 @@ func (s *Service) Index(ctx context.Context, req IndexRequest, progress func(ind
 		return nil, fmt.Errorf("embedding provider unavailable: %w", err)
 	}
 
+	// Restore the embedding cache from fcheap before indexing so unchanged
+	// chunks don't need to be re-embedded. Best-effort: if no stash is found
+	// or fcheap is unavailable, indexing proceeds normally.
+	s.maybeRestoreEmbeddingCache(ctx)
+
+	// Warm up the embedding model so the first batch doesn't pay
+	// cold-start latency.
+	log.Printf("warming up embedding model")
+	if loadDur, err := s.session.Provider.Warmup(ctx); err != nil {
+		log.Printf("model warmup skipped: %v", err)
+	} else {
+		log.Printf("model warmup complete (load_duration: %dms)", loadDur.Milliseconds())
+	}
+
 	indexer := index.NewIndexer(s.session.DB, s.session.Provider, s.indexerConfig(req.AdditionalIgnores))
 	if progress != nil {
 		indexer.SetProgressCallback(progress)
 	}
 
+	var result *index.IndexResult
+	var indexErr error
 	if req.FullReindex {
-		result, err := indexer.ReindexAll(ctx, s.session.ProjectRoot)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.saveCurrentEmbeddingProfile(); err != nil {
-			return nil, err
-		}
-		return result, nil
+		result, indexErr = indexer.ReindexAll(ctx, s.session.ProjectRoot)
+	} else {
+		result, indexErr = indexer.Index(ctx, s.session.ProjectRoot, req.Paths...)
 	}
-	result, err := indexer.Index(ctx, s.session.ProjectRoot, req.Paths...)
-	if err != nil {
-		return nil, err
+	if indexErr != nil {
+		return nil, indexErr
 	}
 	if err := s.saveCurrentEmbeddingProfile(); err != nil {
 		return nil, err
 	}
+
+	// Auto-snapshot the embedding cache to fcheap after a successful index.
+	// Best-effort: failures are logged and swallowed so they never break
+	// the index command.
+	s.maybeStashEmbeddingCache(ctx)
+
 	return result, nil
+}
+
+// maybeRestoreEmbeddingCache searches fcheap for a matching embedding-cache
+// stash and merges it into the live DiskCache before indexing. Best-effort:
+// if fcheap is unavailable or no stash is found, it is a silent no-op.
+func (s *Service) maybeRestoreEmbeddingCache(ctx context.Context) {
+	if !s.session.Config.Cache.FcheapStashEnabled() {
+		return
+	}
+	modelName := s.session.Config.Embedding.Model
+	restoredPath := restoreEmbeddingCache(ctx, s.session.ProjectRoot, modelName)
+	if restoredPath != "" {
+		loadRestoredCacheIntoProvider(s.session.Provider, restoredPath)
+	}
+}
+
+// maybeStashEmbeddingCache stashes the disk cache file (if any) to fcheap
+// after indexing completes. Best-effort: if fcheap is unavailable or the
+// save fails, the error is logged and swallowed.
+func (s *Service) maybeStashEmbeddingCache(ctx context.Context) {
+	if !s.session.Config.Cache.FcheapStashEnabled() {
+		return
+	}
+	modelName := s.session.Config.Embedding.Model
+	ttl := s.session.Config.Cache.FcheapTTL
+	if ttl == "" {
+		ttl = "30d"
+	}
+	stashEmbeddingCache(ctx, s.session.Provider, s.session.ProjectRoot, modelName, ttl)
 }
 
 func (s *Service) DeleteFile(ctx context.Context, path string) (int64, error) {
@@ -66,6 +112,17 @@ func (s *Service) DeleteFile(ctx context.Context, path string) (int64, error) {
 		return 0, fmt.Errorf("service not initialized")
 	}
 	return s.session.DB.DeleteFile(ctx, path)
+}
+
+// DryRunPreview returns counts of files needing reindexing and an estimated
+// chunk count without calling the embedding provider. It is used by the
+// --dry-run flag on the index command to preview what would change.
+func (s *Service) DryRunPreview(ctx context.Context) (*index.DryRunPreview, error) {
+	if s == nil || s.session == nil {
+		return nil, fmt.Errorf("service not initialized")
+	}
+	indexer := index.NewIndexer(s.session.DB, nil, s.indexerConfig(nil))
+	return indexer.DryRunPreview(ctx, s.session.ProjectRoot)
 }
 
 func (s *Service) Clean(ctx context.Context) (*db.CleanStats, error) {
@@ -97,7 +154,11 @@ func (s *Service) Reset(ctx context.Context, scope ResetScope) error {
 
 func (s *Service) indexerConfig(additionalIgnores []string) index.IndexerConfig {
 	cfg := index.DefaultIndexerConfig()
+	// Config ChunkSize is in tokens; the chunker operates in characters.
+	// Approximate conversion: ~4 chars per token for typical code.
 	cfg.ChunkSize = s.session.Config.Indexing.ChunkSize * 4
+	// Config ChunkOverlap is in tokens; the chunker operates in characters.
+	// Approximate conversion: ~4 chars per token for typical code.
 	cfg.ChunkOverlap = s.session.Config.Indexing.ChunkOverlap * 4
 	cfg.MaxFileSize = s.session.Config.Indexing.MaxFileSize
 	cfg.IgnorePatterns = append(cfg.IgnorePatterns, s.session.Config.Indexing.IgnorePatterns...)

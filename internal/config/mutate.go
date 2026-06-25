@@ -86,6 +86,37 @@ func ParseConfigValue(key, value string) (any, error) {
 			return nil, fmt.Errorf("invalid daemon.embed_rps value %q: must be zero or greater", value)
 		}
 		return r, nil
+	case "embedding.throttle.enabled":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid embedding.throttle.enabled value %q: %w", value, err)
+		}
+		return parsed, nil
+	case "embedding.throttle.max_in_flight":
+		return parseNonNegativeInt(key, value)
+	case "embedding.throttle.rate_limit":
+		r, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid embedding.throttle.rate_limit value %q: %w", value, err)
+		}
+		if r < 0 {
+			return nil, fmt.Errorf("invalid embedding.throttle.rate_limit value %q: must be zero or greater", value)
+		}
+		return r, nil
+	case "embedding.max_batch_size":
+		return parseNonNegativeInt(key, value)
+	case "embedding.keep_alive":
+		return value, nil
+	case "cache.fcheap_stash":
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cache.fcheap_stash value %q: %w", value, err)
+		}
+		return parsed, nil
+	case "cache.fcheap_ttl", "cache.path":
+		return value, nil
+	case "daemon.sweep_interval":
+		return value, nil
 	default:
 		return nil, fmt.Errorf("unknown config key: %s", key)
 	}
@@ -124,6 +155,13 @@ func ApplyConfigValue(cfg *Config, key, value string) error {
 		cfg.Embedding.VoyageBaseURL = parsed.(string)
 	case "embedding.dimensions":
 		cfg.Embedding.Dimensions = parsed.(int)
+	case "embedding.throttle.enabled":
+		b := parsed.(bool)
+		cfg.Embedding.Throttle.Enabled = &b
+	case "embedding.throttle.max_in_flight":
+		cfg.Embedding.Throttle.MaxInFlight = parsed.(int)
+	case "embedding.throttle.rate_limit":
+		cfg.Embedding.Throttle.RateLimit = parsed.(float64)
 	case "indexing.chunk_size":
 		cfg.Indexing.ChunkSize = parsed.(int)
 	case "indexing.chunk_overlap":
@@ -166,6 +204,19 @@ func ApplyConfigValue(cfg *Config, key, value string) error {
 		cfg.Daemon.EmbedMaxInFlight = parsed.(int)
 	case "daemon.debounce":
 		cfg.Daemon.Debounce = parsed.(int)
+	case "daemon.sweep_interval":
+		cfg.Daemon.SweepInterval = parsed.(string)
+	case "embedding.max_batch_size":
+		cfg.Embedding.MaxBatchSize = parsed.(int)
+	case "embedding.keep_alive":
+		cfg.Embedding.KeepAlive = parsed.(string)
+	case "cache.fcheap_stash":
+		b := parsed.(bool)
+		cfg.Cache.FcheapStash = &b
+	case "cache.fcheap_ttl":
+		cfg.Cache.FcheapTTL = parsed.(string)
+	case "cache.path":
+		cfg.Cache.Path = parsed.(string)
 	}
 
 	cfg.markPresent(key)

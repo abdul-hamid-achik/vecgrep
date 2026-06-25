@@ -279,6 +279,58 @@ var branchInstallHookCmd = &cobra.Command{
 	RunE:  runBranchInstallHook,
 }
 
+var branchPruneCmd = &cobra.Command{
+	Use:   "prune",
+	Short: "Prune branch index snapshots for deleted branches",
+	Long: `Prune fcheap branch index snapshots whose git branches have been deleted.
+
+This runs fcheap cleanup-smart with the branch-gone category, filtered to
+stashes tagged with "branch:". Best-effort: if fcheap is not available,
+prints a notice and exits.
+
+Requires fcheap to be installed and on $PATH.`,
+	RunE: runBranchPrune,
+}
+
+// --- cache commands ---
+
+var cacheCmd = &cobra.Command{
+	Use:   "cache",
+	Short: "Manage the embedding cache and fcheap stash/restore",
+	Long: `Manage the disk-persistent embedding cache and its fcheap snapshot/restore
+integration.
+
+Subcommands:
+  status   Show embedding cache state (disk path, size, fcheap stashes count)
+  save     Manually stash the current cache to fcheap
+  restore  Manually restore the latest cache from fcheap
+  sweep    Clean up old/superseded cache stashes in fcheap`,
+}
+
+var cacheStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show embedding cache state",
+	RunE:  runCacheStatus,
+}
+
+var cacheSaveCmd = &cobra.Command{
+	Use:   "save",
+	Short: "Manually stash the current cache to fcheap",
+	RunE:  runCacheSave,
+}
+
+var cacheRestoreCmd = &cobra.Command{
+	Use:   "restore",
+	Short: "Manually restore from the latest fcheap stash",
+	RunE:  runCacheRestore,
+}
+
+var cacheSweepCmd = &cobra.Command{
+	Use:   "sweep",
+	Short: "Clean up old/superseded cache stashes",
+	RunE:  runCacheSweep,
+}
+
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Manage the background indexing daemon",
@@ -332,6 +384,7 @@ func init() {
 	indexCmd.Flags().Bool("full", false, "force full re-index")
 	indexCmd.Flags().StringSlice("ignore", nil, "additional patterns to ignore")
 	indexCmd.Flags().Bool("no-progress", false, "disable the live progress bar (useful for scripts/CI)")
+	indexCmd.Flags().Bool("dry-run", false, "preview changes without calling the embedding provider")
 
 	// Search command flags
 	searchCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
@@ -429,6 +482,14 @@ func init() {
 	branchCmd.AddCommand(branchSnapshotCmd)
 	branchCmd.AddCommand(branchStatusCmd)
 	branchCmd.AddCommand(branchInstallHookCmd)
+	branchCmd.AddCommand(branchPruneCmd)
+
+	// Cache subcommands
+	cacheCmd.AddCommand(cacheStatusCmd)
+	cacheCmd.AddCommand(cacheSaveCmd)
+	cacheCmd.AddCommand(cacheRestoreCmd)
+	cacheCmd.AddCommand(cacheSweepCmd)
+	rootCmd.AddCommand(cacheCmd)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -570,10 +631,35 @@ func runInitLocal(cwd string, force bool) error {
 func runIndex(cmd *cobra.Command, args []string) error {
 	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
+		if errors.Is(err, veclite.ErrFileLocked) || strings.Contains(strings.ToLower(err.Error()), "locked") {
+			fmt.Fprintln(os.Stderr, "\nError: the database is locked. The daemon may be running.")
+			fmt.Fprintln(os.Stderr, "  Use 'vecgrep daemon reindex' or stop the daemon first.")
+			os.Exit(1)
+		}
 		return err
 	}
 	defer session.Close()
 	service := app.NewService(session)
+
+	// --dry-run: preview changes without calling the embedding provider.
+	if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
+		preview, err := service.DryRunPreview(cmd.Context())
+		if err != nil {
+			return fmt.Errorf("dry-run failed: %w", err)
+		}
+		fmt.Printf("Dry run for %s\n", session.ProjectRoot)
+		fmt.Printf("  New files:       %d\n", preview.NewFiles)
+		fmt.Printf("  Modified files:  %d\n", preview.ModifiedFiles)
+		fmt.Printf("  Deleted files:   %d\n", preview.DeletedFiles)
+		fmt.Printf("  Files to embed:  %d\n", preview.FilesToEmbed)
+		fmt.Printf("  Estimated chunks: %d\n", preview.EstimatedChunks)
+		if preview.TotalPending == 0 {
+			fmt.Println("\nIndex is up to date — nothing to do.")
+		} else {
+			fmt.Printf("\nRun 'vecgrep index' to update the index.\n")
+		}
+		return nil
+	}
 
 	// Get flags
 	fullReindex, _ := cmd.Flags().GetBool("full")
@@ -616,8 +702,22 @@ func runIndex(cmd *cobra.Command, args []string) error {
 				// \033[K erases from the cursor to end of line, so a shorter
 				// line (shorter filename or smaller counts) doesn't leave
 				// trailing characters from the previous, longer line.
-				fmt.Printf("\r  %s (%d/%d files, %d chunks)\033[K",
-					p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
+				//
+				// Only show rate/ETA after at least 1 file is processed and
+				// elapsed > 1 second to avoid division by zero and misleading
+				// early rates.
+				elapsed := time.Since(p.StartTime)
+				if p.ProcessedFiles > 0 && elapsed > time.Second {
+					rate := float64(p.ProcessedFiles) / elapsed.Seconds()
+					remaining := p.TotalFiles - p.ProcessedFiles
+					eta := time.Duration(float64(remaining) / rate * float64(time.Second))
+					fmt.Printf("\r  %s (%d/%d files, %d chunks, %.1f files/s, ETA %s)\033[K",
+						p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks,
+						rate, formatETA(eta))
+				} else {
+					fmt.Printf("\r  %s (%d/%d files, %d chunks)\033[K",
+						p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
+				}
 			}
 		}
 		result, err = service.Index(cmd.Context(), req, progressCB)
@@ -652,14 +752,6 @@ func runIndex(cmd *cobra.Command, args []string) error {
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
-	session, err := app.OpenReadOnlySession(cmd.Context(), "")
-	if err != nil {
-		return err
-	}
-	defer session.Close()
-	service := app.NewService(session)
-
-	// Get flags
 	query := strings.Join(args, " ")
 	limit, _ := cmd.Flags().GetInt("limit")
 	format, _ := cmd.Flags().GetString("format")
@@ -678,6 +770,22 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	if linesRange != "" {
 		minLine, maxLine = app.ParseLineRange(linesRange)
 	}
+
+	// Try searching via the daemon socket first. If the daemon is running,
+	// this avoids opening a separate read-only session and re-initializing
+	// the embedding provider. Falls back transparently if the socket is
+	// unavailable or the request fails.
+	if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, explain, format); ok {
+		return nil
+	}
+
+	// Fallback: open a read-only session and search directly.
+	session, err := app.OpenReadOnlySession(cmd.Context(), "")
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	service := app.NewService(session)
 
 	// Parse search mode
 	mode := app.ParseSearchMode(modeStr, session.Config.Search.DefaultMode)
@@ -734,6 +842,103 @@ func isCharDevice(f *os.File) bool {
 // printSearchResults formats and prints search results.
 func printSearchResults(results []search.Result, format string) {
 	fmt.Print(render.Results(results, render.ParseOutputFormat(format)))
+}
+
+// tryDaemonSearch attempts to run a search through the daemon's unix socket.
+// It returns (true) if the search was performed and results were rendered,
+// or (false) if the daemon socket is unavailable, the request failed, or
+// the query uses filters the daemon protocol does not yet support (in which
+// case the caller falls back to a read-only session).
+func tryDaemonSearch(
+	ctx context.Context,
+	query string,
+	limit int,
+	modeStr, lang string,
+	languages, chunkTypes []string,
+	chunkType, filePattern, directory string,
+	minLine, maxLine int,
+	explain bool,
+	format string,
+) bool {
+	_ = ctx // reserved for future context-aware socket dial
+
+	// The daemon search protocol currently supports query, limit, mode, and
+	// language. If more complex filters are requested, fall back to the
+	// read-only session which has full filter support.
+	if len(languages) > 0 || len(chunkTypes) > 0 || chunkType != "" || filePattern != "" || directory != "" || minLine != 0 || maxLine != 0 || explain {
+		return false
+	}
+
+	// Find the project root and data dir to locate the daemon socket.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	projectRoot, err := config.FindProjectRootFrom(cwd)
+	if err != nil {
+		return false
+	}
+	resolved, err := config.LoadResolved(projectRoot)
+	if err != nil {
+		return false
+	}
+	socketPath := filepath.Join(resolved.Config.DataDir, "daemon.sock")
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return false // daemon not running
+	}
+	defer conn.Close()
+
+	enc := json.NewEncoder(conn)
+	dec := json.NewDecoder(conn)
+
+	params := struct {
+		Query    string `json:"query"`
+		Limit    int    `json:"limit"`
+		Mode     string `json:"mode"`
+		Language string `json:"language,omitempty"`
+	}{
+		Query:    query,
+		Limit:    limit,
+		Mode:     modeStr,
+		Language: lang,
+	}
+	paramsJSON, _ := json.Marshal(params)
+
+	if err := enc.Encode(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "daemon.search",
+		Params:  paramsJSON,
+	}); err != nil {
+		return false
+	}
+
+	var resp struct {
+		Result struct {
+			Results []search.Result `json:"results"`
+			Mode    string          `json:"mode"`
+		} `json:"result,omitempty"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := dec.Decode(&resp); err != nil {
+		return false
+	}
+	if resp.Error != nil {
+		return false // let the fallback handle the real error
+	}
+
+	printSearchResults(resp.Result.Results, format)
+	return true
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -961,9 +1166,26 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f PiB", value/unit)
 }
 
-// providerHealthLabel renders the ProviderHealth field for the CLI status
-// output. Empty means "not checked", "ok" is shown verbatim, anything else
-// is an error string and is truncated to keep the output tidy.
+// formatETA formats a duration as a human-readable ETA string:
+// < 60s = "Xs", < 60m = "Xm Ys", else = "Xh Ym".
+func formatETA(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	seconds := int(d.Seconds())
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	remainingSeconds := seconds % 60
+	if minutes < 60 {
+		return fmt.Sprintf("%dm %ds", minutes, remainingSeconds)
+	}
+	hours := minutes / 60
+	remainingMinutes := minutes % 60
+	return fmt.Sprintf("%dh %dm", hours, remainingMinutes)
+}
+
 func providerHealthLabel(health string) string {
 	if health == "" {
 		return "not checked"
@@ -1389,8 +1611,36 @@ func runBranchSwitch(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Switched index from '%s' to '%s'\n", result.FromBranch, result.ToBranch)
 	if result.Restored {
 		fmt.Printf("  Restored from fcheap snapshot (stash ID: %s)\n", result.SnapshotID)
+		fmt.Println("  Note: index was restored from a snapshot — no reindex needed.")
 	} else {
-		fmt.Println("  Fresh index — run 'vecgrep index' to build the index for this branch")
+		// No snapshot to restore — the caller needs to index the branch.
+		// We auto-snapshot after indexing completes so the next switch is fast.
+		fmt.Println("  Fresh index — indexing now...")
+
+		// Open a session for the target branch and index it, then snapshot.
+		session, sessErr := app.OpenSession(ctx, projectRoot)
+		if sessErr != nil {
+			fmt.Printf("  Warning: could not open session for indexing: %v\n", sessErr)
+			fmt.Println("  Run 'vecgrep index' to build the index for this branch.")
+		} else {
+			service := app.NewService(session)
+			_, idxErr := service.Index(ctx, app.IndexRequest{}, nil)
+			if cerr := session.Close(); cerr != nil {
+				fmt.Printf("  Warning: session close failed: %v\n", cerr)
+			}
+			if idxErr != nil {
+				fmt.Printf("  Warning: indexing failed: %v\n", idxErr)
+				fmt.Println("  Run 'vecgrep index' to build the index for this branch.")
+			} else {
+				// Auto-snapshot the freshly indexed branch directory.
+				snapResult, snapErr := app.BranchSnapshot(ctx, projectRoot, projectName)
+				if snapErr != nil {
+					fmt.Printf("  Warning: auto-snapshot failed: %v\n", snapErr)
+				} else if snapResult != nil && snapResult.SnapshotID != "" {
+					fmt.Printf("  Auto-snapshotted to fcheap stash %s\n", snapResult.SnapshotID)
+				}
+			}
+		}
 	}
 	fmt.Printf("  Duration: %s\n", result.Duration)
 	fmt.Println("\nNote: The index will use the branch-specific directory on next search/index/status.")
@@ -1483,6 +1733,124 @@ func runBranchStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	return nil
+}
+
+func runBranchPrune(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	count, err := app.PruneBranchIndexes(ctx)
+	if err != nil {
+		// fcheap not available is a soft error, not a hard failure.
+		if strings.Contains(err.Error(), "fcheap not found") {
+			fmt.Println("fcheap not found, skipping prune")
+			return nil
+		}
+		return fmt.Errorf("branch prune failed: %w", err)
+	}
+
+	fmt.Printf("Pruned %d branch index snapshots for deleted branches\n", count)
+	return nil
+}
+
+// --- cache command runners ---
+
+func runCacheStatus(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	session, err := app.OpenReadOnlySession(ctx, "")
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	cachePath := app.ResolvedCachePath(session.Config)
+	model := session.Config.Embedding.Model
+
+	fmt.Printf("Embedding cache status\n")
+	fmt.Printf("  Model: %s\n", model)
+	fmt.Printf("  Disk cache path: %s\n", cachePath)
+
+	if cachePath != "" {
+		if info, statErr := os.Stat(cachePath); statErr == nil {
+			fmt.Printf("  Disk cache size: %s\n", formatBytes(info.Size()))
+		} else {
+			fmt.Printf("  Disk cache size: (not yet created)\n")
+		}
+	}
+
+	stashes := app.CountEmbeddingCacheStashes(ctx)
+	fmt.Printf("  fcheap stashes: %d (tagged embedding-cache)\n", stashes)
+
+	if session.Config.Cache.FcheapStashEnabled() {
+		fmt.Printf("  fcheap stash: enabled (ttl: %s)\n", session.Config.Cache.FcheapTTL)
+	} else {
+		fmt.Printf("  fcheap stash: disabled\n")
+	}
+
+	return nil
+}
+
+func runCacheSave(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	session, err := app.OpenSession(ctx, "")
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	service := app.NewService(session)
+
+	f := app.NewFcheapWrapper()
+	if !f.Available() {
+		fmt.Println("fcheap not found, skipping cache save")
+		return nil
+	}
+
+	service.StashEmbeddingCacheManual(ctx)
+	fmt.Println("Embedding cache stashed to fcheap")
+	return nil
+}
+
+func runCacheRestore(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	session, err := app.OpenSession(ctx, "")
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	service := app.NewService(session)
+
+	f := app.NewFcheapWrapper()
+	if !f.Available() {
+		fmt.Println("fcheap not found, skipping cache restore")
+		return nil
+	}
+
+	restored := service.RestoreEmbeddingCacheManual(ctx)
+	if restored {
+		fmt.Println("Embedding cache restored from fcheap")
+	} else {
+		fmt.Println("No matching embedding cache stash found in fcheap")
+	}
+	return nil
+}
+
+func runCacheSweep(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	f := app.NewFcheapWrapper()
+	if !f.Available() {
+		fmt.Println("fcheap not found, skipping sweep")
+		return nil
+	}
+
+	count, err := app.SweepEmbeddingCaches(ctx)
+	if err != nil {
+		return fmt.Errorf("cache sweep failed: %w", err)
+	}
+	fmt.Printf("Swept %d embedding cache stashes from fcheap\n", count)
 	return nil
 }
 

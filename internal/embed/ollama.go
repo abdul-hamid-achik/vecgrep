@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -20,7 +21,11 @@ const (
 	defaultTimeout       = 30 * time.Second
 	defaultMaxRetries    = 3
 	defaultRetryInterval = 500 * time.Millisecond
-	maxBatchSize         = 64
+	defaultMaxBatchSize  = 64
+	// defaultKeepAlive is used for single (interactive) embed requests.
+	defaultKeepAlive = "5m"
+	// defaultBatchKeepAlive is used for batch (indexing) embed requests.
+	defaultBatchKeepAlive = "30m"
 )
 
 // OllamaConfig holds configuration for the Ollama embedding provider.
@@ -31,6 +36,14 @@ type OllamaConfig struct {
 	Timeout       time.Duration
 	MaxRetries    int
 	RetryInterval time.Duration
+	// MaxBatchSize is the maximum number of texts sent in a single /api/embed
+	// request (default 64). Larger batches are split into sub-batches of
+	// this size to keep HTTP request bodies reasonable.
+	MaxBatchSize int
+	// KeepAlive controls how long Ollama keeps the model loaded in memory
+	// after a request. If empty, sensible defaults are applied: "5m" for
+	// single (interactive) embeds and "30m" for batch (indexing) embeds.
+	KeepAlive string
 }
 
 // DefaultOllamaConfig returns a default configuration for Ollama.
@@ -42,6 +55,7 @@ func DefaultOllamaConfig() OllamaConfig {
 		Timeout:       defaultTimeout,
 		MaxRetries:    defaultMaxRetries,
 		RetryInterval: defaultRetryInterval,
+		MaxBatchSize:  defaultMaxBatchSize,
 	}
 }
 
@@ -54,22 +68,25 @@ type OllamaProvider struct {
 // ollamaEmbeddingRequest is the request body for Ollama's legacy /api/embeddings
 // endpoint (single prompt). Superseded by /api/embed which supports batch input.
 type ollamaEmbeddingRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
+	Model     string `json:"model"`
+	Prompt    string `json:"prompt"`
+	KeepAlive string `json:"keep_alive,omitempty"`
 }
 
 // ollamaEmbeddingResponse is the response from Ollama's legacy /api/embeddings
 // endpoint.
 type ollamaEmbeddingResponse struct {
-	Embedding []float64 `json:"embedding"`
+	Embedding    []float64 `json:"embedding"`
+	LoadDuration int64     `json:"load_duration,omitempty"`
 }
 
 // ollamaBatchEmbedRequest is the request body for Ollama's /api/embed endpoint
 // which accepts a string or a list of strings as input.
 type ollamaBatchEmbedRequest struct {
-	Model    string   `json:"model"`
-	Input    []string `json:"input"`
-	Truncate bool     `json:"truncate"`
+	Model     string   `json:"model"`
+	Input     []string `json:"input"`
+	Truncate  bool     `json:"truncate"`
+	KeepAlive string   `json:"keep_alive,omitempty"`
 }
 
 // ollamaBatchEmbedResponse is the response from Ollama's /api/embed endpoint.
@@ -105,6 +122,9 @@ func NewOllamaProvider(cfg OllamaConfig) *OllamaProvider {
 	}
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = defaultRetryInterval
+	}
+	if cfg.MaxBatchSize <= 0 {
+		cfg.MaxBatchSize = defaultMaxBatchSize
 	}
 
 	// Ensure URL doesn't have trailing slash
@@ -159,6 +179,12 @@ func (p *OllamaProvider) doEmbed(ctx context.Context, text string) ([]float32, e
 	reqBody := ollamaEmbeddingRequest{
 		Model:  p.config.Model,
 		Prompt: text,
+	}
+	// Apply the configured keep_alive, defaulting to the interactive value
+	// for single embeds so the model stays warm for follow-up queries.
+	reqBody.KeepAlive = p.config.KeepAlive
+	if reqBody.KeepAlive == "" {
+		reqBody.KeepAlive = defaultKeepAlive
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -222,7 +248,7 @@ func (p *OllamaProvider) doEmbed(ctx context.Context, text string) ([]float32, e
 
 // EmbedDocuments generates embeddings for multiple texts using Ollama's
 // native batch endpoint (/api/embed). This is far more efficient than
-// EmbedBatch because it sends a single HTTP request for up to maxBatchSize
+// EmbedBatch because it sends a single HTTP request for up to MaxBatchSize
 // texts instead of one request per text.
 func (p *OllamaProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
@@ -245,8 +271,12 @@ func (p *OllamaProvider) EmbedDocuments(ctx context.Context, texts []string) ([]
 	results := make([][]float32, len(texts))
 
 	// Process in sub-batches to keep HTTP request sizes reasonable.
-	for start := 0; start < len(nonEmpty); start += maxBatchSize {
-		end := start + maxBatchSize
+	maxBatch := p.config.MaxBatchSize
+	if maxBatch <= 0 {
+		maxBatch = defaultMaxBatchSize
+	}
+	for start := 0; start < len(nonEmpty); start += maxBatch {
+		end := start + maxBatch
 		if end > len(nonEmpty) {
 			end = len(nonEmpty)
 		}
@@ -278,6 +308,12 @@ func (p *OllamaProvider) doEmbedBatch(ctx context.Context, texts []string) ([][]
 		Input:    texts,
 		Truncate: true,
 	}
+	// Apply the configured keep_alive, defaulting to the longer indexing
+	// value for batch embeds so the model stays loaded across sub-batches.
+	reqBody.KeepAlive = p.config.KeepAlive
+	if reqBody.KeepAlive == "" {
+		reqBody.KeepAlive = defaultBatchKeepAlive
+	}
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -294,7 +330,7 @@ func (p *OllamaProvider) doEmbedBatch(ctx context.Context, texts []string) ([][]
 			}
 		}
 
-		embeddings, err := p.doEmbedBatchRequest(ctx, jsonBody)
+		embeddings, err := p.doEmbedBatchRequest(ctx, jsonBody, texts)
 		if err == nil {
 			return embeddings, nil
 		}
@@ -309,7 +345,10 @@ func (p *OllamaProvider) doEmbedBatch(ctx context.Context, texts []string) ([][]
 }
 
 // doEmbedBatchRequest performs a single batch embedding HTTP request to /api/embed.
-func (p *OllamaProvider) doEmbedBatchRequest(ctx context.Context, jsonBody []byte) ([][]float32, error) {
+// The input texts are passed alongside the pre-marshaled body so the response
+// can be checked for truncation: the expected token count is estimated from the
+// input texts and compared against prompt_eval_count reported by Ollama.
+func (p *OllamaProvider) doEmbedBatchRequest(ctx context.Context, jsonBody []byte, texts []string) ([][]float32, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", p.config.URL+"/api/embed", bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -371,6 +410,26 @@ func (p *OllamaProvider) doEmbedBatchRequest(ctx context.Context, jsonBody []byt
 		results[i] = emb
 	}
 
+	// Truncation detection: Ollama truncates input that exceeds the model's
+	// context window when Truncate is true. prompt_eval_count reports how
+	// many tokens were actually processed. If that is significantly less
+	// than our rough estimate (len(text)/4 chars per token), warn so users
+	// know embeddings may be incomplete.
+	if batchResp.PromptEvalCount > 0 && len(texts) > 0 {
+		estimated := 0
+		for _, t := range texts {
+			estimated += len(t) / 4 // rough chars-to-tokens ratio
+		}
+		actual := batchResp.PromptEvalCount
+		if actual < int(float64(estimated)*0.9) {
+			slog.Warn("embedding truncation detected",
+				"input_texts", len(texts),
+				"expected_tokens", estimated,
+				"actual_tokens", actual,
+			)
+		}
+	}
+
 	return results, nil
 }
 
@@ -407,7 +466,10 @@ func (p *OllamaProvider) embedBatchConcurrent(ctx context.Context, texts []strin
 	results := make([][]float32, len(texts))
 	errors := make([]error, len(texts))
 
-	batchSize := maxBatchSize
+	batchSize := p.config.MaxBatchSize
+	if batchSize <= 0 {
+		batchSize = defaultMaxBatchSize
+	}
 	if len(texts) < batchSize {
 		batchSize = len(texts)
 	}
@@ -511,4 +573,57 @@ func (p *OllamaProvider) Ping(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Warmup preloads the embedding model into Ollama's memory by sending a
+// throwaway single-text embed request with a long keep_alive. This avoids
+// the first-request latency penalty when a batch indexing run starts. The
+// load_duration from the response (nanoseconds Ollama spent loading the
+// model) is returned so callers can log it.
+func (p *OllamaProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	reqBody := ollamaEmbeddingRequest{
+		Model:     p.config.Model,
+		Prompt:    "warmup",
+		KeepAlive: defaultBatchKeepAlive,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("marshal warmup request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", p.config.URL+"/api/embeddings", bytes.NewReader(jsonBody))
+	if err != nil {
+		return 0, fmt.Errorf("create warmup request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return 0, ErrContextCanceled
+		}
+		return 0, fmt.Errorf("warmup request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read warmup response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ollamaErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return 0, fmt.Errorf("warmup ollama error: %s", errResp.Error)
+		}
+		return 0, fmt.Errorf("warmup unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var embResp ollamaEmbeddingResponse
+	if err := json.Unmarshal(body, &embResp); err != nil {
+		return 0, fmt.Errorf("unmarshal warmup response: %w", err)
+	}
+
+	return time.Duration(embResp.LoadDuration), nil
 }

@@ -39,6 +39,9 @@ func (m *mockProvider) Model() string              { return "mock-model" }
 func (m *mockProvider) Dimensions() int            { return 768 }
 func (m *mockProvider) Ping(context.Context) error { return nil }
 
+// Warmup implements embed.Provider for the test mock.
+func (m *mockProvider) Warmup(context.Context) (time.Duration, error) { return 0, nil }
+
 func setupTestStore(t *testing.T) (*MemoryStore, func()) {
 	t.Helper()
 

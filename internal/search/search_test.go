@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 )
@@ -58,6 +59,11 @@ func (m *mockProvider) Dimensions() int {
 
 func (m *mockProvider) Ping(ctx context.Context) error {
 	return nil
+}
+
+// Warmup implements the Provider interface for the test mock.
+func (m *mockProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return 0, nil
 }
 
 type queryProviderMock struct {

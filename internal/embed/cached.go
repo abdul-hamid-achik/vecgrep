@@ -111,6 +111,11 @@ func (c *CachedProvider) Ping(ctx context.Context) error {
 	return c.inner.Ping(ctx)
 }
 
+// Warmup delegates to the inner provider's Warmup to preload the model.
+func (c *CachedProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return c.inner.Warmup(ctx)
+}
+
 // Cache returns the underlying cache for direct access.
 func (c *CachedProvider) Cache() *EmbeddingCache {
 	return c.cache

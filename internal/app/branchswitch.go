@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -193,9 +194,20 @@ func BranchSwitch(ctx context.Context, projectRoot, projectName, targetBranch st
 					// Restore the snapshot
 					if restoreErr := f.Restore(ctx, entry.StashID, branchDir); restoreErr == nil {
 						restored = true
+						log.Printf("restored branch index from fcheap stash %s, skipping reindex", entry.StashID)
 					}
 				}
 			}
+		}
+	}
+
+	// If no pointer-based restore happened, search fcheap for a matching
+	// branch stash by tag. This covers the case where the pointer file was
+	// lost but a snapshot still exists in the vault.
+	if !restored && f.Available() {
+		repoHash := git.RepoHash(info.Root)
+		if stashID, searchErr := restoreBranchIndex(ctx, branchDir, repoHash, sanitized); searchErr == nil && stashID != "" {
+			restored = true
 		}
 	}
 

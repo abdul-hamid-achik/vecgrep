@@ -55,6 +55,11 @@ type ThrottleConfig struct {
 	CacheSize int
 	// CacheTTL is the time-to-live for cached embeddings. Zero means no expiry.
 	CacheTTL time.Duration
+	// CachePath, when non-empty, enables a disk-persistent embedding
+	// cache backed by bbolt at the given path. When set, a DiskCache wraps
+	// the in-memory cache so embeddings survive across runs. The in-memory
+	// layer still serves hot reads.
+	CachePath string
 }
 
 // DefaultThrottleConfig returns sensible defaults for the throttle layer.
@@ -64,6 +69,15 @@ func DefaultThrottleConfig() ThrottleConfig {
 		MaxInFlight: 8,
 		CacheSize:   1000,
 	}
+}
+
+// embeddingCache is the minimal interface satisfied by both the in-memory
+// EmbeddingCache and the disk-backed DiskCache. ThrottledProvider uses it so
+// it can transparently swap between the two implementations.
+type embeddingCache interface {
+	Get(text string) ([]float32, bool)
+	Set(text string, vector []float32)
+	Key(text string) string
 }
 
 // ThrottledProvider wraps an embedding Provider with content-hash dedup,
@@ -76,7 +90,11 @@ type ThrottledProvider struct {
 	inner Provider
 	cfg   ThrottleConfig
 
-	cache *EmbeddingCache
+	cache embeddingCache
+
+	// diskCache is non-nil when a persistent (bbolt) cache is configured.
+	// It is closed on Close.
+	diskCache *DiskCache
 
 	// Rate limiter (nil when RPS is zero — no limit).
 	limiter *rate.Limiter
@@ -133,7 +151,19 @@ func NewThrottledProvider(inner Provider, cfg ThrottleConfig) *ThrottledProvider
 	}
 
 	if cfg.CacheSize > 0 {
-		p.cache = NewEmbeddingCache(cfg.CacheSize, cfg.CacheTTL)
+		if cfg.CachePath != "" {
+			dc, err := NewPersistentCache(cfg.CacheSize, cfg.CachePath)
+			if err == nil {
+				dc.SetModel(inner.Model())
+				p.diskCache = dc
+				p.cache = dc
+			} else {
+				// Fall back to in-memory only if the disk cache cannot be opened.
+				p.cache = NewEmbeddingCache(cfg.CacheSize, cfg.CacheTTL)
+			}
+		} else {
+			p.cache = NewEmbeddingCache(cfg.CacheSize, cfg.CacheTTL)
+		}
 	}
 
 	if cfg.RPS > 0 {
@@ -335,8 +365,16 @@ func (p *ThrottledProvider) Ping(ctx context.Context) error {
 	return p.inner.Ping(ctx)
 }
 
+// Warmup delegates to the inner provider's Warmup. This preloads the
+// embedding model before a batch indexing run starts.
+func (p *ThrottledProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return p.inner.Warmup(ctx)
+}
+
 // Cache returns the underlying embedding cache, or nil if caching is disabled.
-func (p *ThrottledProvider) Cache() *EmbeddingCache {
+// When a disk cache is configured the returned value is the *DiskCache; callers
+// can type-assert to access persistence-specific methods.
+func (p *ThrottledProvider) Cache() embeddingCache {
 	return p.cache
 }
 
@@ -347,6 +385,9 @@ func (p *ThrottledProvider) Close() {
 	p.closed = true
 	p.mu.Unlock()
 	p.notify <- struct{}{}
+	if p.diskCache != nil {
+		_ = p.diskCache.Close()
+	}
 }
 
 // enqueue adds a request to the appropriate priority lane.
@@ -387,8 +428,17 @@ func (p *ThrottledProvider) dequeue() (throttleRequest, bool) {
 // worker processes requests from the queue.
 func (p *ThrottledProvider) worker() {
 	for {
-		// Wait for work notification
-		<-p.notify
+		// Wait for work notification. The notify channel has a buffer of 1
+		// and enqueue uses a non-blocking send, so notifications can be
+		// dropped when multiple requests arrive before a worker drains.
+		// The timeout case ensures a worker re-checks the queue even
+		// without an explicit notification, so no request stays queued
+		// for more than 100ms.
+		select {
+		case <-p.notify:
+		case <-time.After(100 * time.Millisecond):
+			// Re-check queue even without explicit notification.
+		}
 
 		for {
 			p.mu.Lock()
@@ -422,7 +472,6 @@ func (p *ThrottledProvider) worker() {
 		}
 	}
 }
-
 // joinOrRegisterInFlight atomically checks if there's already an in-flight
 // request for the given cache key. If so, it returns the existing dedup entry
 // (the caller should wait on it). If not, it creates and registers a new entry

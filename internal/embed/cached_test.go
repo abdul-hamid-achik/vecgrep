@@ -73,6 +73,11 @@ func (m *mockProvider) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Warmup implements the Provider interface for the test mock.
+func (m *mockProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return 0, nil
+}
+
 func TestWithCache(t *testing.T) {
 	mock := &mockProvider{}
 	cached := WithCache(mock, 100)

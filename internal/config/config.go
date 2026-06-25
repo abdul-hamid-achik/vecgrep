@@ -8,6 +8,9 @@ import (
 	"github.com/spf13/viper"
 )
 
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(b bool) *bool { return &b }
+
 const (
 	// DefaultDataDir is the default directory name for vecgrep data
 	DefaultDataDir = ".vecgrep"
@@ -45,7 +48,41 @@ type Config struct {
 	// Daemon configuration for the background indexing daemon
 	Daemon DaemonConfig `mapstructure:"daemon" yaml:"daemon,omitempty"`
 
+	// Cache configuration for the embedding disk cache and fcheap
+	// snapshot/restore integration.
+	Cache CacheConfig `mapstructure:"cache" yaml:"cache,omitempty"`
+
 	present map[string]bool `mapstructure:"-" yaml:"-"`
+}
+
+// CacheConfig holds settings for the embedding disk cache and its fcheap
+// snapshot/restore integration. When FcheapStash is enabled (default), the
+// embedding cache is auto-stashed to fcheap after indexing and restored
+// before indexing to avoid re-embedding unchanged chunks across runs.
+//
+// Path is the bbolt file path for the disk-persistent embedding cache.
+// When empty, a default path under the project's base data directory is
+// used (computed by the session layer).
+type CacheConfig struct {
+	// FcheapStash controls whether the embedding cache is auto-stashed
+	// to fcheap after indexing. Defaults to true when nil. Set to false to
+	// disable fcheap integration for the embedding cache.
+	FcheapStash *bool `mapstructure:"fcheap_stash" yaml:"fcheap_stash,omitempty"`
+	// FcheapTTL is a informational TTL tag applied to embedding cache
+	// stashes (e.g. "30d"). Used by sweep commands to expire old stashes.
+	FcheapTTL string `mapstructure:"fcheap_ttl" yaml:"fcheap_ttl,omitempty"`
+	// Path is the bbolt file path for the disk-persistent embedding cache.
+	// When empty, a default path is computed by the session layer.
+	Path string `mapstructure:"path" yaml:"path,omitempty"`
+}
+
+// FcheapStashEnabled reports whether fcheap stashing of the embedding
+// cache is enabled. Defaults to true when FcheapStash is nil.
+func (c *CacheConfig) FcheapStashEnabled() bool {
+	if c == nil || c.FcheapStash == nil {
+		return true
+	}
+	return *c.FcheapStash
 }
 
 // SearchConfig holds search-related settings
@@ -82,6 +119,27 @@ const (
 	DefaultVecLiteEfSearch       = 100
 )
 
+// ThrottleConfig configures the ThrottledProvider that wraps the raw
+// embedding provider. The same struct is reused for both the CLI path
+// (Config.Embedding.Throttle) and the daemon path (Config.Daemon). When
+// Enabled is true (or MaxInFlight > 0), NewProvider wraps the inner
+// provider with embed.NewThrottledProvider, adding caching, dedup, and
+// bounded concurrency. Set Enabled explicitly to false to disable the
+// wrapper for the CLI path.
+type ThrottleConfig struct {
+	// Enabled controls whether the CLI path wraps the provider with a
+	// ThrottledProvider. When false and no MaxInFlight/Workers are set,
+	// the default is to wrap (see provider.go). Set this to false only to
+	// opt out of throttling explicitly.
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// MaxInFlight is the maximum number of concurrent in-flight embedding
+	// requests. Zero means use the default (8).
+	MaxInFlight int `mapstructure:"max_in_flight" yaml:"max_in_flight,omitempty"`
+	// RateLimit is the maximum embedding requests per second
+	// (token-bucket). Zero means no rate limit.
+	RateLimit float64 `mapstructure:"rate_limit" yaml:"rate_limit,omitempty"`
+}
+
 // EmbeddingConfig holds embedding provider settings
 type EmbeddingConfig struct {
 	// Provider is the embedding provider: "ollama", "openai", "cohere", or "voyage"
@@ -104,13 +162,30 @@ type EmbeddingConfig struct {
 	VoyageAPIKey string `mapstructure:"voyage_api_key" yaml:"voyage_api_key,omitempty"`
 	// VoyageBaseURL is the base URL for Voyage AI API (can also be set via VOYAGE_BASE_URL or VECGREP_VOYAGE_BASE_URL env)
 	VoyageBaseURL string `mapstructure:"voyage_base_url" yaml:"voyage_base_url,omitempty"`
+	// MaxBatchSize is the maximum number of texts sent in a single embedding
+	// request to the provider (Ollama /api/embed). Default 64. Only used by
+	// providers that support native batch embedding.
+	MaxBatchSize int `mapstructure:"max_batch_size" yaml:"max_batch_size,omitempty"`
+	// KeepAlive controls how long the provider keeps the model loaded in
+	// memory after a request. Only used by Ollama. If empty, sensible defaults
+	// are applied: "5m" for single embeds, "30m" for batch indexing.
+	KeepAlive string `mapstructure:"keep_alive" yaml:"keep_alive,omitempty"`
+	// Throttle holds optional throttling/caching settings for the CLI
+	// provider path. When left empty, NewProvider wraps the inner provider
+	// with a default ThrottledProvider. Set Throttle.Enabled to false to
+	// opt out of the wrapper.
+	Throttle ThrottleConfig `mapstructure:"throttle" yaml:"throttle,omitempty"`
 }
 
 // IndexingConfig holds indexing settings
 type IndexingConfig struct {
-	// ChunkSize is the target chunk size in tokens
+	// ChunkSize is the target chunk size in tokens. The chunker operates in
+	// characters, so the value is converted using ~4 chars per token for
+	// typical code (see internal/app/index.go indexerConfig).
 	ChunkSize int `mapstructure:"chunk_size" yaml:"chunk_size,omitempty"`
-	// ChunkOverlap is the overlap between chunks in tokens
+	// ChunkOverlap is the overlap between chunks in tokens. The chunker
+	// operates in characters, so the value is converted using ~4 chars per
+	// token for typical code (see internal/app/index.go indexerConfig).
 	ChunkOverlap int `mapstructure:"chunk_overlap" yaml:"chunk_overlap,omitempty"`
 	// IgnorePatterns are glob patterns to ignore during indexing
 	IgnorePatterns []string `mapstructure:"ignore_patterns" yaml:"ignore_patterns,omitempty"`
@@ -165,6 +240,12 @@ type DaemonConfig struct {
 	EmbedMaxInFlight int `mapstructure:"embed_max_in_flight" yaml:"embed_max_in_flight,omitempty"`
 	// Debounce is the watcher debounce duration in milliseconds (default 500).
 	Debounce int `mapstructure:"debounce" yaml:"debounce,omitempty"`
+	// SweepInterval is the interval between automatic fcheap vault
+	// cleanup sweeps. When non-zero, the daemon starts a ticker that
+	// runs fcheap vacuum every SweepInterval to remove orphaned stash
+	// entries. Use a string duration (e.g. "24h", "6h"). Zero or empty
+	// disables periodic sweeps (default: 24h).
+	SweepInterval string `mapstructure:"sweep_interval" yaml:"sweep_interval,omitempty"`
 }
 
 // Default daemon constants.
@@ -173,6 +254,7 @@ const (
 	DefaultDaemonEmbedWorkers     = 4
 	DefaultDaemonEmbedMaxInFlight = 8
 	DefaultDaemonDebounceMs       = 500
+	DefaultDaemonSweepInterval    = "24h"
 )
 
 // DefaultConfig returns the default configuration
@@ -222,6 +304,11 @@ func DefaultConfig() *Config {
 			EmbedWorkers:     DefaultDaemonEmbedWorkers,
 			EmbedMaxInFlight: DefaultDaemonEmbedMaxInFlight,
 			Debounce:         DefaultDaemonDebounceMs,
+			SweepInterval:    DefaultDaemonSweepInterval,
+		},
+		Cache: CacheConfig{
+			FcheapStash: boolPtr(true),
+			FcheapTTL:   "30d",
 		},
 	}
 }

@@ -19,6 +19,8 @@ import (
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
+	"github.com/abdul-hamid-achik/vecgrep/internal/search"
+	"github.com/abdul-hamid-achik/vecgrep/internal/snapshot"
 )
 
 // DaemonState is the metadata written to daemon.json for status inspection.
@@ -52,6 +54,14 @@ type Daemon struct {
 	listener net.Listener
 	stopCh   chan struct{}
 	doneCh   chan struct{}
+
+	// reindexWg tracks in-flight reindex and switchBranch operations so
+	// that Stop() can wait for them to complete before closing the DB and
+	// throttled provider.
+	reindexWg sync.WaitGroup
+
+	// sweepDoneCh signals the periodic sweep goroutine to exit.
+	sweepDoneCh chan struct{}
 }
 
 // Config holds the daemon startup configuration.
@@ -116,15 +126,16 @@ func New(cfg Config) (*Daemon, error) {
 	lockPath := filepath.Join(dataDir, "daemon.lock")
 
 	d := &Daemon{
-		cfg:        appCfg,
-		session:    session,
-		indexer:    indexer,
-		throttled:  throttled,
-		socketPath: socketPath,
-		statePath:  statePath,
-		lockPath:   lockPath,
-		stopCh:     make(chan struct{}),
-		doneCh:     make(chan struct{}),
+		cfg:         appCfg,
+		session:     session,
+		indexer:     indexer,
+		throttled:   throttled,
+		socketPath:  socketPath,
+		statePath:   statePath,
+		lockPath:    lockPath,
+		stopCh:      make(chan struct{}),
+		doneCh:      make(chan struct{}),
+		sweepDoneCh: make(chan struct{}),
 		state: DaemonState{
 			ProjectRoot:  session.ProjectRoot,
 			ProjectName:  session.ProjectName,
@@ -191,12 +202,25 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go d.idleWatcher(ctx)
 	}
 
+	// Periodic fcheap sweep goroutine
+	if sweepInterval := parseSweepInterval(d.cfg.Daemon.SweepInterval); sweepInterval > 0 {
+		go d.sweepLoop(ctx, sweepInterval)
+	}
+
 	// Wait for stop
 	<-d.stopCh
 	_ = d.listener.Close()
 	if d.watcher != nil {
 		_ = d.watcher.Stop()
 	}
+
+	// Signal the sweep goroutine to exit.
+	close(d.sweepDoneCh)
+
+	// Wait for in-flight reindex and switchBranch operations to complete
+	// before closing the throttled provider and DB.
+	d.reindexWg.Wait()
+
 	d.throttled.Close()
 	_ = d.cleanup()
 	close(d.doneCh)
@@ -265,8 +289,16 @@ func (d *Daemon) handleRequest(ctx context.Context, req *jsonRPCRequest) jsonRPC
 		d.stateMu.Unlock()
 		return jsonRPCResponse{ID: req.ID, Result: state}
 	case "daemon.reindex":
-		go d.reindex(ctx)
+		d.reindexWg.Add(1)
+		go func() {
+			defer d.reindexWg.Done()
+			d.reindex(ctx)
+		}()
 		return jsonRPCResponse{ID: req.ID, Result: map[string]any{"started": true}}
+	case "daemon.switchBranch":
+		return d.handleSwitchBranch(ctx, req)
+	case "daemon.search":
+		return d.handleSearch(ctx, req)
 	default:
 		return jsonRPCResponse{
 			ID:    req.ID,
@@ -398,6 +430,162 @@ func IsRunning(dataDir string) bool {
 		return false
 	}
 	return resp.Result != nil
+}
+
+// searchParams holds the parameters for a daemon.search request.
+type searchParams struct {
+	Query    string `json:"query"`
+	Limit    int    `json:"limit"`
+	Mode     string `json:"mode"`
+	Language string `json:"language,omitempty"`
+}
+
+// handleSearch runs a semantic/keyword/hybrid search using the daemon's warm
+// session and returns the results as JSON. This lets CLI clients search
+// through the socket instead of opening their own read-only session.
+func (d *Daemon) handleSearch(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	var params searchParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32602, Message: fmt.Sprintf("invalid params: %v", err)}}
+		}
+	}
+	if params.Query == "" {
+		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32602, Message: "query is required"}}
+	}
+	if params.Limit <= 0 {
+		params.Limit = 10
+	}
+
+	mode := app.ParseSearchMode(params.Mode, d.cfg.Search.DefaultMode)
+
+	searcher := search.NewSearcher(d.session.DB, d.throttled)
+	results, err := searcher.Search(ctx, params.Query, search.SearchOptions{
+		Limit:       params.Limit,
+		Language:    params.Language,
+		ProjectRoot: d.session.ProjectRoot,
+		Mode:        mode,
+	})
+	if err != nil {
+		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32603, Message: fmt.Sprintf("search failed: %v", err)}}
+	}
+
+	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"results": results, "mode": string(mode)}}
+}
+
+// switchBranchParams holds the parameters for a daemon.switchBranch request.
+type switchBranchParams struct {
+	Branch string `json:"branch"`
+}
+
+// handleSwitchBranch snapshots the current branch's index to fcheap, then
+// restores or reindexes the target branch. It runs synchronously in the
+// request handler goroutine but tracks the operation via reindexWg so
+// Stop() can wait for it.
+func (d *Daemon) handleSwitchBranch(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	var params switchBranchParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32602, Message: fmt.Sprintf("invalid params: %v", err)}}
+		}
+	}
+	if params.Branch == "" {
+		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32602, Message: "branch is required"}}
+	}
+
+	d.reindexWg.Add(1)
+	go func() {
+		defer d.reindexWg.Done()
+		d.doSwitchBranch(ctx, params.Branch)
+	}()
+
+	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"status": "switching", "branch": params.Branch}}
+}
+
+// doSwitchBranch performs the actual branch switch: snapshots the current
+// branch, then restores or reindexes the target branch. It updates the
+// daemon state on success.
+func (d *Daemon) doSwitchBranch(ctx context.Context, targetBranch string) {
+	projectRoot := d.session.ProjectRoot
+	projectName := d.session.ProjectName
+
+	// Step a: snapshot the current branch's index to fcheap
+	_, err := app.BranchSnapshot(ctx, projectRoot, projectName)
+	if err != nil {
+		log.Printf("daemon switchBranch: snapshot current branch failed: %v", err)
+		return
+	}
+
+	// Step b: restore the target branch from fcheap if a snapshot exists,
+	// or c: run a full reindex if no snapshot exists.
+	result, err := app.BranchSwitch(ctx, projectRoot, projectName, targetBranch)
+	if err != nil {
+		log.Printf("daemon switchBranch: switch to %q failed: %v", targetBranch, err)
+		return
+	}
+
+	// If no snapshot was restored, run a full reindex for the new branch.
+	if !result.Restored {
+		log.Printf("daemon switchBranch: no snapshot for %q, running full reindex", targetBranch)
+		if _, idxErr := d.indexer.Index(ctx, projectRoot); idxErr != nil {
+			log.Printf("daemon switchBranch: reindex failed: %v", idxErr)
+			return
+		}
+	}
+
+	// Update daemon state with the new active branch
+	d.stateMu.Lock()
+	d.state.ActiveBranch = targetBranch
+	d.state.LastReindex = time.Now()
+	d.stateMu.Unlock()
+	_ = d.writeState()
+
+	log.Printf("daemon switchBranch: switched to %q (restored=%v)", targetBranch, result.Restored)
+}
+
+// sweepLoop periodically runs fcheap vacuum to clean up orphaned stash
+// entries from the fcheap vault. It is best-effort: if fcheap is not
+// available, it logs and continues.
+func (d *Daemon) sweepLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	f := snapshot.NewFcheap()
+	if !f.Available() {
+		log.Printf("periodic fcheap sweep: fcheap not available, skipping")
+		return
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.sweepDoneCh:
+			return
+		case <-ticker.C:
+			log.Printf("periodic fcheap sweep started")
+			result, err := f.Sweep(ctx)
+			if err != nil {
+				log.Printf("periodic fcheap sweep failed: %v", err)
+				continue
+			}
+			log.Printf("periodic fcheap sweep complete: swept %d stashes", result.Swept)
+		}
+	}
+}
+
+// parseSweepInterval parses the SweepInterval config string into a
+// time.Duration. Returns 0 for empty or invalid values, which disables
+// the periodic sweep.
+func parseSweepInterval(s string) time.Duration {
+	if s == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // jsonRPCRequest is a minimal JSON-RPC 2.0 request.

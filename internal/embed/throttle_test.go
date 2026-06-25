@@ -407,3 +407,8 @@ func (m *noDocsProvider) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 func (m *noDocsProvider) Model() string                  { return "no-docs-model" }
 func (m *noDocsProvider) Dimensions() int                { return 768 }
 func (m *noDocsProvider) Ping(ctx context.Context) error { return nil }
+
+// Warmup implements the Provider interface for the test mock.
+func (m *noDocsProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return 0, nil
+}

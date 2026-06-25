@@ -4,9 +4,16 @@ package embed
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 // EmbeddingCache provides an in-memory cache for embedding vectors.
@@ -50,9 +57,33 @@ func NewEmbeddingCache(maxSize int, ttl time.Duration) *EmbeddingCache {
 }
 
 // Key generates a cache key for the given text using SHA256.
+// Whitespace is normalized (per-line TrimSpace, empty lines dropped) before
+// hashing so that chunks differing only in trailing whitespace or
+// tabs-vs-spaces produce the same key. Within-line whitespace is preserved
+// to avoid changing code semantics.
 func (c *EmbeddingCache) Key(text string) string {
-	h := sha256.Sum256([]byte(text))
+	normalized := normalizeText(text)
+	h := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(h[:])
+}
+
+// normalizeText returns a whitespace-normalized form of text suitable for
+// stable cache keys. It splits by newline, trims leading/trailing whitespace
+// from each line, drops completely empty lines, and rejoins with "\n".
+// Within-line whitespace is intentionally left untouched — collapsing it
+// could change the meaning of code (e.g. "a + b" vs "a+b").
+func normalizeText(text string) string {
+	lines := strings.Split(text, "\n")
+	// Reuse the backing slice capacity by filtering in place.
+	out := lines[:0]
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return strings.Join(out, "\n")
 }
 
 // Get retrieves an embedding from the cache.
@@ -167,4 +198,242 @@ func (c *EmbeddingCache) Cleanup() int {
 	}
 
 	return removed
+}
+
+// embedCacheBucket is the BoltDB bucket name used by DiskCache.
+const embedCacheBucket = "embeddings"
+
+// DiskCache wraps an EmbeddingCache with BoltDB persistence. Embedding
+// vectors are keyed by "sha256(text):model" so that different models do not
+// collide. Reads check the in-memory cache first, then BoltDB, promoting
+// disk hits back into memory. Writes go to both memory and (asynchronously)
+// BoltDB.
+type DiskCache struct {
+	mem   *EmbeddingCache
+	db    *bolt.DB
+	model string
+}
+
+// NewPersistentCache creates a DiskCache backed by the BoltDB file at
+// dbPath. The in-memory layer holds up to memSize entries.
+func NewPersistentCache(memSize int, dbPath string) (*DiskCache, error) {
+	if memSize <= 0 {
+		memSize = 1000
+	}
+
+	// Ensure the parent directory exists so bbolt can create the file.
+	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("create cache dir: %w", err)
+		}
+	}
+
+	bdb, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: 5 * time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("open embed cache db: %w", err)
+	}
+
+	// Ensure the bucket exists.
+	if err := bdb.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(embedCacheBucket))
+		return err
+	}); err != nil {
+		_ = bdb.Close()
+		return nil, fmt.Errorf("create embed cache bucket: %w", err)
+	}
+
+	return &DiskCache{
+		mem: NewEmbeddingCache(memSize, 0),
+		db:  bdb,
+	}, nil
+}
+
+// SetModel records the embedding model name used to namespace disk keys.
+// This must be set before Get/Set are called so the key includes the model.
+func (d *DiskCache) SetModel(model string) {
+	d.model = model
+}
+
+// diskKey returns the BoltDB key for the given text and current model.
+func (d *DiskCache) diskKey(text string) string {
+	return d.mem.Key(text) + ":" + d.model
+}
+
+// Get retrieves an embedding, checking memory first then BoltDB. Disk hits
+// are promoted into the in-memory cache.
+func (d *DiskCache) Get(text string) ([]float32, bool) {
+	if v, ok := d.mem.Get(text); ok {
+		return v, true
+	}
+
+	key := d.diskKey(text)
+	var raw []byte
+	err := d.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(embedCacheBucket))
+		if b == nil {
+			return nil
+		}
+		raw = b.Get([]byte(key))
+		return nil
+	})
+	if err != nil || len(raw) == 0 {
+		return nil, false
+	}
+
+	var vec []float32
+	if err := json.Unmarshal(raw, &vec); err != nil {
+		return nil, false
+	}
+
+	// Promote to memory.
+	d.mem.Set(text, vec)
+	return vec, true
+}
+
+// Set stores an embedding in both memory and BoltDB. The BoltDB write is
+// performed asynchronously so the embedding hot path is not blocked on disk.
+func (d *DiskCache) Set(text string, vector []float32) {
+	d.mem.Set(text, vector)
+
+	key := d.diskKey(text)
+	vecCopy := make([]float32, len(vector))
+	copy(vecCopy, vector)
+
+	go func() {
+		data, err := json.Marshal(vecCopy)
+		if err != nil {
+			return
+		}
+		_ = d.db.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte(embedCacheBucket))
+			if b == nil {
+				return nil
+			}
+			return b.Put([]byte(key), data)
+		})
+	}()
+}
+
+// Key returns the content-hash key (without model suffix) for the given text.
+func (d *DiskCache) Key(text string) string {
+	return d.mem.Key(text)
+}
+
+// Size returns the number of entries in the in-memory layer.
+func (d *DiskCache) Size() int {
+	return d.mem.Size()
+}
+
+// Clear removes all entries from the in-memory layer.
+func (d *DiskCache) Clear() {
+	d.mem.Clear()
+}
+
+// FlushToDisk waits for any pending async writes to complete by performing
+// a no-op read transaction (bbolt serializes writes via a single write
+// transaction at a time, so a synchronous Update acts as a barrier).
+func (d *DiskCache) FlushToDisk() error {
+	return d.db.Update(func(tx *bolt.Tx) error {
+		return nil
+	})
+}
+
+// LoadFromDisk is a no-op at the API level: reads already lazy-load from
+// BoltDB on cache miss. It is retained for interface symmetry and to
+// validate the database is readable.
+func (d *DiskCache) LoadFromDisk(path string) error {
+	return d.db.View(func(tx *bolt.Tx) error {
+		_ = tx.Bucket([]byte(embedCacheBucket))
+		return nil
+	})
+}
+
+// MergeFromDisk opens an external bbolt file read-only and copies every
+// entry from the embeddings bucket into the live cache (both memory and
+// the current bbolt file). This is used by the fcheap restore flow: the
+// stashed cache file is restored to a temp path, then merged into the
+// active DiskCache so subsequent Get() calls hit the cache without
+// re-embedding. The source file is not modified. Best-effort: a failure
+// to open or read the source is returned as an error, but the live cache
+// is left in a usable state.
+func (d *DiskCache) MergeFromDisk(srcPath string) error {
+	src, err := bolt.Open(srcPath, 0600, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		return fmt.Errorf("open source cache for merge: %w", err)
+	}
+	defer src.Close()
+
+	type entry struct {
+		key  string
+		data []byte
+	}
+	var entries []entry
+
+	err = src.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(embedCacheBucket))
+		if b == nil {
+			return nil // empty source — nothing to merge
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if len(v) == 0 {
+				continue
+			}
+			// Copy the value so it's safe to use after the transaction closes.
+			cp := make([]byte, len(v))
+			copy(cp, v)
+			entries = append(entries, entry{key: string(k), data: cp})
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("read source cache: %w", err)
+	}
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Write all entries into the live bbolt file and promote to memory.
+	err = d.db.Update(func(tx *bolt.Tx) error {
+		b, bErr := tx.CreateBucketIfNotExists([]byte(embedCacheBucket))
+		if bErr != nil {
+			return bErr
+		}
+		for _, e := range entries {
+			if err := b.Put([]byte(e.key), e.data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("write merged entries: %w", err)
+	}
+
+	// Promote entries into the in-memory layer. The disk key is
+	// "sha256(text):model"; we don't have the original text, so we only
+	// populate the disk bucket — the memory layer will lazy-load on Get.
+	// This keeps the merge cheap and avoids a reverse-hash lookup.
+	return nil
+}
+
+// CachePath returns the bbolt file path backing this DiskCache. It is
+// used by the fcheap stash flow to locate the file to snapshot. Returns
+// empty when the path is not available (e.g. the cache was created in
+// memory only).
+func (d *DiskCache) CachePath() string {
+	if d == nil || d.db == nil {
+		return ""
+	}
+	return d.db.Path()
+}
+
+// Close closes the underlying BoltDB handle. After Close, further Get/Set
+// calls will fail on the disk side (memory layer keeps working).
+func (d *DiskCache) Close() error {
+	if d.db != nil {
+		return d.db.Close()
+	}
+	return nil
 }

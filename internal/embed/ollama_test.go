@@ -88,8 +88,8 @@ func TestOllamaProvider_EmbedDocumentsEmptyText(t *testing.T) {
 }
 
 func TestOllamaProvider_EmbedDocumentsSubBatching(t *testing.T) {
-	// Generate more texts than maxBatchSize to test sub-batching.
-	numTexts := maxBatchSize + 10
+	// Generate more texts than defaultMaxBatchSize to test sub-batching.
+	numTexts := defaultMaxBatchSize + 10
 	callCount := 0
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +133,7 @@ func TestOllamaProvider_EmbedDocumentsSubBatching(t *testing.T) {
 		t.Fatalf("expected %d results, got %d", numTexts, len(results))
 	}
 
-	// Should have been split into 2 sub-batches: maxBatchSize + 10.
+	// Should have been split into 2 sub-batches: defaultMaxBatchSize + 10.
 	if callCount != 2 {
 		t.Errorf("expected 2 HTTP calls for sub-batching, got %d", callCount)
 	}

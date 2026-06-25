@@ -318,6 +318,12 @@ func (p *CohereProvider) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Warmup is a no-op for the Cohere provider. Cloud-hosted models are
+// always loaded, so there is no cold-start penalty to avoid.
+func (p *CohereProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return 0, nil
+}
+
 func cohereSupportsOutputDimension(model string) bool {
 	return strings.Contains(strings.ToLower(model), "embed-v4")
 }

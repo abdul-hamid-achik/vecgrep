@@ -328,6 +328,12 @@ func (p *VoyageProvider) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Warmup is a no-op for the Voyage provider. Cloud-hosted models are
+// always loaded, so there is no cold-start penalty to avoid.
+func (p *VoyageProvider) Warmup(ctx context.Context) (time.Duration, error) {
+	return 0, nil
+}
+
 func voyageErrorMessage(body []byte) string {
 	var errResp voyageErrorResponse
 	if json.Unmarshal(body, &errResp) == nil {

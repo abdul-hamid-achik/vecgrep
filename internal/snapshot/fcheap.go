@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Fcheap is a thin exec wrapper around the fcheap CLI. It resolves the
@@ -114,6 +115,37 @@ func (f *Fcheap) List(ctx context.Context, tags []string) ([]ListEntry, error) {
 	return entries, nil
 }
 
+// SweepResult holds the output of a fcheap vacuum (sweep) operation.
+type SweepResult struct {
+	// Swept is the number of orphaned stashes removed.
+	Swept int `json:"swept"`
+}
+
+// Sweep runs fcheap vacuum to remove orphaned metadata- and search-index
+// entries for stashes whose directory no longer exists, then compacts the
+// database. This is the periodic cleanup operation. It is best-effort: if
+// fcheap is not available, it returns an error without side effects.
+func (f *Fcheap) Sweep(ctx context.Context) (*SweepResult, error) {
+	if !f.Available() {
+		return nil, fmt.Errorf("fcheap not available")
+	}
+
+	out, err := f.exec(ctx, "vacuum", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("fcheap vacuum: %w", err)
+	}
+
+	// Try to parse JSON output; fcheap vacuum --json may output a count
+	// or a status object. We do a best-effort parse.
+	var result SweepResult
+	if jsonErr := json.Unmarshal([]byte(out), &result); jsonErr != nil {
+		// If not JSON, return with swept=0 since we can't confirm the count.
+		// The vacuum still ran successfully.
+		return &SweepResult{Swept: 0}, nil
+	}
+	return &result, nil
+}
+
 // exec runs a fcheap command and returns stdout.
 func (f *Fcheap) exec(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, f.bin, args...)
@@ -122,4 +154,77 @@ func (f *Fcheap) exec(ctx context.Context, args ...string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// ExecRaw runs an arbitrary fcheap command and returns stdout/stderr.
+// It is a low-level escape hatch used by callers that need fcheap
+// subcommands not wrapped by this type (e.g. cleanup-smart, sweep).
+func (f *Fcheap) ExecRaw(ctx context.Context, args ...string) (string, error) {
+	if !f.Available() {
+		return "", fmt.Errorf("fcheap not available")
+	}
+	cmd := exec.CommandContext(ctx, f.bin, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), err
+	}
+	return string(out), nil
+}
+
+// ListEntryDetailed extends ListEntry with timestamp information so callers
+// can pick the most recent stash matching a set of tags.
+type ListEntryDetailed struct {
+	ListEntry
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ListDetailed returns stashes with timestamp metadata, filtered by tags.
+// Pass nil for all stashes.
+func (f *Fcheap) ListDetailed(ctx context.Context, tags []string) ([]ListEntryDetailed, error) {
+	if !f.Available() {
+		return nil, fmt.Errorf("fcheap not available")
+	}
+
+	args := []string{"list", "--json"}
+	for _, tag := range tags {
+		args = append(args, "--tag", tag)
+	}
+
+	out, err := f.exec(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("fcheap list: %w", err)
+	}
+
+	var entries []ListEntryDetailed
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		return nil, fmt.Errorf("fcheap list: failed to parse output: %w", err)
+	}
+	return entries, nil
+}
+
+// LatestByTags returns the most recently created stash matching all the
+// given tags. Returns nil (no error) when no stash matches.
+func (f *Fcheap) LatestByTags(ctx context.Context, tags []string) (*ListEntryDetailed, error) {
+	entries, err := f.ListDetailed(ctx, tags)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	latest := &entries[0]
+	for i := 1; i < len(entries); i++ {
+		if entries[i].CreatedAt.After(latest.CreatedAt) {
+			latest = &entries[i]
+		}
+	}
+	return latest, nil
+}
+
+// SaveFile stashes a single file (not a directory) to fcheap. It is a thin
+// wrapper around Save for the common embedding-cache case where the cache
+// is a single bbolt file.
+func (f *Fcheap) SaveFile(ctx context.Context, path, name, tool string, tags []string) (*SaveResult, error) {
+	return f.Save(ctx, path, name, tool, tags)
 }

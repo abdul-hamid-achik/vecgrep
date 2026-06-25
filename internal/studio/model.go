@@ -1038,13 +1038,34 @@ func (m Model) renderIndexProgress(width int) string {
 	processed := progress.ProcessedFiles
 	bar := progressBar(processed, total, clamp(width-22, 10, 36))
 	elapsed := ""
+	rateStr := ""
+	etaStr := ""
 	if !progress.StartTime.IsZero() {
-		elapsed = "  " + time.Since(progress.StartTime).Round(time.Second).String()
+		elapsedDur := time.Since(progress.StartTime)
+		elapsed = "  " + elapsedDur.Round(time.Second).String()
+		// Show rate and ETA after at least 1 file is processed and > 1s
+		// elapsed to avoid misleading early rates.
+		if processed > 0 && elapsedDur > time.Second {
+			rate := float64(processed) / elapsedDur.Seconds()
+			rateStr = fmt.Sprintf("%.1f files/s", rate)
+			remaining := total - processed
+			if remaining > 0 && rate > 0 {
+				eta := time.Duration(float64(remaining) / rate * float64(time.Second))
+				etaStr = "ETA " + formatETA(eta)
+			}
+		}
 	}
 
 	lines := []string{
 		fmt.Sprintf("%s  %d/%d files%s", bar, processed, total, elapsed),
 		fmt.Sprintf("%d skipped  %d chunks", progress.SkippedFiles, progress.TotalChunks),
+	}
+	if rateStr != "" {
+		line := rateStr
+		if etaStr != "" {
+			line += "  " + etaStr
+		}
+		lines = append(lines, line)
 	}
 	if progress.CurrentFile != "" {
 		lines = append(lines, "Current: "+truncateDisplay(displayIndexPath(m.session, progress.CurrentFile), width-9))
@@ -1059,6 +1080,26 @@ func (m Model) renderIndexProgress(width int) string {
 		lines = append(lines, "", warnStyle.Render(fmt.Sprintf("%d warnings", len(progress.Errors))))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// formatETA formats a duration as a human-readable ETA string:
+// < 60s = "Xs", < 60m = "Xm Ys", else = "Xh Ym".
+func formatETA(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	seconds := int(d.Seconds())
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	remainingSeconds := seconds % 60
+	if minutes < 60 {
+		return fmt.Sprintf("%dm %ds", minutes, remainingSeconds)
+	}
+	hours := minutes / 60
+	remainingMinutes := minutes % 60
+	return fmt.Sprintf("%dh %dm", hours, remainingMinutes)
 }
 
 func (m Model) renderStatus() string {
@@ -1165,6 +1206,54 @@ func (m Model) renderConfig() string {
 		fmt.Sprintf("indexing.chunk_overlap:  %d", cfg.Indexing.ChunkOverlap),
 		fmt.Sprintf("indexing.max_file_size:  %d", cfg.Indexing.MaxFileSize),
 	)
+	// Embedding extras
+	if cfg.Embedding.MaxBatchSize > 0 {
+		lines = append(lines, fmt.Sprintf("embedding.max_batch_size: %d", cfg.Embedding.MaxBatchSize))
+	}
+	if cfg.Embedding.KeepAlive != "" {
+		lines = append(lines, fmt.Sprintf("embedding.keep_alive:     %s", cfg.Embedding.KeepAlive))
+	}
+	// Throttle
+	if cfg.Embedding.Throttle.Enabled != nil || cfg.Embedding.Throttle.MaxInFlight > 0 || cfg.Embedding.Throttle.RateLimit > 0 {
+		lines = append(lines, "", "Throttle")
+		if cfg.Embedding.Throttle.Enabled != nil {
+			lines = append(lines, fmt.Sprintf("  enabled:        %v", *cfg.Embedding.Throttle.Enabled))
+		} else {
+			lines = append(lines, "  enabled:        true (default)")
+		}
+		if cfg.Embedding.Throttle.MaxInFlight > 0 {
+			lines = append(lines, fmt.Sprintf("  max_in_flight:  %d", cfg.Embedding.Throttle.MaxInFlight))
+		}
+		if cfg.Embedding.Throttle.RateLimit > 0 {
+			lines = append(lines, fmt.Sprintf("  rate_limit:     %.1f", cfg.Embedding.Throttle.RateLimit))
+		}
+	}
+	// Cache
+	lines = append(lines, "", "Cache")
+	if cfg.Cache.FcheapStash != nil {
+		lines = append(lines, fmt.Sprintf("  fcheap_stash:  %v", *cfg.Cache.FcheapStash))
+	} else {
+		lines = append(lines, "  fcheap_stash:  true (default)")
+	}
+	if cfg.Cache.FcheapTTL != "" {
+		lines = append(lines, fmt.Sprintf("  fcheap_ttl:    %s", cfg.Cache.FcheapTTL))
+	}
+	if cfg.Cache.Path != "" {
+		lines = append(lines, fmt.Sprintf("  path:          %s", cfg.Cache.Path))
+	}
+	// Daemon
+	if cfg.Daemon.Autostart || cfg.Daemon.IdleTimeout > 0 || cfg.Daemon.SweepInterval != "" {
+		lines = append(lines, "", "Daemon")
+		if cfg.Daemon.Autostart {
+			lines = append(lines, "  autostart:     true")
+		}
+		if cfg.Daemon.IdleTimeout > 0 {
+			lines = append(lines, fmt.Sprintf("  idle_timeout:  %d", cfg.Daemon.IdleTimeout))
+		}
+		if cfg.Daemon.SweepInterval != "" {
+			lines = append(lines, fmt.Sprintf("  sweep_interval: %s", cfg.Daemon.SweepInterval))
+		}
+	}
 	if len(m.session.ConfigSources) > 0 {
 		lines = append(lines, "", "Sources")
 		for _, source := range m.session.ConfigSources {
@@ -1192,11 +1281,11 @@ func (m Model) renderHelp() string {
 		"lines        editable line range filter, for example 1-120",
 		"j/k arrows   move result selection",
 		"u/d pgup/dn  scroll preview",
-		"m            cycle mode",
+		"m            cycle mode (hybrid / semantic / keyword)",
 		"L / T        cycle language / type filters",
 		"+ / -        change limit",
 		"s            find similar to selected result",
-		"r / R        index / full reindex",
+		"r / R        index / full reindex (shows ETA + rate)",
 		"x            delete selected file",
 		"i            register this folder globally when none is open",
 		"o            open selected result in EDITOR",
@@ -1204,6 +1293,10 @@ func (m Model) renderHelp() string {
 		"!            reset project index",
 		"q            quit outside the query input",
 		"ctrl+c       quit",
+		"",
+		"The config view (c) shows throttle, cache, daemon, and",
+		"embedding settings including keep_alive and max_batch_size.",
+		"The status view (v) shows index freshness and pending changes.",
 	}
 	return panelStyle.Width(m.width - 2).Render(strings.Join(lines, "\n"))
 }

@@ -111,3 +111,24 @@ func TestDaemonStateJSONRoundTrip(t *testing.T) {
 		t.Errorf("QueueDepth = %d, want %d", loaded.QueueDepth, original.QueueDepth)
 	}
 }
+
+func TestParseSweepInterval(t *testing.T) {
+	tests := []struct {
+		input string
+		want  time.Duration
+	}{
+		{"", 0},
+		{"0", 0},
+		{"invalid", 0},
+		{"-1h", 0},
+		{"24h", 24 * time.Hour},
+		{"6h", 6 * time.Hour},
+		{"30m", 30 * time.Minute},
+	}
+	for _, tc := range tests {
+		got := parseSweepInterval(tc.input)
+		if got != tc.want {
+			t.Errorf("parseSweepInterval(%q) = %v, want %v", tc.input, got, tc.want)
+		}
+	}
+}

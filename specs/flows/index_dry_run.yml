@@ -1,0 +1,41 @@
+version: 1
+name: index_dry_run
+intent: |
+    a user can run `vecgrep index --dry-run` to preview what would be indexed without contacting the embedding provider.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; printf 'package main\n\nfunc main() {}\n' > main.go; \"$ROOT/bin/vecgrep\" index --dry-run"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+steps:
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+    - snapshot: dry_run
+outcomes:
+    - id: dry_run_header
+      description: the dry run output shows the project root
+      verify:
+        screen:
+            contains: "Dry run"
+    - id: new_files_count
+      description: the dry run shows new files count
+      verify:
+        screen:
+            contains: "New files"
+    - id: estimated_chunks
+      description: the dry run shows estimated chunks
+      verify:
+        screen:
+            contains: "Estimated chunks"
+    - id: no_embedding_call
+      description: the dry run does not contact the embedding provider
+      verify:
+        screen:
+            notContains: "Indexing"

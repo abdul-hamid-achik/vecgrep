@@ -307,6 +307,108 @@ func TestModelRenderIndexProgressShowsCountersAndRecentFiles(t *testing.T) {
 	}
 }
 
+func TestModelRenderIndexProgressShowsRateAndETA(t *testing.T) {
+	m := NewModel(context.Background(), "/repo")
+	m.width = 100
+	m.height = 30
+	m.session = &app.Session{ProjectRoot: "/repo"}
+	m.indexing = true
+	progress := index.Progress{
+		TotalFiles:     100,
+		ProcessedFiles: 30,
+		SkippedFiles:   0,
+		TotalChunks:    45,
+		CurrentFile:    "/repo/main.go",
+		StartTime:      time.Now().Add(-10 * time.Second),
+	}
+	m.indexProgress = &progress
+
+	got := m.renderResults(80)
+	// With 30 files in 10s, rate should be ~3 files/s
+	if !contains(got, "files/s") {
+		t.Fatalf("index progress missing rate: %q", got)
+	}
+	if !contains(got, "ETA") {
+		t.Fatalf("index progress missing ETA: %q", got)
+	}
+}
+
+func TestModelRenderIndexProgressHidesRateWhenTooFewFiles(t *testing.T) {
+	m := NewModel(context.Background(), "/repo")
+	m.width = 100
+	m.height = 30
+	m.session = &app.Session{ProjectRoot: "/repo"}
+	m.indexing = true
+	progress := index.Progress{
+		TotalFiles:     10,
+		ProcessedFiles: 0,
+		SkippedFiles:   0,
+		TotalChunks:    0,
+		CurrentFile:    "",
+		StartTime:      time.Now().Add(-500 * time.Millisecond),
+	}
+	m.indexProgress = &progress
+
+	got := m.renderResults(80)
+	// With 0 files processed and < 1s elapsed, rate should NOT appear
+	if contains(got, "files/s") {
+		t.Fatalf("index progress should not show rate with 0 files: %q", got)
+	}
+	if contains(got, "ETA") {
+		t.Fatalf("index progress should not show ETA with 0 files: %q", got)
+	}
+}
+
+func TestModelRenderConfigShowsCacheAndThrottle(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	m.width = 120
+	m.height = 40
+	enabled := true
+	m.session = &app.Session{
+		Config: &config.Config{
+			Embedding: config.EmbeddingConfig{
+				Provider:      "ollama",
+				Model:         "nomic-embed-text",
+				Dimensions:    768,
+				MaxBatchSize:  32,
+				KeepAlive:     "30m",
+				Throttle:      config.ThrottleConfig{Enabled: &enabled, MaxInFlight: 4},
+			},
+		},
+	}
+
+	got := m.renderConfig()
+	for _, want := range []string{
+		"max_batch_size: 32",
+		"keep_alive:     30m",
+		"Throttle",
+		"enabled:        true",
+		"max_in_flight:  4",
+		"Cache",
+		"fcheap_stash:  true (default)",
+	} {
+		if !contains(got, want) {
+			t.Fatalf("config render missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestModelRenderHelpMentionsETAAndConfig(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	m.width = 120
+	got := m.renderHelp()
+	for _, want := range []string{
+		"ETA + rate",
+		"config view (c)",
+		"status view (v)",
+		"hybrid / semantic / keyword",
+	} {
+		if !contains(got, want) {
+			t.Fatalf("help render missing %q: %q", want, got)
+		}
+	}
+}
+
 func TestModelRenderStatusShowsVectorHealth(t *testing.T) {
 	m := NewModel(context.Background(), "")
 	m.width = 120
