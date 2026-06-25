@@ -796,6 +796,13 @@ func (s *SDKServer) handleIndex(ctx context.Context, req *sdkmcp.CallToolRequest
 		}
 	}
 
+	// G4: after reindexing vecgrep, surface whether codemap also has a graph
+	// for this project and whether it's drifted — so the agent knows to keep
+	// the peer graph in sync. Degrades silently when codemap is absent.
+	if cfg, cfgErr := config.Load(s.projectRoot); cfgErr == nil && cfg.Codemap.Enabled {
+		s.writeCodemapStatus(ctx, &sb)
+	}
+
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
 	}, nil, nil
@@ -853,28 +860,43 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 			}
 		}
 
-		// Report codemap integration status
+		// Report codemap integration status (G4 cross-read).
 		if cfg.Codemap.Enabled {
-			sb.WriteString("\nCodemap integration: enabled\n")
-			if s.codemap != nil && s.codemap.Available() {
-				sb.WriteString("  Status: connected\n")
-				if status, _ := s.codemap.Status(ctx, s.projectRoot); status != nil && status.Indexed {
-					fmt.Fprintf(&sb, "  Graph: %d nodes, %d edges\n", status.Nodes, status.Edges)
-					if status.Stale > 0 {
-						fmt.Fprintf(&sb, "  Stale files: %d\n", status.Stale)
-					}
-				} else {
-					sb.WriteString("  Graph: not indexed (run 'codemap index' to build)\n")
-				}
-			} else {
-				sb.WriteString("  Status: codemap binary not found\n")
-			}
+			s.writeCodemapStatus(ctx, &sb)
 		}
 	}
 
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
 	}, nil, nil
+}
+
+// writeCodemapStatus reports the peer codemap graph's state (G4 cross-read):
+// whether codemap also has a graph for this project, its size, and — when the
+// graph has drifted from the working tree — a hint to reindex it. It shells
+// `codemap status --json` (one hop, CLI-only) and degrades silently: an absent
+// or erroring codemap simply reports "not found" / "not indexed", never an
+// error to the caller. Used by both vecgrep_status and vecgrep_index so an
+// agent knows before delegating whether the peer can answer.
+func (s *SDKServer) writeCodemapStatus(ctx context.Context, sb *strings.Builder) {
+	sb.WriteString("\nCodemap integration: enabled\n")
+	if s.codemap == nil || !s.codemap.Available() {
+		sb.WriteString("  Status: codemap binary not found\n")
+		return
+	}
+	sb.WriteString("  Status: connected\n")
+	status, _ := s.codemap.Status(ctx, s.projectRoot)
+	if !status.Indexed() {
+		sb.WriteString("  Graph: not indexed (run 'codemap index' to build)\n")
+		return
+	}
+	fmt.Fprintf(sb, "  Graph: %d nodes, %d edges", status.Nodes, status.Edges)
+	if st := status.Stale; st.Any() {
+		fmt.Fprintf(sb, " (stale: %d changed / %d new / %d deleted)\n", st.Changed, st.New, st.Deleted)
+		sb.WriteString("  **Hint:** codemap's graph is stale — run 'codemap index' to refresh it before trusting graph answers.\n")
+	} else {
+		sb.WriteString(" (fresh)\n")
+	}
 }
 
 // handleSimilar handles the vecgrep_similar tool.
@@ -1170,6 +1192,13 @@ func (s *SDKServer) projectName() string {
 // so they persist across reindex and surface in codemap's context views.
 // This is best-effort: errors are silently ignored and never affect the
 // search response returned to the caller.
+//
+// Targeting (F3): instead of trusting vecgrep's regex-extracted SymbolName —
+// which can be empty or collide on a bare name — we resolve each hit's
+// file:start_line to the *correct* enclosing graph symbol via codemap's
+// symbol-at (C2). We annotate that resolved FQN-anchored symbol and skip the
+// hit entirely when codemap can't place the position (resolution "none"), so
+// we never write a durable garbage pin.
 func (s *SDKServer) annotateSearchHits(ctx context.Context, results []search.Result, query string) {
 	if s.codemap == nil || !s.codemap.Available() || len(results) == 0 {
 		return
@@ -1179,11 +1208,16 @@ func (s *SDKServer) annotateSearchHits(ctx context.Context, results []search.Res
 	defer cancel()
 
 	for _, r := range results {
-		if r.SymbolName == "" {
+		// Resolve the hit's position to the enclosing symbol. We pin the
+		// graph-resolved symbol, not the regex-extracted name.
+		sa, err := s.codemap.SymbolAt(annotateCtx, s.projectRoot, r.RelativePath, r.StartLine)
+		if err != nil || !sa.Resolved() {
+			// Project not indexed, position off any symbol, or codemap
+			// unavailable → skip rather than pin a guess.
 			continue
 		}
 		note := fmt.Sprintf("vecgrep semantic hit (score %.2f): %s", r.Score, truncate(query, 120))
-		_ = s.codemap.Annotate(annotateCtx, s.projectRoot, r.SymbolName, note, "vecgrep", map[string]any{
+		_ = s.codemap.Annotate(annotateCtx, s.projectRoot, sa.Symbol, note, "vecgrep", map[string]any{
 			"score":      r.Score,
 			"query":      query,
 			"file":       r.RelativePath,
@@ -1191,6 +1225,8 @@ func (s *SDKServer) annotateSearchHits(ctx context.Context, results []search.Res
 			"end_line":   r.EndLine,
 			"language":   r.Language,
 			"chunk_type": r.ChunkType,
+			"resolution": sa.Resolution,
+			"fqn":        sa.FQN,
 		})
 	}
 }

@@ -250,3 +250,131 @@ func TestAnnotateGatesEmptySymbol(t *testing.T) {
 		t.Fatalf("empty symbol should be gated, got %v", err)
 	}
 }
+
+// TestSymbolAtParsesC2Contract is the F3/F4 golden: a resolved file:line maps
+// to the enclosing symbol with resolution "exact" and Resolved()==true.
+func TestSymbolAtParsesC2Contract(t *testing.T) {
+	fixture := fixturePath(t, "symbol_at_exact.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	sa, err := c.SymbolAt(context.Background(), t.TempDir(), "app/auth.go", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sa == nil || !sa.Resolved() {
+		t.Fatalf("expected a resolved symbol, got %+v", sa)
+	}
+	if sa.Symbol != "ValidateToken" || sa.FQN != "app.ValidateToken" || sa.Resolution != "exact" {
+		t.Errorf("symbol-at = %+v, want ValidateToken/app.ValidateToken/exact", sa)
+	}
+	if sa.StartLine != 40 || sa.EndLine != 55 {
+		t.Errorf("line range = %d-%d, want 40-55", sa.StartLine, sa.EndLine)
+	}
+}
+
+// TestSymbolAtNoneIsNotResolved asserts a "none" resolution (no symbol at the
+// position, or project not indexed) is parsed but reports Resolved()==false so
+// the caller skips annotation rather than guessing.
+func TestSymbolAtNoneIsNotResolved(t *testing.T) {
+	fixture := fixturePath(t, "symbol_at_none.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	sa, err := c.SymbolAt(context.Background(), t.TempDir(), "app/auth.go", 999)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sa == nil {
+		t.Fatal("expected a parsed (unresolved) result, not nil")
+	}
+	if sa.Resolved() {
+		t.Fatalf("resolution=none must report Resolved()==false, got %+v", sa)
+	}
+}
+
+// TestSymbolAtUnavailableReturnsErr asserts a nil client yields the typed
+// unavailable error so callers don't pin a guess.
+func TestSymbolAtUnavailableReturnsErr(t *testing.T) {
+	var c *CodemapClient
+	sa, err := c.SymbolAt(context.Background(), "/tmp", "app/auth.go", 1)
+	if !errors.Is(err, ErrCodemapUnavailable) {
+		t.Fatalf("expected ErrCodemapUnavailable, got %v", err)
+	}
+	if sa.Resolved() {
+		t.Fatal("nil result must not be Resolved()")
+	}
+}
+
+// TestSymbolAtNonZeroExitIsMiss asserts a non-zero exit is treated as a miss
+// (nil, nil) — never a guess.
+func TestSymbolAtNonZeroExitIsMiss(t *testing.T) {
+	bin := fakeCodemap(t, "", 2)
+	c := &CodemapClient{bin: bin}
+	sa, err := c.SymbolAt(context.Background(), t.TempDir(), "app/auth.go", 1)
+	if err != nil {
+		t.Fatalf("non-zero exit should be a silent miss, got err %v", err)
+	}
+	if sa.Resolved() {
+		t.Fatalf("non-zero exit must not yield a resolved symbol, got %+v", sa)
+	}
+}
+
+// TestStatusParsesStaleObject asserts G4's parse fix: codemap's `status --json`
+// emits `registered` (no `indexed` field) and `stale` as an OBJECT, not an int.
+// The previous struct parsed `indexed`/`stale int` codemap never emits.
+func TestStatusParsesStaleObject(t *testing.T) {
+	fixture := fixturePath(t, "status_stale.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	st, err := c.Status(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st == nil || !st.Indexed() {
+		t.Fatalf("registered with nodes>0 should be Indexed(), got %+v", st)
+	}
+	if st.Nodes != 1280 || st.Edges != 3410 {
+		t.Errorf("nodes/edges = %d/%d, want 1280/3410", st.Nodes, st.Edges)
+	}
+	if !st.Stale.Any() {
+		t.Fatal("stale object {3,1,2} should report Any()==true")
+	}
+	if st.Stale.Changed != 3 || st.Stale.New != 1 || st.Stale.Deleted != 2 {
+		t.Errorf("stale = %+v, want 3/1/2", st.Stale)
+	}
+}
+
+// TestStatusFreshHasNoStaleness asserts a null `stale` parses to no drift.
+func TestStatusFreshHasNoStaleness(t *testing.T) {
+	fixture := fixturePath(t, "status_fresh.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	st, err := c.Status(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !st.Indexed() {
+		t.Fatalf("fresh indexed status should be Indexed(), got %+v", st)
+	}
+	if st.Stale.Any() {
+		t.Fatalf("null stale should report Any()==false, got %+v", st.Stale)
+	}
+}
+
+// TestStatusNotIndexed asserts registered:false / nodes:0 is not Indexed().
+func TestStatusNotIndexed(t *testing.T) {
+	fixture := fixturePath(t, "status_not_indexed.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	st, err := c.Status(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st.Indexed() {
+		t.Fatalf("unregistered project must not be Indexed(), got %+v", st)
+	}
+}

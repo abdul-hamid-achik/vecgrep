@@ -1,0 +1,10 @@
+{
+  "file": "app/auth.go",
+  "line": 42,
+  "symbol": "ValidateToken",
+  "fqn": "app.ValidateToken",
+  "kind": "function",
+  "start_line": 40,
+  "end_line": 55,
+  "resolution": "exact"
+}

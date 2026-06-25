@@ -1,0 +1,12 @@
+{
+  "project": "demo",
+  "root": "/repo/demo",
+  "registered": true,
+  "path": "/data/demo.db",
+  "nodes": 1280,
+  "edges": 3410,
+  "files": 96,
+  "vectors": 1280,
+  "precise_edges": 3410,
+  "stale": { "changed": 3, "new": 1, "deleted": 2 }
+}

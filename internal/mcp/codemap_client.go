@@ -140,16 +140,44 @@ func (c *CodemapClient) Symbols(ctx context.Context, projectPath, file string) (
 	return results, nil
 }
 
-// StatusResult holds the codemap status output.
-type StatusResult struct {
-	Indexed bool   `json:"indexed"`
-	Nodes   int    `json:"nodes"`
-	Edges   int    `json:"edges"`
-	Project string `json:"project"`
-	Stale   int    `json:"stale"`
+// CodemapStaleness mirrors codemap's index.Staleness — how far the graph has
+// drifted from the working tree. codemap emits `stale` as an OBJECT (or null
+// when fresh / not computed), NOT an int.
+type CodemapStaleness struct {
+	Changed int `json:"changed"`
+	New     int `json:"new"`
+	Deleted int `json:"deleted"`
 }
 
-// Status calls `codemap status --json` to check if the project is indexed.
+// Any reports whether the index has drifted at all.
+func (s *CodemapStaleness) Any() bool {
+	return s != nil && (s.Changed > 0 || s.New > 0 || s.Deleted > 0)
+}
+
+// StatusResult holds the codemap `status --json` output (C-status). codemap
+// reports `registered` (project known to codemap) — there is NO `indexed`
+// field; a built graph is implied by Nodes>0. `stale` is an object that is
+// absent/null when the index is fresh.
+type StatusResult struct {
+	Project    string            `json:"project"`
+	Registered bool              `json:"registered"`
+	Nodes      int               `json:"nodes"`
+	Edges      int               `json:"edges"`
+	Files      int               `json:"files"`
+	Vectors    int               `json:"vectors"`
+	Stale      *CodemapStaleness `json:"stale"`
+}
+
+// Indexed reports whether codemap has a usable graph for the project (it is
+// registered and has at least one node). This replaces the non-existent
+// `indexed` JSON field the previous struct tried to parse.
+func (r *StatusResult) Indexed() bool {
+	return r != nil && r.Registered && r.Nodes > 0
+}
+
+// Status calls `codemap status --json` to read the peer graph's state.
+// Returns nil (no error) when codemap is unavailable or the call fails — the
+// caller degrades silently.
 func (c *CodemapClient) Status(ctx context.Context, projectPath string) (*StatusResult, error) {
 	if !c.Available() {
 		return nil, nil
@@ -167,6 +195,62 @@ func (c *CodemapClient) Status(ctx context.Context, projectPath string) (*Status
 	return &result, nil
 }
 
+// SymbolAtResult maps codemap's C2 contract from
+// `codemap symbol-at <file>:<line> --json`:
+//
+//	{ "file":"x.go","line":42,"symbol":"Foo","fqn":"pkg.Foo","kind":"function",
+//	  "start_line":40,"end_line":55,"resolution":"exact|enclosing|none" }
+//
+// Resolution is "exact" (line is the definition line), "enclosing" (line falls
+// inside the symbol's body), or "none" (no symbol there / project not indexed).
+type SymbolAtResult struct {
+	File       string `json:"file"`
+	Line       int    `json:"line"`
+	Symbol     string `json:"symbol"`
+	FQN        string `json:"fqn"`
+	Kind       string `json:"kind"`
+	StartLine  int    `json:"start_line"`
+	EndLine    int    `json:"end_line"`
+	Resolution string `json:"resolution"`
+}
+
+// Resolved reports whether codemap actually placed the position on a symbol
+// (resolution exact or enclosing, with a non-empty symbol name). A "none"
+// resolution — or an empty symbol — means "do not pin here."
+func (r *SymbolAtResult) Resolved() bool {
+	return r != nil && r.Resolution != "" && r.Resolution != "none" && r.Symbol != ""
+}
+
+// SymbolAt resolves a file:line position to its enclosing symbol via
+// `codemap symbol-at <file>:<line> --json` (C2). It is the join key that lets a
+// vecgrep hit's file:start_line attach to the right graph node instead of a
+// regex-extracted name that may be empty or collide.
+//
+// Returns:
+//   - ErrCodemapUnavailable when the client is nil / binary missing.
+//   - (nil, nil) on a non-zero exit or unparseable output — a miss, never a
+//     guess; codemap also returns resolution="none" when the project is not
+//     indexed, so an unindexed peer simply yields an unresolved result.
+//   - (*SymbolAtResult, nil) otherwise; check Resolved() before trusting it.
+func (c *CodemapClient) SymbolAt(ctx context.Context, projectPath, file string, line int) (*SymbolAtResult, error) {
+	if !c.Available() {
+		return nil, ErrCodemapUnavailable
+	}
+	pos := fmt.Sprintf("%s:%d", file, line)
+	cmd := exec.CommandContext(ctx, c.bin, "symbol-at", pos, "--json")
+	cmd.Dir = projectPath
+	out, err := cmd.Output()
+	if err != nil {
+		// Best-effort: a non-zero exit is treated as "no symbol", never a guess.
+		return nil, nil
+	}
+	var result SymbolAtResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, nil
+	}
+	return &result, nil
+}
+
 // Annotate pins a note on a codemap symbol via `codemap annotate`.
 //
 // codemap takes the symbol POSITIONALLY (`codemap annotate <symbol> --source
@@ -177,13 +261,9 @@ func (c *CodemapClient) Status(ctx context.Context, projectPath string) (*Status
 // regex-extracted symbol name can be "" (or collide on a bare name like
 // `Foo`), which would write a garbage pin. We therefore refuse to annotate
 // without a symbol and return ErrCodemapUnavailable for a missing one so the
-// caller can skip rather than corrupt the store.
-//
-// TODO(F3/F4): resolve the hit's file:line to the *correct* enclosing symbol
-// via `codemap symbol-at <file>:<line> --json` (C2) before annotating, instead
-// of trusting vecgrep's regex-extracted SymbolName. That resolver is being
-// built on the codemap side (F4 / Store.NodeAtLine); until it lands we pass
-// the SymbolName through but hard-gate on it being non-empty.
+// caller can skip rather than corrupt the store. Callers should prefer a
+// symbol resolved via SymbolAt (file:line → enclosing node) over a
+// regex-extracted name.
 func (c *CodemapClient) Annotate(ctx context.Context, projectPath, symbol, note, source string, data any) error {
 	if !c.Available() {
 		return nil
@@ -333,7 +413,7 @@ func (c *CodemapClient) RelatedFiles(ctx context.Context, projectPath, relPath s
 // CodemapRerankResult holds a search result with structural metadata from codemap.
 type CodemapRerankResult struct {
 	Result          codemapSearchResult
-	StructuralScore float32 // normalized 0..1 from codemap hotspot/impact
+	StructuralScore float32 // normalized 0..1 from codemap's fan-in hub score
 	FinalScore      float32 // blended final score
 }
 
@@ -346,9 +426,13 @@ type codemapSearchResult struct {
 	Score        float32
 }
 
-// Rerank re-orders search results by blending the original vecgrep score
-// with codemap's structural importance (fan-in hub score + blast radius).
-// structuralWeight is 0..1; 0 means no re-ranking (results returned as-is).
+// Rerank re-orders search results by blending the original vecgrep score with
+// codemap's structural importance. The structural signal is the symbol's
+// fan-in hub score (codemap's in_degree), down-weighted when shared_name>1 so
+// a name-inflated hub does not outrank a genuinely-referenced one. We
+// deliberately do NOT fold in blast-radius size: codemap's hotspots feed
+// doesn't carry it, so parsing it here would be dead code implying a signal
+// that isn't wired. structuralWeight is 0..1; 0 means no re-ranking.
 func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results []CodemapRerankResult, structuralWeight float32) []CodemapRerankResult {
 	if !c.Available() || structuralWeight <= 0 || len(results) == 0 {
 		return results
