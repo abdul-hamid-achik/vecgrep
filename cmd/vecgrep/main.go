@@ -383,6 +383,19 @@ func init() {
 	projectsCmd.AddCommand(projectsAddCmd)
 	projectsCmd.AddCommand(projectsRemoveCmd)
 
+	// Memory command flags
+	memoryRecallCmd.Flags().String("tags", "", "comma-separated tags; a memory must carry ALL of them (AND)")
+	memoryRecallCmd.Flags().Float64("min-importance", 0, "minimum importance threshold (0-1)")
+	memoryRecallCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
+	memoryRecallCmd.Flags().StringP("format", "f", "default", "output format (default, json)")
+	memoryRememberCmd.Flags().String("tags", "", "comma-separated tags (e.g. codemap,<project_key>)")
+	memoryRememberCmd.Flags().Float64("importance", 0.5, "importance (0-1)")
+	memoryRememberCmd.Flags().Int("ttl-hours", 0, "expiration in hours (0 = never)")
+
+	// Add memory subcommands
+	memoryCmd.AddCommand(memoryRecallCmd)
+	memoryCmd.AddCommand(memoryRememberCmd)
+
 	// Init command flags for global/local mode
 	initCmd.Flags().Bool("global", false, "register project in ~/.vecgrep/ (this is the default)")
 	initCmd.Flags().Bool("local", false, "create local .vecgrep/ directory instead of centralized storage")
@@ -404,6 +417,7 @@ func init() {
 	rootCmd.AddCommand(projectsCmd)
 	rootCmd.AddCommand(branchCmd)
 	rootCmd.AddCommand(daemonCmd)
+	rootCmd.AddCommand(memoryCmd)
 
 	// Daemon subcommands
 	daemonCmd.AddCommand(daemonStartCmd)

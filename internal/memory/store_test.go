@@ -611,6 +611,75 @@ func TestMultipleTagsRecall(t *testing.T) {
 	}
 }
 
+// TestTagAndScopingNoSubstringLeak is the G2 governance test: tag-AND recall
+// must NOT leak across scopes on a substring collision. The veclite Contains
+// pre-filter is a substring match, so a memory tagged "codemapper" or a key
+// that is a substring of another token could slip through; the exact
+// post-filter in Recall must reject them.
+func TestTagAndScopingNoSubstringLeak(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	const keyA = "abc123def456"   // project A's codemap key (12 hex)
+	const keyB = "abc123def456ff" // project B: a SUPERSTRING of keyA
+
+	// In-scope: this project's codemap memory.
+	_, _ = store.Remember(ctx, "auth token rotation gotcha", RememberOptions{Tags: []string{"codemap", keyA}})
+	// Leak bait 1: same content, a DIFFERENT project whose key is a superstring of keyA.
+	_, _ = store.Remember(ctx, "auth token rotation gotcha B", RememberOptions{Tags: []string{"codemap", keyB}})
+	// Leak bait 2: a tag that is a superstring of "codemap".
+	_, _ = store.Remember(ctx, "auth token rotation gotcha C", RememberOptions{Tags: []string{"codemapper", keyA}})
+
+	memories, err := store.Recall(ctx, "auth token rotation", RecallOptions{
+		Limit: 10,
+		Tags:  []string{"codemap", keyA},
+	})
+	if err != nil {
+		t.Fatalf("Recall failed: %v", err)
+	}
+
+	// Only the in-scope memory (exact "codemap" AND exact keyA) may match.
+	if len(memories) != 1 {
+		t.Fatalf("expected exactly 1 in-scope memory, got %d: %+v", len(memories), memories)
+	}
+	got := memories[0]
+	if !hasAllTags(got.Tags, []string{"codemap", keyA}) {
+		t.Errorf("matched memory lacks the exact scope tags: %+v", got.Tags)
+	}
+	// The superstring-key memory (keyB) and superstring-tag memory (codemapper)
+	// must NOT appear.
+	for _, m := range memories {
+		for _, tag := range m.Tags {
+			if tag == keyB || tag == "codemapper" {
+				t.Errorf("scope leaked: matched memory carries out-of-scope tag %q", tag)
+			}
+		}
+	}
+}
+
+func TestHasAllTags(t *testing.T) {
+	cases := []struct {
+		name string
+		tags []string
+		want []string
+		ok   bool
+	}{
+		{"empty want matches all", []string{"a", "b"}, nil, true},
+		{"all present", []string{"codemap", "abc123", "extra"}, []string{"codemap", "abc123"}, true},
+		{"missing one", []string{"codemap", "other"}, []string{"codemap", "abc123"}, false},
+		{"substring is not a match", []string{"codemapper", "abc123ff"}, []string{"codemap", "abc123"}, false},
+		{"order independent", []string{"b", "a"}, []string{"a", "b"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hasAllTags(c.tags, c.want); got != c.ok {
+				t.Errorf("hasAllTags(%v, %v) = %v, want %v", c.tags, c.want, got, c.ok)
+			}
+		})
+	}
+}
+
 func TestEmptyTagsList(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

@@ -164,9 +164,17 @@ func (s *MemoryStore) Recall(ctx context.Context, query string, opts RecallOptio
 	// Build filters
 	var filters []veclite.Filter
 
-	// Filter by tags if specified
+	// Filter by tags if specified. veclite combines multiple filters with AND
+	// logic, so one Contains filter per requested tag means a record must carry
+	// ALL of them (AND semantics) — the scoping the G2 governance hinges on
+	// (e.g. tags=["codemap", <project_key>] matches only that project's
+	// codemap-scoped memories, never every "codemap" memory across projects).
+	//
+	// Contains is a SUBSTRING match against the comma-joined tag string, so it
+	// can over-match ("codemap" ⊂ "codemapper", a 12-hex key ⊂ a longer token).
+	// We therefore use it only as a cheap pre-filter and re-verify exact tag
+	// membership in Go below, so the scope can never leak on a substring.
 	if len(opts.Tags) > 0 {
-		// Use Contains filter for tag matching (tags stored as comma-separated)
 		for _, tag := range opts.Tags {
 			filters = append(filters, veclite.Contains("tags", tag))
 		}
@@ -205,10 +213,37 @@ func (s *MemoryStore) Recall(ctx context.Context, query string, opts RecallOptio
 		}
 
 		memory := recordToMemory(r.Record, r.Score)
+
+		// Exact tag-AND re-check: the veclite Contains pre-filter is a
+		// substring match, so re-verify the parsed tag set carries every
+		// requested tag exactly. Prevents cross-project leakage on a
+		// substring collision.
+		if !hasAllTags(memory.Tags, opts.Tags) {
+			continue
+		}
+
 		memories = append(memories, memory)
 	}
 
 	return memories, nil
+}
+
+// hasAllTags reports whether tags contains every tag in want (exact match,
+// AND semantics). An empty want matches everything.
+func hasAllTags(tags, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	set := make(map[string]struct{}, len(tags))
+	for _, t := range tags {
+		set[t] = struct{}{}
+	}
+	for _, w := range want {
+		if _, ok := set[w]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Forget deletes memories by criteria.

@@ -1,0 +1,23 @@
+[
+  {
+    "id": "7",
+    "content": "auth token rotation: refresh before the 5m skew window",
+    "importance": 0.7,
+    "tags": [
+      "codemap",
+      "abc123def456"
+    ],
+    "score": 0.55
+  },
+  {
+    "id": "12",
+    "content": "ValidateToken must reject the empty-kid JWT",
+    "importance": 0.9,
+    "tags": [
+      "codemap",
+      "abc123def456",
+      "bug"
+    ],
+    "score": 0.41
+  }
+]
