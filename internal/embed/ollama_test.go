@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -181,9 +182,12 @@ func TestOllamaProvider_EmbedBatchDelegatesToDocuments(t *testing.T) {
 func TestOllamaProvider_EmbedBatchFallsBackOn404(t *testing.T) {
 	// Simulate an old Ollama that doesn't have /api/embed (returns 404).
 	// EmbedBatch should fall back to concurrent single requests.
+	var mu sync.Mutex
 	requestPaths := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		requestPaths = append(requestPaths, r.URL.Path)
+		mu.Unlock()
 
 		if r.URL.Path == "/api/embed" {
 			// Simulate old Ollama: /api/embed doesn't exist.
