@@ -84,17 +84,53 @@ Filesystem stat of the peer's registry + `codemap status --json` (`{nodes,edges,
 shelled). Each tool knows before delegating whether the peer can answer; vecgrep can reindex when
 `codemap.stale` is non-zero. Cheap, symmetric, honest.
 
-## Flows — DEFER (sound, but premature)
+## G1 — semantic backfill — **SHIPPED** (codemap side, 2026-06-24)
 
-- **G1 — semantic backfill** into codemap's `Service.Semantic` `Mode="none"` branch (shell `vecgrep
-  search --json`, back-map hits to graph nodes). Makes codemap's flagship path depend on vecgrep's
-  binary+index+Ollama to serve the *structure-indexed-but-embedding-empty* case. **Measure that case's
-  frequency first;** the honest `Mode="none"` + name-search floor is fine until then. (Needs a vecgrep
-  `--json` CLI path — the MCP handler renders Markdown today; struct tags already exist, so trivial.)
-- **G2 — `memory_recall` into context/impact** (Proposal E / EI.10). The flow is sound; the blocker is
-  **data governance**: memory is a *global* store with free-form CSV tags, so attaching it to codemap's
-  output needs an enforced `['codemap', <projectName>]` convention with identical `<projectName>`
-  derivation on both sides (else cross-project leakage). Write the convention before building.
+Measurement settled the deferral: structure-only is the **norm** here (both codemap-indexed projects are
+`vectors=0`; `graphite` is codemap-structure-only AND embedded in vecgrep), because codemap embedding is
+slow and the user embeds in vecgrep. So codemap's `Service.Semantic`, in its `Mode="none"` (no local
+embeddings) branch, now shells `vecgrep search <query> --format json` (config `vecgrep.enabled` default
+true, `CODEMAP_VECGREP_BIN`/`$PATH`) and maps each chunk hit back onto the graph by `(relative_path,
+start_line)` → `SemanticHit` carries codemap's FQN/kind/signature; `mode:"vecgrep"` marks provenance.
+CLI-only one hop, degrades to the honest "no embeddings" note. (vecgrep already had `search --format
+json` — a JSON array of `search.Result`.) Live-verified. **vecgrep does nothing here** — pure codemap-side.
+
+## G2 — agent-memory governance — **SPEC (build next)**
+
+vecgrep owns a **global** cross-project agent-memory store (`~/.vecai/memory/memory.veclite`;
+`Memory{Content, Importance, Tags[], TTL, Score}`). codemap wants to surface relevant memories beside a
+symbol in `codemap_context`/`codemap_impact` (Proposal E / EI.10). Because the store is global and tags
+are free-form, naive recall (`tags:['codemap']`) would **leak memories across projects**. This is the
+governance that prevents it.
+
+**The scope key — codemap is the single authority (no independent re-derivation).**
+- `<project_key>` = codemap's `git.RepoHash` (sha1 of the resolved absolute project root, first 12 hex —
+  collision-resistant, stable per checkout, machine-local). codemap **exposes** it: `codemap status
+  --json` → `project_key` and the `codemap_status` MCP tool (shipped 2026-06-24).
+- **Rule:** nobody re-derives the key. Any tool/agent writing a codemap-scoped memory reads codemap's
+  `project_key` and tags with that exact value — eliminating the "derive identically on both sides"
+  failure mode. (A git-remote-derived key would be more portable across machines if the memory store is
+  ever synced; out of scope for the local store.)
+
+**Tag convention.**
+- Write: `memory_remember(content, importance, tags=['codemap', <project_key>, …])`. The first two tags
+  are mandatory for a codemap-scoped memory; extra tags (FQN, 'refactor', 'bug') are free.
+- Read (codemap): `memory_recall(query=<FQN + nearby identifiers>, tags=['codemap', <project_key>],
+  min_importance=0.3)`. BOTH tags required → only this project's codemap-scoped memories match.
+
+**Read path (codemap build, after this spec).** `Service.Context`/`Service.Impact`, after assembling the
+report, recall by the tags above and attach matches as **transient** entries (`source:"memory"`) under a
+`memory` field — NOT codemap's durable symbol-pinned annotations (don't conflate the two). Gated on
+`vecgrep.enabled`; needs a CLI recall path (`vecgrep memory recall --tags … --format json`, CLI-only one
+hop — confirm/extend vecgrep's CLI).
+
+**Safety — fails closed.** A wrong/absent `project_key` → recall returns nothing → no leakage, no false
+memories. vecgrep drops expired (TTL) memories; codemap filters by `min_importance`. Memory is a shared
+scratchpad surfaced by meaning, never authoritative.
+
+**Build steps.** (1) codemap exposes `project_key` — **done**. (2) vecgrep memory recall CLI `--format
+json` by tags (confirm/add). (3) codemap Context/Impact recall + attach. (4) document the convention in
+`codemap docs` + vecgrep memory docs so agents tag correctly.
 
 ## Flows — CUT
 
