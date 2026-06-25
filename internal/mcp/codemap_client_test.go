@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
@@ -26,17 +27,6 @@ func TestCodemapClientAvailableNil(t *testing.T) {
 	var c *CodemapClient
 	if c.Available() {
 		t.Fatal("nil client should not be available")
-	}
-}
-
-func TestCodemapClientImpactUnavailableReturnsNil(t *testing.T) {
-	var c *CodemapClient
-	result, err := c.Impact(context.Background(), "/tmp", "SomeFunc")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != nil {
-		t.Fatal("expected nil result when client is unavailable")
 	}
 }
 
@@ -103,14 +93,14 @@ func TestCodemapClientCallersUnavailableReturnsNil(t *testing.T) {
 	}
 }
 
-func TestCodemapClientRelatedFilesUnavailableReturnsNil(t *testing.T) {
+func TestCodemapClientRelatedFilesUnavailableReturnsErr(t *testing.T) {
 	var c *CodemapClient
-	files, err := c.RelatedFiles(context.Background(), "/tmp", "main.go", 10)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	res, err := c.RelatedFiles(context.Background(), "/tmp", "main.go", 10)
+	if !errors.Is(err, ErrCodemapUnavailable) {
+		t.Fatalf("expected ErrCodemapUnavailable, got %v", err)
 	}
-	if files != nil {
-		t.Fatal("expected nil files when client is unavailable")
+	if res != nil {
+		t.Fatal("expected nil result when client is unavailable")
 	}
 }
 

@@ -3,13 +3,16 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
-	"strings"
-	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 )
+
+// ErrCodemapUnavailable is returned when the codemap client is nil or its
+// binary is not usable. Callers should fall back to vecgrep's own heuristics.
+var ErrCodemapUnavailable = errors.New("codemap unavailable")
 
 // CodemapClient wraps communication with the codemap CLI for graph-based
 // queries. It shells out to the codemap binary (resolved from cfg.Codemap.Bin
@@ -42,40 +45,26 @@ func (c *CodemapClient) Available() bool {
 	return c != nil && c.bin != ""
 }
 
-// ImpactResult holds the codemap_impact output for a symbol.
-type ImpactResult struct {
-	Symbol      string   `json:"symbol"`
-	Definition  string   `json:"definition"`
-	Callers     []string `json:"callers"`
-	Callees     []string `json:"callees"`
-	Tests       []string `json:"tests"`
-	BlastRadius int      `json:"blast_radius"`
-}
-
-// Impact calls `codemap impact --json <symbol>` to get the call graph for a
-// symbol. Returns nil and no error if codemap is unavailable or the symbol
-// is not found.
-func (c *CodemapClient) Impact(ctx context.Context, projectPath, symbol string) (*ImpactResult, error) {
-	if !c.Available() {
-		return nil, nil
-	}
-	cmd := exec.CommandContext(ctx, c.bin, "impact", "--json", symbol)
-	cmd.Dir = projectPath
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, nil // best-effort
-	}
-	var result ImpactResult
-	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, nil
-	}
-	return &result, nil
-}
-
-// HotspotResult holds a single hotspot entry from codemap_hotspots.
+// HotspotResult holds a single hotspot entry from `codemap hotspots --json`.
+//
+// codemap emits a HotspotRef per symbol with `in_degree` (the fan-in / call
+// reference count that drives the hub score) and `shared_name` (how many
+// distinct definitions share this bare name; >1 means the in-degree is
+// inflated by name-based collisions and should be down-weighted). The older
+// vecgrep struct parsed a `refs` field codemap never emits, so the hub score
+// was uniformly 0 and the structural rerank blend was inert.
 type HotspotResult struct {
-	Symbol string `json:"symbol"`
-	Refs   int    `json:"refs"`
+	Symbol     string `json:"symbol"`
+	InDegree   int    `json:"in_degree"`
+	SharedName int    `json:"shared_name"`
+}
+
+// hotspotsReport mirrors codemap's HotspotsReport: the `hotspots --json`
+// output is an OBJECT `{"project":…,"hotspots":[…]}`, not a bare array, so we
+// must unmarshal the wrapper before reaching the entries.
+type hotspotsReport struct {
+	Project  string          `json:"project"`
+	Hotspots []HotspotResult `json:"hotspots"`
 }
 
 // Hotspots calls `codemap hotspots --json` to get the most-referenced symbols.
@@ -93,11 +82,11 @@ func (c *CodemapClient) Hotspots(ctx context.Context, projectPath string, top in
 	if err != nil {
 		return nil, nil
 	}
-	var results []HotspotResult
-	if err := json.Unmarshal(out, &results); err != nil {
+	var report hotspotsReport
+	if err := json.Unmarshal(out, &report); err != nil {
 		return nil, nil
 	}
-	return results, nil
+	return report.Hotspots, nil
 }
 
 // FindResult holds a symbol match from codemap_find.
@@ -179,11 +168,33 @@ func (c *CodemapClient) Status(ctx context.Context, projectPath string) (*Status
 }
 
 // Annotate pins a note on a codemap symbol via `codemap annotate`.
+//
+// codemap takes the symbol POSITIONALLY (`codemap annotate <symbol> --source
+// … --note … --data …`); there is NO `--symbol` flag, so the previous
+// invocation was rejected by cobra and the annotate was a silent no-op.
+//
+// The symbol MUST be non-empty: this is a durable, reindex-proof store, and a
+// regex-extracted symbol name can be "" (or collide on a bare name like
+// `Foo`), which would write a garbage pin. We therefore refuse to annotate
+// without a symbol and return ErrCodemapUnavailable for a missing one so the
+// caller can skip rather than corrupt the store.
+//
+// TODO(F3/F4): resolve the hit's file:line to the *correct* enclosing symbol
+// via `codemap symbol-at <file>:<line> --json` (C2) before annotating, instead
+// of trusting vecgrep's regex-extracted SymbolName. That resolver is being
+// built on the codemap side (F4 / Store.NodeAtLine); until it lands we pass
+// the SymbolName through but hard-gate on it being non-empty.
 func (c *CodemapClient) Annotate(ctx context.Context, projectPath, symbol, note, source string, data any) error {
 	if !c.Available() {
 		return nil
 	}
-	args := []string{"annotate", "--symbol", symbol, "--note", note, "--source", source}
+	if symbol == "" {
+		// Never write a pin on an empty/unresolved symbol — it would be a
+		// durable garbage annotation. Caller should skip silently.
+		return ErrCodemapUnavailable
+	}
+	// Symbol is positional (args[0]); flags follow.
+	args := []string{"annotate", symbol, "--note", note, "--source", source}
 	if data != nil {
 		dataJSON, err := json.Marshal(data)
 		if err == nil {
@@ -223,96 +234,100 @@ func (c *CodemapClient) Callers(ctx context.Context, projectPath, symbol string)
 }
 
 // RelatedFile represents a file related to a target, with a reason and
-// confidence score derived from codemap's call graph.
+// confidence score derived from codemap's call graph. It maps one entry of
+// the C1 `related[]` array.
 type RelatedFile struct {
 	RelativePath string
-	Reason       string
-	Confidence   float32
+	// Reason is one of codemap's edge kinds: caller|callee|test|import.
+	Reason     string
+	Confidence float32
 }
 
-// RelatedFiles aggregates codemap graph data into a list of related files.
-// It resolves symbols in the target file, then fetches callers, callees,
-// tests, and blast radius for each. Files are aggregated and ranked by
-// the number of graph edges connecting them to the target.
-func (c *CodemapClient) RelatedFiles(ctx context.Context, projectPath, relPath string, limit int) ([]RelatedFile, error) {
+// relatedFilesEnvelope mirrors codemap's C1 contract emitted by
+// `codemap related-files <file> --json`:
+//
+//	{ "project":"demo", "file":"app/auth.go", "indexed":true,
+//	  "related":[ {"relative_path":"app/login.go","reason":"caller","confidence":0.9} ] }
+//
+// `reason` ∈ caller|callee|test|import.
+type relatedFilesEnvelope struct {
+	Project string `json:"project"`
+	File    string `json:"file"`
+	Indexed bool   `json:"indexed"`
+	Related []struct {
+		RelativePath string  `json:"relative_path"`
+		Reason       string  `json:"reason"`
+		Confidence   float32 `json:"confidence"`
+	} `json:"related"`
+}
+
+// RelatedFilesResult is the typed outcome of a related-files query. It lets
+// callers distinguish codemap's three peer states without collapsing them to
+// a single nil:
+//
+//   - Indexed == false        → codemap ran but the project is not indexed;
+//     the caller should fall back to vecgrep's own heuristics.
+//   - a non-nil error from RelatedFiles → real failure (non-zero exit, bad
+//     JSON); fall back AND log.
+//   - Indexed == true with an empty Related slice → indexed, nothing related;
+//     that is a VALID answer, not a fallback trigger.
+type RelatedFilesResult struct {
+	Indexed bool
+	Files   []RelatedFile
+}
+
+// RelatedFiles runs a single `codemap related-files <file> --json` exec and
+// parses the C1 contract. It replaces the old per-symbol fan-out (symbols →
+// impact per symbol, N cold subprocess spawns) with one process.
+//
+// Return contract (the three typed peer states):
+//   - ErrCodemapUnavailable: client is nil / binary missing → fall back.
+//   - any other non-nil error: codemap exited non-zero or emitted unparseable
+//     JSON → fall back and log.
+//   - (*RelatedFilesResult, nil): a real answer. Check Indexed: false means
+//     not-indexed (fall back); true with empty Files is a valid empty answer.
+func (c *CodemapClient) RelatedFiles(ctx context.Context, projectPath, relPath string, limit int) (*RelatedFilesResult, error) {
 	if !c.Available() {
-		return nil, nil
+		return nil, ErrCodemapUnavailable
 	}
 
-	// Get symbols defined in the target file
-	symbols, err := c.Symbols(ctx, projectPath, relPath)
-	if err != nil || len(symbols) == 0 {
-		return nil, nil
+	cmd := exec.CommandContext(ctx, c.bin, "related-files", relPath, "--json")
+	cmd.Dir = projectPath
+	out, err := cmd.Output()
+	if err != nil {
+		// State (b): non-zero exit / spawn failure → real error.
+		return nil, fmt.Errorf("codemap related-files %q: %w", relPath, err)
 	}
 
-	// Aggregate related files by edge count
-	fileScores := make(map[string]int)
-	fileReasons := make(map[string][]string)
+	var env relatedFilesEnvelope
+	if err := json.Unmarshal(out, &env); err != nil {
+		// Malformed output is a real error (version skew), not "no results".
+		return nil, fmt.Errorf("codemap related-files %q: parse: %w", relPath, err)
+	}
 
-	for _, sym := range symbols {
-		ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
-		impact, err := c.Impact(ctx2, projectPath, sym.Symbol)
-		cancel()
-		if err != nil || impact == nil {
+	// State (a): codemap ran but the project is not indexed.
+	if !env.Indexed {
+		return &RelatedFilesResult{Indexed: false}, nil
+	}
+
+	// State (c): indexed; map related[] (possibly empty — a valid answer).
+	files := make([]RelatedFile, 0, len(env.Related))
+	for _, r := range env.Related {
+		if r.RelativePath == "" || r.RelativePath == relPath {
 			continue
 		}
-
-		for _, caller := range impact.Callers {
-			if caller == "" || caller == relPath {
-				continue
-			}
-			fileScores[caller]++
-			fileReasons[caller] = append(fileReasons[caller], "caller of "+sym.Symbol)
-		}
-		for _, callee := range impact.Callees {
-			if callee == "" || callee == relPath {
-				continue
-			}
-			fileScores[callee]++
-			fileReasons[callee] = append(fileReasons[callee], "called by "+sym.Symbol)
-		}
-		for _, test := range impact.Tests {
-			if test == "" || test == relPath {
-				continue
-			}
-			fileScores[test]++
-			fileReasons[test] = append(fileReasons[test], "tests "+sym.Symbol)
-		}
-	}
-
-	// Build and sort results
-	results := make([]RelatedFile, 0, len(fileScores))
-	maxScore := 1
-	for file, score := range fileScores {
-		if score > maxScore {
-			maxScore = score
-		}
-		results = append(results, RelatedFile{
-			RelativePath: file,
-			Reason:       strings.Join(fileReasons[file], "; "),
-			Confidence:   float32(score),
+		files = append(files, RelatedFile{
+			RelativePath: r.RelativePath,
+			Reason:       r.Reason,
+			Confidence:   r.Confidence,
 		})
 	}
 
-	// Normalize confidence to 0..1
-	for i := range results {
-		results[i].Confidence = results[i].Confidence / float32(maxScore)
+	if limit > 0 && len(files) > limit {
+		files = files[:limit]
 	}
 
-	// Sort by confidence descending
-	for i := 0; i < len(results); i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[j].Confidence > results[i].Confidence {
-				results[i], results[j] = results[j], results[i]
-			}
-		}
-	}
-
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
-
-	return results, nil
+	return &RelatedFilesResult{Indexed: true, Files: files}, nil
 }
 
 // CodemapRerankResult holds a search result with structural metadata from codemap.
@@ -339,14 +354,26 @@ func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results 
 		return results
 	}
 
-	// Fetch hotspot scores (fan-in)
+	// Fetch hotspot scores (fan-in). codemap's in_degree is the hub signal;
+	// shared_name>1 marks a name-inflated hub (a name-based index counted
+	// every same-named definition together), so we discount those so a
+	// genuinely-referenced hub outranks a collision artifact.
 	hotspots, _ := c.Hotspots(ctx, projectPath, 200)
-	hubScore := make(map[string]int, len(hotspots))
-	maxHub := 1
+	hubScore := make(map[string]float32, len(hotspots))
+	var maxHub float32 = 1
 	for _, h := range hotspots {
-		hubScore[h.Symbol] = h.Refs
-		if h.Refs > maxHub {
-			maxHub = h.Refs
+		score := float32(h.InDegree)
+		// Down-weight inflated hubs: divide the fan-in by the number of
+		// same-named definitions it was (likely over-)counted across.
+		if h.SharedName > 1 {
+			score /= float32(h.SharedName)
+		}
+		// Keep the strongest score when a name appears more than once.
+		if score > hubScore[h.Symbol] {
+			hubScore[h.Symbol] = score
+		}
+		if hubScore[h.Symbol] > maxHub {
+			maxHub = hubScore[h.Symbol]
 		}
 	}
 
@@ -354,12 +381,12 @@ func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results 
 
 	for i := range results {
 		// Lookup the symbol's hub score; default to 0 if not found
-		hs := 0
+		var hs float32
 		if sym := results[i].Result.SymbolName; sym != "" {
 			hs = hubScore[sym]
 		}
 		// Normalize hub score to 0..1
-		normalizedHub := float32(hs) / float32(maxHub)
+		normalizedHub := hs / maxHub
 		results[i].StructuralScore = normalizedHub
 
 		// Blend: final = sem * (1-w) + struct * w

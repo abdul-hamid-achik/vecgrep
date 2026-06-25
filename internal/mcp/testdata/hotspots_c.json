@@ -1,0 +1,8 @@
+{
+  "project": "demo",
+  "hotspots": [
+    { "symbol": "Hub", "in_degree": 100, "shared_name": 0 },
+    { "symbol": "Inflated", "in_degree": 100, "shared_name": 10 },
+    { "symbol": "Minor", "in_degree": 5, "shared_name": 0 }
+  ]
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -437,20 +438,41 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 	relPath, _ := filepath.Rel(s.projectRoot, filePath)
 	fmt.Fprintf(&sb, "# Related Files for: %s\n\n", relPath)
 
-	// Try codemap integration first when available
+	// Try codemap integration first when available. We branch on the three
+	// typed peer states (C1) so provenance is honest:
+	//   - real answer (indexed, any number of related files) → return it,
+	//     even when empty: an indexed "nothing related" is a valid graph
+	//     answer, NOT a reason to fall back to import-regex.
+	//   - indexed:false (not indexed) → fall through to heuristics.
+	//   - error (non-zero exit / bad JSON) → fall through AND log.
 	if s.codemap != nil && s.codemap.Available() {
 		ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
-		related, err := s.codemap.RelatedFiles(ctx2, s.projectRoot, relPath, limit)
+		res, err := s.codemap.RelatedFiles(ctx2, s.projectRoot, relPath, limit)
 		cancel()
-		if err == nil && len(related) > 0 {
+		switch {
+		case err != nil:
+			// State (b): real failure. Fall back to heuristics, but log so
+			// the degradation is not silent, and mark provenance in-band.
+			log.Printf("vecgrep: codemap related-files failed for %s: %v; falling back to import-regex", relPath, err)
+			sb.WriteString("> _codemap errored; used import-regex heuristics below._\n\n")
+		case res != nil && res.Indexed:
+			// State (c): a real graph answer (possibly empty).
 			sb.WriteString("## Graph-Based Related Files (via codemap)\n\n")
-			for _, rf := range related {
-				fmt.Fprintf(&sb, "- `%s` (confidence: %.2f) — %s\n", rf.RelativePath, rf.Confidence, rf.Reason)
+			if len(res.Files) == 0 {
+				sb.WriteString("_codemap is indexed but found no graph-related files for this file._\n\n")
+			} else {
+				for _, rf := range res.Files {
+					fmt.Fprintf(&sb, "- `%s` (confidence: %.2f) — %s\n", rf.RelativePath, rf.Confidence, rf.Reason)
+				}
+				sb.WriteString("\n")
 			}
-			sb.WriteString("\n")
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
 			}, nil, nil
+		default:
+			// State (a): codemap ran but the project is not indexed. Fall
+			// through to heuristics with a provenance marker.
+			sb.WriteString("> _codemap unavailable or not indexed; using vecgrep's import-regex heuristics below._\n\n")
 		}
 	}
 
