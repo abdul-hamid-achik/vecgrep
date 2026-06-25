@@ -69,8 +69,13 @@ Drop vecgrep's bogus `--symbol`; pass the symbol **positionally**, after resolvi
 `file:line` to the *correct* symbol via F4 (never annotate on a regex-extracted `symbol_name` that may
 be `''` — it's a durable store). Closes the loop: semantic relevance becomes a reindex-proof,
 symbol-pinned layer surfaced on every codemap query. **+ document the `source` enum** (EI.4).
-**Rebind rule to specify first:** what happens to a `source='vecgrep'` annotation when codemap
-reindexes/renames/moves its pinned node (`DeleteNodesInFile` mid-write).
+**Rebind rule (RESOLVED):** codemap annotations are keyed by `target` (the symbol name/FQN) in a
+*separate* table — NOT by node id, no `ON DELETE CASCADE` — so a `source='vecgrep'` annotation **survives
+a full `--reindex`** (the rebuilt node re-matches by name). Pinned by `TestAnnotationSurvivesReindex`. On
+**rename/move** the old name no longer matches → the annotation **orphans** (persists but surfaces for
+nothing); codemap detects this via `NodeExistsByName` and can warn. No auto-rebind (would need rename
+detection). Practical rule for producers: annotate on the **FQN** (most stable), and treat a rename as
+re-annotate.
 
 ### F2 — structural rerank, *actually* wired  ·  S · vecgrep
 The rerank is **dead, not just imperfect**: `HotspotResult.Refs` (`refs`) ≠ codemap's `in_degree`, so
