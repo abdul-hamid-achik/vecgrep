@@ -613,7 +613,10 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		var progressCB index.ProgressCallback
 		if verbose {
 			progressCB = func(p index.Progress) {
-				fmt.Printf("\r  %s (%d/%d files, %d chunks)",
+				// \033[K erases from the cursor to end of line, so a shorter
+				// line (shorter filename or smaller counts) doesn't leave
+				// trailing characters from the previous, longer line.
+				fmt.Printf("\r  %s (%d/%d files, %d chunks)\033[K",
 					p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
 			}
 		}
