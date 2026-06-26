@@ -679,6 +679,18 @@ func (b *VecLiteBackend) Close() error {
 	return nil
 }
 
+// Reload re-reads the database from disk, rebuilding all in-memory state
+// (collections, HNSW indexes, BM25 indexes). It is intended for read-only
+// databases opened with SharedRead so they can pick up writes performed by
+// another process (e.g. the daemon or CLI index) without closing and
+// reopening. No-op if the backend is not initialized.
+func (b *VecLiteBackend) Reload() error {
+	if b.db == nil {
+		return fmt.Errorf("backend not initialized")
+	}
+	return b.db.Reload()
+}
+
 // Type returns "veclite".
 func (b *VecLiteBackend) Type() string {
 	return string(VectorBackendVecLite)

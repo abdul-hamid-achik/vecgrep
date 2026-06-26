@@ -299,6 +299,8 @@ func (d *Daemon) handleRequest(ctx context.Context, req *jsonRPCRequest) jsonRPC
 		return d.handleSwitchBranch(ctx, req)
 	case "daemon.search":
 		return d.handleSearch(ctx, req)
+	case "daemon.stats":
+		return d.handleStats(req)
 	default:
 		return jsonRPCResponse{
 			ID:    req.ID,
@@ -434,15 +436,26 @@ func IsRunning(dataDir string) bool {
 
 // searchParams holds the parameters for a daemon.search request.
 type searchParams struct {
-	Query    string `json:"query"`
-	Limit    int    `json:"limit"`
-	Mode     string `json:"mode"`
-	Language string `json:"language,omitempty"`
+	Query       string   `json:"query"`
+	Limit       int      `json:"limit"`
+	Mode        string   `json:"mode"`
+	Language    string   `json:"language,omitempty"`
+	Languages   []string `json:"languages,omitempty"`
+	ChunkTypes  []string `json:"chunk_types,omitempty"`
+	ChunkType   string   `json:"chunk_type,omitempty"`
+	FilePattern string   `json:"file_pattern,omitempty"`
+	Directory   string   `json:"directory,omitempty"`
+	MinLine     int      `json:"min_line,omitempty"`
+	MaxLine     int      `json:"max_line,omitempty"`
+	Explain     bool     `json:"explain,omitempty"`
+	FilePaths   []string `json:"file_paths,omitempty"`
+	Symbol      string   `json:"symbol,omitempty"`
 }
 
 // handleSearch runs a semantic/keyword/hybrid search using the daemon's warm
-// session and returns the results as JSON. This lets CLI clients search
-// through the socket instead of opening their own read-only session.
+// session and returns the results as JSON. This lets CLI clients and MCP
+// servers search through the socket instead of opening their own read-only
+// session, avoiding any file-lock contention.
 func (d *Daemon) handleSearch(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
 	var params searchParams
 	if len(req.Params) > 0 {
@@ -463,6 +476,14 @@ func (d *Daemon) handleSearch(ctx context.Context, req *jsonRPCRequest) jsonRPCR
 	results, err := searcher.Search(ctx, params.Query, search.SearchOptions{
 		Limit:       params.Limit,
 		Language:    params.Language,
+		Languages:   params.Languages,
+		ChunkType:   params.ChunkType,
+		ChunkTypes:  params.ChunkTypes,
+		FilePattern: params.FilePattern,
+		Directory:   params.Directory,
+		MinLine:     params.MinLine,
+		MaxLine:     params.MaxLine,
+		FilePaths:   params.FilePaths,
 		ProjectRoot: d.session.ProjectRoot,
 		Mode:        mode,
 	})
@@ -471,6 +492,18 @@ func (d *Daemon) handleSearch(ctx context.Context, req *jsonRPCRequest) jsonRPCR
 	}
 
 	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"results": results, "mode": string(mode)}}
+}
+
+// handleStats returns index statistics (files, chunks, languages) using the
+// daemon's warm session. This lets MCP servers and CLI clients check the index
+// state through the socket without opening their own read-only session.
+func (d *Daemon) handleStats(req *jsonRPCRequest) jsonRPCResponse {
+	searcher := search.NewSearcher(d.session.DB, d.throttled)
+	stats, err := searcher.GetIndexStats(context.Background())
+	if err != nil {
+		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32603, Message: fmt.Sprintf("stats failed: %v", err)}}
+	}
+	return jsonRPCResponse{ID: req.ID, Result: stats}
 }
 
 // switchBranchParams holds the parameters for a daemon.switchBranch request.

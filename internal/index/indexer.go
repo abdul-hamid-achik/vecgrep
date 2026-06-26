@@ -23,7 +23,7 @@ import (
 // processing this many files, or after this much elapsed time, whichever
 // comes first. A final sync always runs at the end.
 const (
-	defaultSyncInterval        = 50
+	defaultSyncInterval         = 50
 	defaultSyncIntervalDuration = 30 * time.Second
 )
 
@@ -64,7 +64,7 @@ func DefaultIndexerConfig() IndexerConfig {
 		MaxFileSize:          1024 * 1024, // 1MB
 		BatchSize:            64,
 		Workers:              4,
-		SyncInterval:          defaultSyncInterval,
+		SyncInterval:         defaultSyncInterval,
 		SyncIntervalDuration: defaultSyncIntervalDuration,
 	}
 }
@@ -707,12 +707,12 @@ func (idx *Indexer) GetPendingChanges(ctx context.Context, projectRoot string) (
 // provider. It reuses collectFiles and runs the chunker over each changed
 // file to estimate how many chunks would be created.
 type DryRunPreview struct {
-	NewFiles      int
-	ModifiedFiles int
-	DeletedFiles  int
-	TotalPending  int
+	NewFiles        int
+	ModifiedFiles   int
+	DeletedFiles    int
+	TotalPending    int
 	EstimatedChunks int
-	FilesToEmbed  int
+	FilesToEmbed    int
 }
 
 // DryRunPreview scans the project and returns counts of files needing

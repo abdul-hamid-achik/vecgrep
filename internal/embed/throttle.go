@@ -472,6 +472,7 @@ func (p *ThrottledProvider) worker() {
 		}
 	}
 }
+
 // joinOrRegisterInFlight atomically checks if there's already an in-flight
 // request for the given cache key. If so, it returns the existing dedup entry
 // (the caller should wait on it). If not, it creates and registers a new entry

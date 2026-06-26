@@ -197,6 +197,13 @@ type IndexingConfig struct {
 type ServerConfig struct {
 	// MCPEnabled enables the MCP server
 	MCPEnabled bool `mapstructure:"mcp_enabled" yaml:"mcp_enabled,omitempty"`
+	// MCPReloadInterval is the maximum age of a read-only snapshot before
+	// it is reloaded from disk to pick up writes from other processes
+	// (the daemon, CLI index, etc.). Zero means reload on every read
+	// call. Default: 5s. Set via vecgrep.yaml:
+	//   server:
+	//     mcp_reload_interval: "10s"
+	MCPReloadInterval string `mapstructure:"mcp_reload_interval" yaml:"mcp_reload_interval,omitempty"`
 }
 
 // CodemapConfig holds settings for the codemap graph integration. When
@@ -294,7 +301,8 @@ func DefaultConfig() *Config {
 			TextWeight:   0.3,      // 30% text matching
 		},
 		Server: ServerConfig{
-			MCPEnabled: true,
+			MCPEnabled:        true,
+			MCPReloadInterval: "5s",
 		},
 		Vector: VectorConfig{
 			VecLite: VecLiteConfig{

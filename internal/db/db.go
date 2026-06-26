@@ -321,6 +321,13 @@ func (db *DB) Sync() error {
 	return db.backend.Sync()
 }
 
+// Reload re-reads the database from disk, rebuilding all in-memory state.
+// Intended for read-only databases (opened with ReadOnly+SharedRead) to pick
+// up writes from another process. No-op for in-memory databases.
+func (db *DB) Reload() error {
+	return db.backend.Reload()
+}
+
 // Dimensions returns the embedding dimensions.
 func (db *DB) Dimensions() int {
 	return db.dimensions

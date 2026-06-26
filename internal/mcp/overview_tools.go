@@ -45,8 +45,15 @@ func (s *SDKServer) handleOverview(ctx context.Context, req *sdkmcp.CallToolRequ
 	projectName := filepath.Base(s.projectRoot)
 	fmt.Fprintf(&sb, "# Codebase Overview: %s\n\n", projectName)
 
-	// Get stats from searcher
-	stats, err := s.searcher.GetIndexStats(ctx)
+	// Get stats from RO searcher
+	searcher, sErr := s.roSearcher()
+	if sErr != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", sErr)}},
+			IsError: true,
+		}, nil, nil
+	}
+	stats, err := searcher.GetIndexStats(ctx)
 	if err == nil {
 		sb.WriteString("## Index Statistics\n\n")
 		if totalFiles, ok := stats["total_files"].(int64); ok {
@@ -305,6 +312,15 @@ func (s *SDKServer) handleBatchSearch(ctx context.Context, req *sdkmcp.CallToolR
 	}
 
 	resultsChan := make(chan queryResult, len(input.Queries))
+	// Get RO searcher before launching goroutines (shared handle, thread-safe)
+	searcher, sErr := s.roSearcher()
+	if sErr != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", sErr)}},
+			IsError: true,
+		}, nil, nil
+	}
+
 	var wg sync.WaitGroup
 
 	for _, query := range input.Queries {
@@ -320,7 +336,7 @@ func (s *SDKServer) handleBatchSearch(ctx context.Context, req *sdkmcp.CallToolR
 				Mode:        search.SearchModeHybrid,
 			}
 
-			results, err := s.searcher.Search(ctx, q, opts)
+			results, err := searcher.Search(ctx, q, opts)
 			resultsChan <- queryResult{query: q, results: results, err: err}
 		}(query)
 	}

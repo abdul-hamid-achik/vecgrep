@@ -367,12 +367,12 @@ func TestModelRenderConfigShowsCacheAndThrottle(t *testing.T) {
 	m.session = &app.Session{
 		Config: &config.Config{
 			Embedding: config.EmbeddingConfig{
-				Provider:      "ollama",
-				Model:         "nomic-embed-text",
-				Dimensions:    768,
-				MaxBatchSize:  32,
-				KeepAlive:     "30m",
-				Throttle:      config.ThrottleConfig{Enabled: &enabled, MaxInFlight: 4},
+				Provider:     "ollama",
+				Model:        "nomic-embed-text",
+				Dimensions:   768,
+				MaxBatchSize: 32,
+				KeepAlive:    "30m",
+				Throttle:     config.ThrottleConfig{Enabled: &enabled, MaxInFlight: 4},
 			},
 		},
 	}
