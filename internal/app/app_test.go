@@ -12,6 +12,7 @@ import (
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
+	vlsession "github.com/abdul-hamid-achik/veclite/session"
 )
 
 func createTestSession(t *testing.T) (*Session, *Service) {
@@ -222,6 +223,29 @@ func TestOpenSessionCorruptVecLiteIncludesRecoveryHint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "vecgrep reset --force") {
 		t.Fatalf("recovery hint missing: %v", err)
+	}
+}
+
+func TestOpenErrorHintDistinguishesLiveLockFromStaleIndex(t *testing.T) {
+	// A live file-lock (another running vecgrep process) must NOT suggest the
+	// destructive `reset --force` — that is only for an old-version/corrupt
+	// index. veclite already auto-clears locks from dead processes, so a
+	// surfaced ErrFileLocked always means a live holder.
+	locked := openErrorHint(vlsession.ErrFileLocked)
+	if !errors.Is(locked, vlsession.ErrFileLocked) {
+		t.Fatalf("lock hint should still wrap ErrFileLocked: %v", locked)
+	}
+	if strings.Contains(locked.Error(), "reset --force") {
+		t.Fatalf("live lock must not suggest reset --force: %v", locked)
+	}
+	if !strings.Contains(locked.Error(), "holds the index lock") {
+		t.Fatalf("live lock hint should explain another process holds the lock: %v", locked)
+	}
+
+	// Any other open failure keeps the old-version recovery hint.
+	other := openErrorHint(errors.New("not a veclite database"))
+	if !strings.Contains(other.Error(), "reset --force") {
+		t.Fatalf("non-lock open error should keep the recovery hint: %v", other)
 	}
 }
 

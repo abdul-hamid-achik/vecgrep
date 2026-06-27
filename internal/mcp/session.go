@@ -14,15 +14,25 @@ import (
 	vlsession "github.com/abdul-hamid-achik/veclite/session"
 )
 
+// defaultIdleEvictThreshold is how long the cached read-only handle may sit
+// idle (no reads in flight, no recent access) before it is closed to release
+// its shared file lock. Releasing it lets `vecgrep daemon start` acquire the
+// exclusive lock, and lets later reads route through the daemon socket, instead
+// of an idle MCP server pinning the shared lock for its whole lifetime.
+const defaultIdleEvictThreshold = 30 * time.Second
+
 // mcpSession manages lazy dual-handle database access for the MCP server.
-// Read tools use a cached read-only handle (shared flock, multiple readers OK).
-// Write tools close the cached RO handle and open a fresh RW handle (exclusive
-// flock) per call, returning it for the caller to close — so the exclusive lock
-// is held only for the duration of the write operation.
+// Read tools borrow a cached read-only handle (shared flock, multiple readers
+// OK) via a lease; write tools wait for outstanding leases to drain, then close
+// the cached RO handle and open a fresh RW handle (exclusive flock) per call,
+// returning it for the caller to close — so the exclusive lock is held only for
+// the duration of the write operation.
 //
-// This resolves the multi-process lock contention: an idle MCP server never
-// holds a lock, a searching MCP server holds only a shared lock (doesn't block
-// other readers), and a writing MCP server holds an exclusive lock only briefly.
+// This resolves the multi-process lock contention: an idle MCP server releases
+// its lock (see releaseIfIdle), a searching MCP server holds only a shared lock
+// (doesn't block other readers), and a writing MCP server holds an exclusive
+// lock only briefly. Leases (roLeases) guard against closing the RO handle out
+// from under an in-flight reader — MCP tool handlers run concurrently.
 type mcpSession struct {
 	cfg         *config.Config
 	projectRoot string
@@ -30,16 +40,20 @@ type mcpSession struct {
 
 	dbOpts db.OpenOptions
 
-	mu sync.Mutex
-	ro *db.DB // cached read-only handle (shared lock), nil when not open
+	mu       sync.Mutex
+	cond     *sync.Cond // broadcast when roLeases reaches 0
+	ro       *db.DB     // cached read-only handle (shared lock), nil when not open
+	roLeases int        // in-flight borrowers of ro; ro must not be closed while > 0
 
 	reloadThreshold time.Duration
-	daemonJSONPath  string // for mtime-based reload signal
+	idleThreshold   time.Duration // evict idle ro after this; 0 disables
+	daemonJSONPath  string        // for mtime-based reload signal
 	lastReload      time.Time
+	lastAccess      time.Time
 }
 
 // newMCPSession creates a new MCP session. No database is opened until
-// readOnlyDB() or readWriteDB() is called.
+// acquireRO() or readWriteDB() is called.
 func newMCPSession(cfg *config.Config, projectRoot string, provider embed.Provider) *mcpSession {
 	dbOpts := db.OpenOptions{
 		Dimensions:         cfg.Embedding.Dimensions,
@@ -56,52 +70,81 @@ func newMCPSession(cfg *config.Config, projectRoot string, provider embed.Provid
 		}
 	}
 
-	return &mcpSession{
+	s := &mcpSession{
 		cfg:             cfg,
 		projectRoot:     projectRoot,
 		provider:        provider,
 		dbOpts:          dbOpts,
 		reloadThreshold: reloadThreshold,
+		idleThreshold:   defaultIdleEvictThreshold,
 		daemonJSONPath:  filepath.Join(cfg.DataDir, "daemon.json"),
 	}
+	s.cond = sync.NewCond(&s.mu)
+	return s
 }
 
-// readOnlyDB returns a *db.DB opened read-only with a shared flock. The handle
-// is cached: the first call opens the database, subsequent calls return the
-// same handle. If the database file doesn't exist yet (new project), returns
-// an error — the caller should use readWriteDB() to create it first.
-func (s *mcpSession) readOnlyDB() (*db.DB, error) {
+// acquireRO returns the cached read-only handle (opening it lazily with a
+// shared flock) together with a release function the caller MUST invoke once it
+// is done using the handle. While any lease is outstanding the handle will not
+// be closed by readWriteDB, close(), or releaseIfIdle — this prevents a
+// concurrent writer/evictor from closing the handle out from under an in-flight
+// reader (use-after-close). If the database file doesn't exist yet (new
+// project), returns an error — the caller should use readWriteDB() first.
+func (s *mcpSession) acquireRO() (*db.DB, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.ro != nil {
-		return s.ro, nil
+	if s.ro == nil {
+		opts := s.dbOpts
+		opts.ReadOnly = true
+		opts.SharedRead = true
+
+		database, err := db.OpenWithOptions(opts)
+		if err != nil {
+			return nil, nil, err
+		}
+		s.ro = database
+		s.lastReload = time.Now()
 	}
 
-	opts := s.dbOpts
-	opts.ReadOnly = true
-	opts.SharedRead = true
+	s.roLeases++
+	s.lastAccess = time.Now()
 
-	database, err := db.OpenWithOptions(opts)
-	if err != nil {
-		return nil, err
+	released := false
+	release := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if released {
+			return
+		}
+		released = true
+		s.roLeases--
+		if s.roLeases == 0 {
+			s.cond.Broadcast()
+		}
 	}
-	s.ro = database
-	s.lastReload = time.Now()
-	return database, nil
+	return s.ro, release, nil
 }
 
-// readWriteDB opens a *db.DB with an exclusive flock for writing. It closes
-// any cached read-only handle first (LOCK_SH and LOCK_EX are mutually
-// exclusive). The returned *db.DB is NOT cached — the caller must call
-// database.Close() after use so the exclusive lock is released.
+// readWriteDB opens a *db.DB with an exclusive flock for writing. It first waits
+// for any in-flight read leases to drain, then closes the cached read-only
+// handle (LOCK_SH and LOCK_EX are mutually exclusive). The returned *db.DB is
+// NOT cached — the caller must call database.Close() after use so the exclusive
+// lock is released.
 //
-// On lock contention, returns a *vlsession.LockError with PID diagnostics.
+// On lock contention, returns a wrapped vlsession.ErrFileLocked with PID
+// diagnostics.
 func (s *mcpSession) readWriteDB() (*db.DB, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Close cached RO so LOCK_EX can be acquired.
+	// Wait for in-flight readers to finish before dropping the shared handle.
+	for s.roLeases > 0 {
+		s.cond.Wait()
+	}
+
+	// Close cached RO so LOCK_EX can be acquired. We hold s.mu across the open
+	// so a concurrent acquireRO can't slip a new shared lock in between.
 	if s.ro != nil {
 		_ = s.ro.Close()
 		s.ro = nil
@@ -109,12 +152,43 @@ func (s *mcpSession) readWriteDB() (*db.DB, error) {
 
 	database, err := db.OpenWithOptions(s.dbOpts)
 	if err != nil {
+		// The exclusive open failed (we already dropped the cached RO handle to
+		// attempt LOCK_EX). Best-effort restore the warm shared read handle so
+		// reads don't cold-start after a failed write. This itself fails if
+		// another process now holds the exclusive lock, in which case the next
+		// read reopens lazily.
+		roOpts := s.dbOpts
+		roOpts.ReadOnly = true
+		roOpts.SharedRead = true
+		if roDB, roErr := db.OpenWithOptions(roOpts); roErr == nil {
+			s.ro = roDB
+			s.lastReload = time.Now()
+		}
 		if errors.Is(err, vlsession.ErrFileLocked) {
 			return nil, fmt.Errorf("%w (%s)", vlsession.ErrFileLocked, lockAgeDescription(s.dbOpts.DataDir))
 		}
 		return nil, err
 	}
 	return database, nil
+}
+
+// releaseIfIdle closes the cached read-only handle (releasing its shared file
+// lock) when no reads are in flight and it has been idle longer than the idle
+// threshold. Returns true if it evicted the handle. The next acquireRO reopens
+// it lazily — or, by then, reads route through a daemon socket instead.
+func (s *mcpSession) releaseIfIdle() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ro == nil || s.roLeases > 0 || s.idleThreshold <= 0 {
+		return false
+	}
+	if time.Since(s.lastAccess) < s.idleThreshold {
+		return false
+	}
+	_ = s.ro.Close()
+	s.ro = nil
+	return true
 }
 
 // reloadIfStale reloads the cached read-only handle from disk if the reload
@@ -151,10 +225,15 @@ func (s *mcpSession) reloadIfStale() error {
 	return nil
 }
 
-// close closes any cached handles and releases locks.
+// close closes any cached handles and releases locks. It waits for in-flight
+// read leases to drain first so it never closes the handle out from under a
+// reader (close is called by activateProject when swapping sessions).
 func (s *mcpSession) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for s.roLeases > 0 {
+		s.cond.Wait()
+	}
 	if s.ro != nil {
 		err := s.ro.Close()
 		s.ro = nil

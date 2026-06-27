@@ -506,74 +506,25 @@ func (d *Daemon) handleStats(req *jsonRPCRequest) jsonRPCResponse {
 	return jsonRPCResponse{ID: req.ID, Result: stats}
 }
 
-// switchBranchParams holds the parameters for a daemon.switchBranch request.
-type switchBranchParams struct {
-	Branch string `json:"branch"`
-}
-
-// handleSwitchBranch snapshots the current branch's index to fcheap, then
-// restores or reindexes the target branch. It runs synchronously in the
-// request handler goroutine but tracks the operation via reindexWg so
-// Stop() can wait for it.
-func (d *Daemon) handleSwitchBranch(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
-	var params switchBranchParams
-	if len(req.Params) > 0 {
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32602, Message: fmt.Sprintf("invalid params: %v", err)}}
-		}
+// handleSwitchBranch rejects in-place branch switching. The daemon holds an
+// exclusive lock on a single branch's index directory for its whole lifetime,
+// and its watcher, indexer, and serving paths are all bound to that one open
+// handle, so it cannot snapshot the current branch, restore another, and rebind
+// its database without tearing down and reopening all of that.
+//
+// The previous implementation tried to snapshot the current branch via a second
+// read-only session, which deadlocked against the daemon's own exclusive lock
+// (and on the rare path it didn't, it indexed into the wrong branch directory
+// because the open handle was never rebound). Branch switching is a CLI
+// operation: stop the daemon, run `vecgrep branch switch`, then restart it.
+func (d *Daemon) handleSwitchBranch(_ context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	return jsonRPCResponse{
+		ID: req.ID,
+		Error: &jsonRPCError{
+			Code:    -32601,
+			Message: "branch switching is not supported while the daemon is running; stop it (`vecgrep daemon stop`), run `vecgrep branch switch <branch>`, then restart the daemon",
+		},
 	}
-	if params.Branch == "" {
-		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32602, Message: "branch is required"}}
-	}
-
-	d.reindexWg.Add(1)
-	go func() {
-		defer d.reindexWg.Done()
-		d.doSwitchBranch(ctx, params.Branch)
-	}()
-
-	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"status": "switching", "branch": params.Branch}}
-}
-
-// doSwitchBranch performs the actual branch switch: snapshots the current
-// branch, then restores or reindexes the target branch. It updates the
-// daemon state on success.
-func (d *Daemon) doSwitchBranch(ctx context.Context, targetBranch string) {
-	projectRoot := d.session.ProjectRoot
-	projectName := d.session.ProjectName
-
-	// Step a: snapshot the current branch's index to fcheap
-	_, err := app.BranchSnapshot(ctx, projectRoot, projectName)
-	if err != nil {
-		log.Printf("daemon switchBranch: snapshot current branch failed: %v", err)
-		return
-	}
-
-	// Step b: restore the target branch from fcheap if a snapshot exists,
-	// or c: run a full reindex if no snapshot exists.
-	result, err := app.BranchSwitch(ctx, projectRoot, projectName, targetBranch)
-	if err != nil {
-		log.Printf("daemon switchBranch: switch to %q failed: %v", targetBranch, err)
-		return
-	}
-
-	// If no snapshot was restored, run a full reindex for the new branch.
-	if !result.Restored {
-		log.Printf("daemon switchBranch: no snapshot for %q, running full reindex", targetBranch)
-		if _, idxErr := d.indexer.Index(ctx, projectRoot); idxErr != nil {
-			log.Printf("daemon switchBranch: reindex failed: %v", idxErr)
-			return
-		}
-	}
-
-	// Update daemon state with the new active branch
-	d.stateMu.Lock()
-	d.state.ActiveBranch = targetBranch
-	d.state.LastReindex = time.Now()
-	d.stateMu.Unlock()
-	_ = d.writeState()
-
-	log.Printf("daemon switchBranch: switched to %q (restored=%v)", targetBranch, result.Restored)
 }
 
 // sweepLoop periodically runs fcheap vacuum to clean up orphaned stash

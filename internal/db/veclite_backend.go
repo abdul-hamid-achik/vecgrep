@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/abdul-hamid-achik/veclite"
@@ -79,12 +80,38 @@ type HNSWConfig struct {
 
 // VecLiteBackend implements the database layer using VecLite with HNSW indexing.
 // All metadata is stored in vector payload - no SQLite needed.
+//
+// The active collection pointer (coll) is swapped by Reload (read-only handles
+// picking up another process's writes) and DeleteAll (collection recreation).
+// Those swaps can race with concurrent readers/writers — MCP tool handlers run
+// concurrently, and the daemon shares one backend across its watcher, reindex,
+// and search goroutines. collMu guards the pointer itself; veclite's
+// *Collection is internally synchronized, so callers only need the lock long
+// enough to read the current pointer (see collection()).
 type VecLiteBackend struct {
+	collMu     sync.RWMutex
 	db         *veclite.DB
 	coll       *veclite.Collection
 	dbPath     string
 	dimensions int
 	hnsw       HNSWConfig
+}
+
+// collection returns the active collection pointer under the read lock. The
+// lock only guards against Reload/DeleteAll swapping the pointer; veclite's
+// *Collection is internally synchronized, so it is safe to operate on the
+// returned pointer after the lock is released.
+func (b *VecLiteBackend) collection() *veclite.Collection {
+	b.collMu.RLock()
+	defer b.collMu.RUnlock()
+	return b.coll
+}
+
+// setCollection swaps the active collection pointer under the write lock.
+func (b *VecLiteBackend) setCollection(coll *veclite.Collection) {
+	b.collMu.Lock()
+	b.coll = coll
+	b.collMu.Unlock()
 }
 
 // NewVecLiteBackend creates a new VecLite backend.
@@ -158,7 +185,7 @@ func (b *VecLiteBackend) InitWithOptions(dimensions int, hnsw HNSWConfig, readOn
 			return fmt.Errorf("failed to create/get collection: %w", err)
 		}
 	}
-	b.coll = coll
+	b.setCollection(coll)
 
 	return nil
 }
@@ -170,28 +197,31 @@ func (b *VecLiteBackend) HNSWConfig() HNSWConfig {
 
 // SetMetadataValue stores a single metadata value on the chunks collection.
 func (b *VecLiteBackend) SetMetadataValue(key string, value any) error {
-	if b.coll == nil {
+	coll := b.collection()
+	if coll == nil {
 		return fmt.Errorf("backend not initialized")
 	}
-	return b.coll.SetMetadataValue(key, value)
+	return coll.SetMetadataValue(key, value)
 }
 
 // MetadataValue retrieves a single metadata value from the chunks collection.
 // It returns (nil, false) when the key is absent or the backend is unopened.
 func (b *VecLiteBackend) MetadataValue(key string) (any, bool) {
-	if b.coll == nil {
+	coll := b.collection()
+	if coll == nil {
 		return nil, false
 	}
-	v, ok := b.coll.Metadata()[key]
+	v, ok := coll.Metadata()[key]
 	return v, ok
 }
 
 // DeleteMetadataValue removes a single metadata value from the chunks collection.
 func (b *VecLiteBackend) DeleteMetadataValue(key string) error {
-	if b.coll == nil {
+	coll := b.collection()
+	if coll == nil {
 		return fmt.Errorf("backend not initialized")
 	}
-	return b.coll.DeleteMetadataValue(key)
+	return coll.DeleteMetadataValue(key)
 }
 
 // collectionHNSWOptions returns the veclite collection options used by this backend.
@@ -254,7 +284,7 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		"indexed_at":   chunk.IndexedAt.Format(time.RFC3339),
 	}
 
-	id, err := b.coll.Insert(embedding, payload)
+	id, err := b.collection().Insert(embedding, payload)
 	if err != nil {
 		return 0, err
 	}
@@ -304,7 +334,7 @@ func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]f
 	}
 
 	// Use InsertBatch for batch insert
-	ids, err := b.coll.InsertBatch(vectors, payloads)
+	ids, err := b.collection().InsertBatch(vectors, payloads)
 	if err != nil {
 		return nil, fmt.Errorf("batch insert failed: %w", err)
 	}
@@ -340,7 +370,7 @@ func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		"indexed_at":    chunk.IndexedAt.Format(time.RFC3339),
 	}
 
-	id, isNew, err := b.coll.UpsertByKey("chunk_key", chunkKey, embedding, payload)
+	id, isNew, err := b.collection().UpsertByKey("chunk_key", chunkKey, embedding, payload)
 	if err != nil {
 		return 0, false, fmt.Errorf("upsert failed: %w", err)
 	}
@@ -356,25 +386,25 @@ func (b *VecLiteBackend) InsertEmbedding(chunkID int64, embedding []float32) err
 	}
 
 	// Legacy mode: store with minimal payload
-	_, err := b.coll.Insert(embedding, map[string]any{"chunk_id": chunkID})
+	_, err := b.collection().Insert(embedding, map[string]any{"chunk_id": chunkID})
 	return err
 }
 
 // DeleteEmbedding removes an embedding for a chunk (legacy compatibility).
 func (b *VecLiteBackend) DeleteEmbedding(chunkID int64) error {
-	_, err := b.coll.DeleteWhere(veclite.Equal("chunk_id", chunkID))
+	_, err := b.collection().DeleteWhere(veclite.Equal("chunk_id", chunkID))
 	return err
 }
 
 // DeleteByFilePath removes all chunks for a given file path.
 func (b *VecLiteBackend) DeleteByFilePath(filePath string) (int64, error) {
 	// Try both relative and absolute path matching
-	deleted1, err := b.coll.DeleteWhere(veclite.Equal("file_path", filePath))
+	deleted1, err := b.collection().DeleteWhere(veclite.Equal("file_path", filePath))
 	if err != nil {
 		return 0, err
 	}
 
-	deleted2, err := b.coll.DeleteWhere(veclite.Equal("relative_path", filePath))
+	deleted2, err := b.collection().DeleteWhere(veclite.Equal("relative_path", filePath))
 	if err != nil {
 		return int64(deleted1), err
 	}
@@ -385,7 +415,7 @@ func (b *VecLiteBackend) DeleteByFilePath(filePath string) (int64, error) {
 // DeleteByProjectRoot removes all chunks for a project.
 // If all records are deleted, the collection is recreated to reset the HNSW index.
 func (b *VecLiteBackend) DeleteByProjectRoot(projectRoot string) (int64, error) {
-	deleted, err := b.coll.DeleteWhere(veclite.Equal("project_root", projectRoot))
+	deleted, err := b.collection().DeleteWhere(veclite.Equal("project_root", projectRoot))
 	if err != nil {
 		return int64(deleted), err
 	}
@@ -396,7 +426,7 @@ func (b *VecLiteBackend) DeleteByProjectRoot(projectRoot string) (int64, error) 
 	// causing a panic ("index out of range [0] with length 0") on the next
 	// Insert. v0.16.0 fixed per-space index leaks on delete, but not this
 	// empty-collection entry-point corruption path. Re-tested 2026-06-21.
-	if b.coll.Count() == 0 {
+	if b.collection().Count() == 0 {
 		if err := b.DeleteAll(); err != nil {
 			return int64(deleted), err
 		}
@@ -412,7 +442,7 @@ func (b *VecLiteBackend) GetFileHashes(projectRoot string) (map[string]string, e
 
 	// Use the native project_root filter instead of scanning every record.
 	// This runs on every incremental index, so pushing the filter down matters.
-	records, err := b.coll.Find(veclite.Equal("project_root", projectRoot))
+	records, err := b.collection().Find(veclite.Equal("project_root", projectRoot))
 	if err != nil {
 		return nil, fmt.Errorf("find project records: %w", err)
 	}
@@ -432,14 +462,14 @@ func (b *VecLiteBackend) GetFileHashes(projectRoot string) (map[string]string, e
 // GetChunksByFile returns all chunks for a specific file.
 func (b *VecLiteBackend) GetChunksByFile(filePath string) ([]ChunkRecord, error) {
 	// Search by relative_path first
-	records, err := b.coll.Find(veclite.Equal("relative_path", filePath))
+	records, err := b.collection().Find(veclite.Equal("relative_path", filePath))
 	if err != nil {
 		return nil, err
 	}
 
 	// If no results, try absolute path
 	if len(records) == 0 {
-		records, err = b.coll.Find(veclite.Equal("file_path", filePath))
+		records, err = b.collection().Find(veclite.Equal("file_path", filePath))
 		if err != nil {
 			return nil, err
 		}
@@ -496,7 +526,7 @@ func (b *VecLiteBackend) SearchEmbeddings(queryEmbedding []float32, limit int) (
 		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), b.dimensions)
 	}
 
-	results, err := b.coll.Search(queryEmbedding, b.searchOptions(limit)...)
+	results, err := b.collection().Search(queryEmbedding, b.searchOptions(limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +554,7 @@ func (b *VecLiteBackend) SearchEmbeddings(queryEmbedding []float32, limit int) (
 
 // GetChunkByID retrieves a full chunk record by its vector ID.
 func (b *VecLiteBackend) GetChunkByID(chunkID int64) (*ChunkRecord, error) {
-	record, err := b.coll.Get(uint64(chunkID))
+	record, err := b.collection().Get(uint64(chunkID))
 	if err != nil {
 		return nil, fmt.Errorf("chunk not found for ID %d: %w", chunkID, err)
 	}
@@ -538,13 +568,13 @@ func (b *VecLiteBackend) GetChunkByID(chunkID int64) (*ChunkRecord, error) {
 // GetEmbedding retrieves the embedding for a chunk by its ID.
 func (b *VecLiteBackend) GetEmbedding(chunkID int64) ([]float32, error) {
 	// First try by record ID
-	record, err := b.coll.Get(uint64(chunkID))
+	record, err := b.collection().Get(uint64(chunkID))
 	if err == nil && record != nil {
 		return record.Vector, nil
 	}
 
 	// Fall back to legacy chunk_id lookup
-	records, err := b.coll.Find(veclite.Equal("chunk_id", chunkID))
+	records, err := b.collection().Find(veclite.Equal("chunk_id", chunkID))
 	if err != nil {
 		return nil, err
 	}
@@ -558,7 +588,7 @@ func (b *VecLiteBackend) GetEmbedding(chunkID int64) ([]float32, error) {
 
 // Count returns the number of embeddings stored.
 func (b *VecLiteBackend) Count() (int64, error) {
-	return int64(b.coll.Count()), nil
+	return int64(b.collection().Count()), nil
 }
 
 // GetStats returns comprehensive statistics about the index.
@@ -575,13 +605,13 @@ func (b *VecLiteBackend) GetStats(projectRoot string) (*Stats, error) {
 	// requested; only the global-stats case scans every record.
 	var records []*veclite.Record
 	if projectRoot != "" {
-		filtered, err := b.coll.Find(veclite.Equal("project_root", projectRoot))
+		filtered, err := b.collection().Find(veclite.Equal("project_root", projectRoot))
 		if err != nil {
 			return nil, fmt.Errorf("find project records for stats: %w", err)
 		}
 		records = filtered
 	} else {
-		records = b.coll.All()
+		records = b.collection().All()
 	}
 
 	for _, r := range records {
@@ -628,7 +658,7 @@ func (b *VecLiteBackend) DeleteAll() error {
 	if err != nil {
 		return fmt.Errorf("failed to recreate collection: %w", err)
 	}
-	b.coll = coll
+	b.setCollection(coll)
 
 	return nil
 }
@@ -644,7 +674,7 @@ func (b *VecLiteBackend) DeleteOrphaned(validChunkIDs []int64) (int64, error) {
 
 	// Only legacy records carry a non-zero chunk_id. Push that filter down to
 	// veclite so we don't scan modern records on the hot path.
-	legacyRecords, err := b.coll.Find(veclite.GreaterThan("chunk_id", 0))
+	legacyRecords, err := b.collection().Find(veclite.GreaterThan("chunk_id", 0))
 	if err != nil {
 		return 0, fmt.Errorf("find legacy records for orphan cleanup: %w", err)
 	}
@@ -657,7 +687,7 @@ func (b *VecLiteBackend) DeleteOrphaned(validChunkIDs []int64) (int64, error) {
 		}
 
 		if !validMap[chunkID] {
-			if err := b.coll.Delete(r.ID); err == nil {
+			if err := b.collection().Delete(r.ID); err == nil {
 				deleted++
 			}
 		}
@@ -684,11 +714,26 @@ func (b *VecLiteBackend) Close() error {
 // databases opened with SharedRead so they can pick up writes performed by
 // another process (e.g. the daemon or CLI index) without closing and
 // reopening. No-op if the backend is not initialized.
+//
+// db.Reload() builds brand-new *veclite.Collection objects and swaps them into
+// the underlying *veclite.DB, but our cached b.coll still points at the old
+// collection. We MUST re-fetch it afterwards, otherwise every search keeps
+// serving the pre-reload snapshot forever (the reload would be a silent no-op
+// for the caller). The re-fetch is published under the write lock so concurrent
+// readers never observe a torn pointer.
 func (b *VecLiteBackend) Reload() error {
 	if b.db == nil {
 		return fmt.Errorf("backend not initialized")
 	}
-	return b.db.Reload()
+	if err := b.db.Reload(); err != nil {
+		return err
+	}
+	coll, err := b.db.GetCollection("chunks")
+	if err != nil {
+		return fmt.Errorf("reload: re-fetch collection: %w", err)
+	}
+	b.setCollection(coll)
+	return nil
 }
 
 // Type returns "veclite".
@@ -769,13 +814,13 @@ func (b *VecLiteBackend) ListFiles(projectRoot string) ([]FileInfo, error) {
 	// requested; only the global case scans every record.
 	var records []*veclite.Record
 	if projectRoot != "" {
-		filtered, err := b.coll.Find(veclite.Equal("project_root", projectRoot))
+		filtered, err := b.collection().Find(veclite.Equal("project_root", projectRoot))
 		if err != nil {
 			return nil, fmt.Errorf("find project records for file list: %w", err)
 		}
 		records = filtered
 	} else {
-		records = b.coll.All()
+		records = b.collection().All()
 	}
 
 	filesMap := make(map[string]*FileInfo)
@@ -817,13 +862,13 @@ func (b *VecLiteBackend) ListFiles(projectRoot string) ([]FileInfo, error) {
 
 // HasFile checks if a file is indexed.
 func (b *VecLiteBackend) HasFile(relPath string) bool {
-	records, _ := b.coll.Find(veclite.Equal("relative_path", relPath))
+	records, _ := b.collection().Find(veclite.Equal("relative_path", relPath))
 	return len(records) > 0
 }
 
 // GetFileHash returns the hash of an indexed file.
 func (b *VecLiteBackend) GetFileHash(relPath string) string {
-	records, err := b.coll.Find(veclite.Equal("relative_path", relPath))
+	records, err := b.collection().Find(veclite.Equal("relative_path", relPath))
 	if err != nil || len(records) == 0 {
 		return ""
 	}
@@ -930,7 +975,7 @@ func (b *VecLiteBackend) SearchWithFilter(queryEmbedding []float32, limit int, o
 	}
 
 	// Perform search with native filtering
-	results, err := b.coll.Search(queryEmbedding, searchOpts...)
+	results, err := b.collection().Search(queryEmbedding, searchOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -974,7 +1019,7 @@ func (b *VecLiteBackend) SearchWithExplain(queryEmbedding []float32, limit int, 
 	// Use SearchExplain for diagnostics. veclite's SearchExplanation carries
 	// the actual Results alongside the diagnostics, so we no longer need to
 	// run a second Search() call — halving the work for every --explain.
-	explanation, err := b.coll.SearchExplain(queryEmbedding, searchOpts...)
+	explanation, err := b.collection().SearchExplain(queryEmbedding, searchOpts...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1018,7 +1063,7 @@ func (b *VecLiteBackend) TextSearch(query string, limit int, opts FilterOptions)
 		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
 	}
 
-	results, err := b.coll.TextSearch(query, searchOpts...)
+	results, err := b.collection().TextSearch(query, searchOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1048,7 +1093,7 @@ func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string
 		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
 	}
 
-	results, err := b.coll.HybridSearch(queryEmbedding, textQuery, searchOpts...)
+	results, err := b.collection().HybridSearch(queryEmbedding, textQuery, searchOpts...)
 	if err != nil {
 		return nil, err
 	}

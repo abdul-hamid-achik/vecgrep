@@ -1003,12 +1003,16 @@ func resolveSymbolScope(ctx context.Context, session *app.Session, symbol string
 func runServe(cmd *cobra.Command, args []string) error {
 	// The --mcp flag is retained for backward compatibility. The serve command
 	// is MCP-only now that the browser UI has been removed.
-	session, err := app.OpenSession(cmd.Context(), "")
-	if err != nil && !app.IsNoProject(err) {
-		return err
-	}
-	if session != nil {
-		defer session.Close()
+	//
+	// We deliberately do NOT open a session here. The MCP server opens the
+	// database lazily on the first tool call — or routes reads/writes through a
+	// running daemon over its socket — so it never holds a file lock while
+	// idle. Opening a writable session up front would hold an exclusive lock
+	// for the entire lifetime of the server, blocking `vecgrep daemon start`
+	// and other readers with "database file is locked by another process".
+	projectRoot := ""
+	if root, rootErr := config.GetProjectRoot(); rootErr == nil {
+		projectRoot = root
 	}
 
 	// Set up context with signal handling
@@ -1023,14 +1027,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	mcpCfg := mcp.SDKServerConfig{}
-	if session != nil {
-		mcpCfg.DB = session.DB
-		mcpCfg.Provider = session.Provider
-		mcpCfg.ProjectRoot = session.ProjectRoot
-	}
-
-	mcpServer := mcp.NewSDKServer(mcpCfg)
+	mcpServer := mcp.NewSDKServer(mcp.SDKServerConfig{ProjectRoot: projectRoot})
 	return mcpServer.Run(ctx)
 }
 

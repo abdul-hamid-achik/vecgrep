@@ -42,17 +42,18 @@ func (s *SDKServer) handleOverview(ctx context.Context, req *sdkmcp.CallToolRequ
 	var sb strings.Builder
 
 	// Get codebase name from project root
-	projectName := filepath.Base(s.projectRoot)
+	projectName := filepath.Base(s.projRoot())
 	fmt.Fprintf(&sb, "# Codebase Overview: %s\n\n", projectName)
 
 	// Get stats from RO searcher
-	searcher, sErr := s.roSearcher()
+	searcher, release, sErr := s.roSearcher()
 	if sErr != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", sErr)}},
 			IsError: true,
 		}, nil, nil
 	}
+	defer release()
 	stats, err := searcher.GetIndexStats(ctx)
 	if err == nil {
 		sb.WriteString("## Index Statistics\n\n")
@@ -89,14 +90,14 @@ func (s *SDKServer) handleOverview(ctx context.Context, req *sdkmcp.CallToolRequ
 	if includeStructure {
 		sb.WriteString("## Directory Structure\n\n")
 		sb.WriteString("```\n")
-		structure := buildDirectoryTree(s.projectRoot, maxDepth)
+		structure := buildDirectoryTree(s.projRoot(), maxDepth)
 		sb.WriteString(structure)
 		sb.WriteString("```\n\n")
 	}
 
 	// Entry points
 	if includeEntryPoints {
-		entryPoints := findEntryPoints(s.projectRoot)
+		entryPoints := findEntryPoints(s.projRoot())
 		if len(entryPoints) > 0 {
 			sb.WriteString("## Entry Points\n\n")
 			for _, ep := range entryPoints {
@@ -108,7 +109,7 @@ func (s *SDKServer) handleOverview(ctx context.Context, req *sdkmcp.CallToolRequ
 
 	// Key files
 	if includeKeyFiles {
-		keyFiles := findKeyFiles(s.projectRoot)
+		keyFiles := findKeyFiles(s.projRoot())
 		if len(keyFiles) > 0 {
 			sb.WriteString("## Key Files\n\n")
 			for _, kf := range keyFiles {
@@ -312,14 +313,17 @@ func (s *SDKServer) handleBatchSearch(ctx context.Context, req *sdkmcp.CallToolR
 	}
 
 	resultsChan := make(chan queryResult, len(input.Queries))
-	// Get RO searcher before launching goroutines (shared handle, thread-safe)
-	searcher, sErr := s.roSearcher()
+	// Get RO searcher before launching goroutines (shared handle, thread-safe).
+	// The lease is held (via defer release) until wg.Wait() below completes, so
+	// the handle can't be closed out from under the in-flight goroutines.
+	searcher, release, sErr := s.roSearcher()
 	if sErr != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", sErr)}},
 			IsError: true,
 		}, nil, nil
 	}
+	defer release()
 
 	var wg sync.WaitGroup
 
@@ -332,7 +336,7 @@ func (s *SDKServer) handleBatchSearch(ctx context.Context, req *sdkmcp.CallToolR
 				Limit:       limitPerQuery,
 				Language:    input.Language,
 				ChunkType:   input.ChunkType,
-				ProjectRoot: s.projectRoot,
+				ProjectRoot: s.projRoot(),
 				Mode:        search.SearchModeHybrid,
 			}
 
@@ -439,7 +443,7 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 	// Resolve file path
 	filePath := input.File
 	if !filepath.IsAbs(filePath) {
-		filePath = filepath.Join(s.projectRoot, filePath)
+		filePath = filepath.Join(s.projRoot(), filePath)
 	}
 
 	// Check file exists
@@ -451,7 +455,7 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 	}
 
 	var sb strings.Builder
-	relPath, _ := filepath.Rel(s.projectRoot, filePath)
+	relPath, _ := filepath.Rel(s.projRoot(), filePath)
 	fmt.Fprintf(&sb, "# Related Files for: %s\n\n", relPath)
 
 	// Try codemap integration first when available. We branch on the three
@@ -463,7 +467,7 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 	//   - error (non-zero exit / bad JSON) → fall through AND log.
 	if s.codemap != nil && s.codemap.Available() {
 		ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
-		res, err := s.codemap.RelatedFiles(ctx2, s.projectRoot, relPath, limit)
+		res, err := s.codemap.RelatedFiles(ctx2, s.projRoot(), relPath, limit)
 		cancel()
 		switch {
 		case err != nil:
@@ -510,7 +514,7 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 		}
 
 	case "imported_by":
-		importedBy := findImportedBy(s.projectRoot, relPath, ext)
+		importedBy := findImportedBy(s.projRoot(), relPath, ext)
 		sb.WriteString("## Imported By\n\n")
 		if len(importedBy) == 0 {
 			sb.WriteString("No files import this file.\n\n")
@@ -526,7 +530,7 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 		}
 
 	case "tests":
-		tests := findTestFiles(s.projectRoot, relPath, ext)
+		tests := findTestFiles(s.projRoot(), relPath, ext)
 		sb.WriteString("## Test Files\n\n")
 		if len(tests) == 0 {
 			sb.WriteString("No test files found.\n\n")
@@ -554,7 +558,7 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 			sb.WriteString("\n")
 		}
 
-		tests := findTestFiles(s.projectRoot, relPath, ext)
+		tests := findTestFiles(s.projRoot(), relPath, ext)
 		if len(tests) > 0 {
 			sb.WriteString("## Test Files\n\n")
 			for _, t := range tests {
@@ -563,7 +567,7 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 			sb.WriteString("\n")
 		}
 
-		importedBy := findImportedBy(s.projectRoot, relPath, ext)
+		importedBy := findImportedBy(s.projRoot(), relPath, ext)
 		if len(importedBy) > 0 {
 			sb.WriteString("## Imported By\n\n")
 			for i, f := range importedBy {
@@ -577,7 +581,7 @@ func (s *SDKServer) handleRelatedFiles(ctx context.Context, req *sdkmcp.CallTool
 		}
 
 		// Find config files that might relate
-		configs := findRelatedConfigs(s.projectRoot, relPath)
+		configs := findRelatedConfigs(s.projRoot(), relPath)
 		if len(configs) > 0 {
 			sb.WriteString("## Related Configs\n\n")
 			for _, c := range configs {

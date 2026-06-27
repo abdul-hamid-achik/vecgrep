@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,14 +51,158 @@ func newTestMCPSession(t *testing.T, initDB ...bool) (*mcpSession, string) {
 	return sess, dir
 }
 
+// openRO acquires the cached read-only handle and immediately releases the
+// lease (the handle stays open/cached). For tests that just need the handle and
+// don't exercise concurrent close.
+func openRO(t *testing.T, sess *mcpSession) *db.DB {
+	t.Helper()
+	database, release, err := sess.acquireRO()
+	if err != nil {
+		t.Fatalf("acquireRO: %v", err)
+	}
+	release()
+	return database
+}
+
 func TestMCPSessionNewIsLazy(t *testing.T) {
 	sess, dir := newTestMCPSession(t)
 	defer func() { _ = sess.close() }()
 
-	// No lock file should exist until readOnlyDB or readWriteDB is called.
+	// No lock file should exist until acquireRO or readWriteDB is called.
 	vecPath := db.VecLitePath(dir)
 	if _, err := os.Stat(vecPath + ".lock"); err == nil {
 		t.Fatal("lock file should not exist before first open")
+	}
+}
+
+func TestMCPSessionLeaseBlocksWriteUntilReleased(t *testing.T) {
+	sess, _ := newTestMCPSession(t, true)
+	defer func() { _ = sess.close() }()
+
+	// Hold a read lease without releasing it.
+	_, release, err := sess.acquireRO()
+	if err != nil {
+		t.Fatalf("acquireRO: %v", err)
+	}
+
+	// readWriteDB must wait for the lease to drain before closing the RO handle
+	// and acquiring LOCK_EX — otherwise it would close the handle out from
+	// under the live reader.
+	done := make(chan *db.DB, 1)
+	go func() {
+		rw, rwErr := sess.readWriteDB()
+		if rwErr != nil {
+			t.Errorf("readWriteDB: %v", rwErr)
+		}
+		done <- rw
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("readWriteDB returned while a read lease was still held")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: blocked on the outstanding lease.
+	}
+
+	release()
+
+	select {
+	case rw := <-done:
+		if rw != nil {
+			_ = rw.Close()
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readWriteDB did not proceed after the lease was released")
+	}
+}
+
+func TestMCPSessionReleaseIfIdleEvictsHandle(t *testing.T) {
+	sess, dir := newTestMCPSession(t, true)
+	defer func() { _ = sess.close() }()
+
+	sess.idleThreshold = 20 * time.Millisecond
+
+	// Open and release a lease so the handle is cached but idle.
+	openRO(t, sess)
+
+	lockPath := db.VecLitePath(dir) + ".lock"
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("expected lock file while RO handle is open: %v", err)
+	}
+
+	// Not idle long enough yet.
+	if sess.releaseIfIdle() {
+		t.Fatal("releaseIfIdle evicted before the idle threshold elapsed")
+	}
+
+	time.Sleep(40 * time.Millisecond)
+
+	if !sess.releaseIfIdle() {
+		t.Fatal("releaseIfIdle should have evicted the idle handle")
+	}
+
+	// A fresh writer can now acquire the exclusive lock (the shared lock was
+	// released) — this is what unblocks `vecgrep daemon start`.
+	rw, err := sess.readWriteDB()
+	if err != nil {
+		t.Fatalf("readWriteDB after idle eviction: %v", err)
+	}
+	_ = rw.Close()
+}
+
+// TestMCPSessionConcurrentReadersAndEvictor exercises the lease/evict/reload
+// machinery under -race: many readers borrow the shared handle while an evictor
+// repeatedly tries to close it. Leases must keep the handle alive against the
+// evictor, and pointer swaps (reload/evict) must never race a live reader.
+func TestMCPSessionConcurrentReadersAndEvictor(t *testing.T) {
+	sess, _ := newTestMCPSession(t, true)
+	defer func() { _ = sess.close() }()
+	sess.idleThreshold = time.Millisecond // race eviction against active readers
+
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 30; j++ {
+				database, release, err := sess.acquireRO()
+				if err != nil {
+					t.Errorf("acquireRO: %v", err)
+					return
+				}
+				_ = sess.reloadIfStale()
+				_, _ = database.Stats()
+				release()
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 200; j++ {
+			sess.releaseIfIdle()
+		}
+	}()
+	wg.Wait()
+}
+
+func TestMCPSessionReleaseIfIdleKeepsHandleWhileLeased(t *testing.T) {
+	sess, _ := newTestMCPSession(t, true)
+	defer func() { _ = sess.close() }()
+
+	sess.idleThreshold = 1 * time.Millisecond
+
+	_, release, err := sess.acquireRO()
+	if err != nil {
+		t.Fatalf("acquireRO: %v", err)
+	}
+	defer release()
+
+	time.Sleep(5 * time.Millisecond)
+
+	// An outstanding lease must prevent eviction even past the idle threshold.
+	if sess.releaseIfIdle() {
+		t.Fatal("releaseIfIdle evicted a handle that still had an outstanding lease")
 	}
 }
 
@@ -65,10 +210,7 @@ func TestMCPSessionReadOnlyDBOpensWithSharedLock(t *testing.T) {
 	sess, _ := newTestMCPSession(t, true)
 	defer func() { _ = sess.close() }()
 
-	database, err := sess.readOnlyDB()
-	if err != nil {
-		t.Fatalf("readOnlyDB: %v", err)
-	}
+	database := openRO(t, sess)
 	if database == nil {
 		t.Fatal("database is nil")
 	}
@@ -78,16 +220,10 @@ func TestMCPSessionReadOnlyDBIsCached(t *testing.T) {
 	sess, _ := newTestMCPSession(t, true)
 	defer func() { _ = sess.close() }()
 
-	db1, err := sess.readOnlyDB()
-	if err != nil {
-		t.Fatalf("readOnlyDB 1: %v", err)
-	}
-	db2, err := sess.readOnlyDB()
-	if err != nil {
-		t.Fatalf("readOnlyDB 2: %v", err)
-	}
+	db1 := openRO(t, sess)
+	db2 := openRO(t, sess)
 	if db1 != db2 {
-		t.Fatal("readOnlyDB should return cached handle")
+		t.Fatal("acquireRO should return the cached handle")
 	}
 }
 
@@ -95,11 +231,8 @@ func TestMCPSessionReadWriteDBClosesReadOnlyFirst(t *testing.T) {
 	sess, _ := newTestMCPSession(t, true)
 	defer func() { _ = sess.close() }()
 
-	// Open RO first.
-	roDB, err := sess.readOnlyDB()
-	if err != nil {
-		t.Fatalf("readOnlyDB: %v", err)
-	}
+	// Open RO first (lease released by openRO).
+	roDB := openRO(t, sess)
 	if roDB == nil {
 		t.Fatal("roDB is nil")
 	}
@@ -107,7 +240,7 @@ func TestMCPSessionReadWriteDBClosesReadOnlyFirst(t *testing.T) {
 	// Now open RW — should close RO first so LOCK_EX can be acquired.
 	rwDB, err := sess.readWriteDB()
 	if err != nil {
-		t.Fatalf("readWriteDB after readOnlyDB: %v", err)
+		t.Fatalf("readWriteDB after acquireRO: %v", err)
 	}
 	defer rwDB.Close()
 }
@@ -208,10 +341,7 @@ func TestMCPSessionReloadIfStaleAfterThreshold(t *testing.T) {
 	defer func() { _ = sess.close() }()
 
 	// Open RO.
-	_, err := sess.readOnlyDB()
-	if err != nil {
-		t.Fatalf("readOnlyDB: %v", err)
-	}
+	openRO(t, sess)
 
 	// Immediately reload — should be no-op (not stale yet).
 	if err := sess.reloadIfStale(); err != nil {
@@ -250,10 +380,7 @@ func TestMCPSessionReloadIfStaleOnDaemonJSONChange(t *testing.T) {
 	_ = rwDB.Close()
 
 	// Open RO.
-	_, err = sess.readOnlyDB()
-	if err != nil {
-		t.Fatalf("readOnlyDB: %v", err)
-	}
+	openRO(t, sess)
 
 	// Simulate daemon writing daemon.json after the last reload.
 	time.Sleep(10 * time.Millisecond)
@@ -292,10 +419,7 @@ func TestMCPSessionCloseReleasesReadOnlyLock(t *testing.T) {
 	_ = rwDB.Close()
 
 	// Now open RO.
-	_, err = sess.readOnlyDB()
-	if err != nil {
-		t.Fatalf("readOnlyDB: %v", err)
-	}
+	openRO(t, sess)
 
 	// Close should release the lock.
 	if err := sess.close(); err != nil {

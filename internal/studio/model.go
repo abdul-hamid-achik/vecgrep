@@ -872,9 +872,15 @@ func (m Model) renderSearch() string {
 
 func (m Model) renderUnavailableProject() string {
 	if m.errMessage != "" && !strings.Contains(m.errMessage, "not in a vecgrep project") {
-		return "Could not open this project.\n\n" +
-			m.errMessage +
-			"\n\nIf the index was created by an older vecgrep/veclite version, run `vecgrep reset --force` and then `vecgrep index`.\n\nctrl+c quits"
+		msg := "Could not open this project.\n\n" + m.errMessage
+		// Only suggest the destructive `reset --force` for a genuine
+		// old-version/corrupt index — never for a live lock held by another
+		// running vecgrep process. The lock error already carries its own
+		// "stop the other process" guidance.
+		if !strings.Contains(m.errMessage, "locked") {
+			msg += "\n\nIf the index was created by an older vecgrep/veclite version, run `vecgrep reset --force` and then `vecgrep index`."
+		}
+		return msg + "\n\nctrl+c quits"
 	}
 	return "No vecgrep project found.\n\nPress i to register this folder in ~/.vecgrep/projects, or run `vecgrep init --local` to keep state in the repo.\n\nctrl+c quits"
 }

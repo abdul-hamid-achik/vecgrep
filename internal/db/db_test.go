@@ -43,6 +43,52 @@ func TestVecVersion(t *testing.T) {
 	}
 }
 
+// TestBackendReloadRefetchesCollection pins the fix for the silent-stale-read
+// bug: db.Reload() rebuilds fresh *veclite.Collection objects and swaps them
+// into the underlying *veclite.DB, but the backend's cached coll pointer must
+// be re-fetched too — otherwise a read-only handle keeps serving the
+// pre-reload snapshot forever.
+func TestBackendReloadRefetchesCollection(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	b := NewVecLiteBackend(VecLitePath(tmpDir))
+	if err := b.Init(8, HNSWConfig{}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer b.Close()
+
+	// Persist a snapshot so Reload has an on-disk source of truth to rebuild
+	// from (Reload is a no-op when nothing was ever persisted).
+	emb := make([]float32, 8)
+	for i := range emb {
+		emb[i] = 0.1
+	}
+	if _, err := b.InsertChunk(ChunkRecord{RelativePath: "a.go", StartLine: 1, IndexedAt: time.Now()}, emb); err != nil {
+		t.Fatalf("InsertChunk failed: %v", err)
+	}
+	if err := b.Sync(); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+
+	oldColl := b.collection()
+	if oldColl == nil {
+		t.Fatal("collection is nil after init")
+	}
+
+	if err := b.Reload(); err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+
+	if got := b.collection(); got == oldColl {
+		t.Fatal("Reload did not re-fetch the collection (stale-snapshot bug): b.coll still points at the pre-reload object")
+	}
+
+	// The rebuilt collection must still expose the persisted data.
+	if c, err := b.Count(); err != nil || c != 1 {
+		t.Fatalf("expected 1 chunk after reload, got %d (err=%v)", c, err)
+	}
+}
+
 func TestInsertAndSearchEmbedding(t *testing.T) {
 	tmpDir := t.TempDir()
 	dimensions := 768

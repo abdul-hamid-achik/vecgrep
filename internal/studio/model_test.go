@@ -249,6 +249,24 @@ func TestModelRenderUnavailableProjectDistinguishesOpenError(t *testing.T) {
 	}
 }
 
+func TestModelRenderUnavailableProjectOmitsResetHintForLiveLock(t *testing.T) {
+	m := NewModel(context.Background(), "")
+	m.errMessage = "open database (read-only): veclite: database file is locked by PID 80994 (locked 2h ago)"
+
+	got := m.renderUnavailableProject()
+	if !contains(got, "Could not open this project.") {
+		t.Fatalf("database error title missing: %q", got)
+	}
+	// A live lock must NOT advise the destructive reset --force.
+	if contains(got, "vecgrep reset --force") {
+		t.Fatalf("live-lock error must not suggest reset --force: %q", got)
+	}
+	// The lock message itself should still be shown.
+	if !contains(got, "locked by PID") {
+		t.Fatalf("lock detail missing: %q", got)
+	}
+}
+
 func TestModelRenderUnavailableProjectOffersGlobalRegistration(t *testing.T) {
 	m := NewModel(context.Background(), "")
 

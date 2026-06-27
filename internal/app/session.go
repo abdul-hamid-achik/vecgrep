@@ -10,6 +10,7 @@ import (
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
+	vlsession "github.com/abdul-hamid-achik/veclite/session"
 )
 
 type Session struct {
@@ -76,7 +77,7 @@ func OpenSession(ctx context.Context, startDir string) (*Session, error) {
 		HNSWEfSearch:       cfg.Vector.VecLite.EfSearch,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w; if this index was created by an older vecgrep/veclite version, run 'vecgrep reset --force' and then 'vecgrep index'", err)
+		return nil, fmt.Errorf("open database: %w", openErrorHint(err))
 	}
 
 	provider, err := NewProvider(cfg)
@@ -97,6 +98,20 @@ func OpenSession(ctx context.Context, startDir string) (*Session, error) {
 		LegacyDBPath:     legacyPath,
 		MigrationWarning: migrationWarning,
 	}, nil
+}
+
+// openErrorHint wraps a database-open error with actionable guidance. A live
+// file-lock (another running vecgrep process) and a stale/old-version index
+// need very different remedies, so we must not blanket-suggest
+// 'vecgrep reset --force' — that is destructive and only appropriate for an
+// index left by an older vecgrep/veclite version, never for a lock held by a
+// process that is still alive (veclite already auto-clears locks from dead
+// processes before surfacing ErrFileLocked).
+func openErrorHint(err error) error {
+	if errors.Is(err, vlsession.ErrFileLocked) {
+		return fmt.Errorf("%w; another vecgrep process holds the index lock (a daemon, a `serve --mcp`, or another command). Stop it — e.g. `vecgrep daemon stop` — or wait for it to finish, then retry", err)
+	}
+	return fmt.Errorf("%w; if this index was created by an older vecgrep/veclite version, run 'vecgrep reset --force' and then 'vecgrep index'", err)
 }
 
 // OpenReadOnlySession opens a read-only session that uses a shared file lock,
@@ -152,7 +167,7 @@ func OpenReadOnlySession(ctx context.Context, startDir string) (*Session, error)
 		SharedRead:         true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open database (read-only): %w", err)
+		return nil, fmt.Errorf("open database (read-only): %w", openErrorHint(err))
 	}
 
 	provider, err := NewProvider(cfg)

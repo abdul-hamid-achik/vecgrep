@@ -1,12 +1,33 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestHandleSwitchBranchIsRejected(t *testing.T) {
+	// The daemon cannot switch branches in place (it holds an exclusive lock on
+	// one branch's index dir), so the handler must reject the request with
+	// guidance rather than deadlock or corrupt state. A zero-value Daemon is
+	// fine: the handler touches no fields.
+	d := &Daemon{}
+	resp := d.handleSwitchBranch(context.Background(), &jsonRPCRequest{
+		ID:     json.RawMessage("1"),
+		Method: "daemon.switchBranch",
+		Params: json.RawMessage(`{"branch":"feature"}`),
+	})
+	if resp.Error == nil {
+		t.Fatal("expected handleSwitchBranch to return an error")
+	}
+	if !strings.Contains(resp.Error.Message, "vecgrep branch switch") {
+		t.Fatalf("error should point to the CLI branch-switch flow, got: %q", resp.Error.Message)
+	}
+}
 
 func TestReadStateNoFile(t *testing.T) {
 	tmpDir := t.TempDir()
