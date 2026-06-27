@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +14,14 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
+
+// codemapDetect reports whether the codemap CLI is installed (on PATH). It is a
+// package var so tests can stub it for deterministic results regardless of the
+// host. Used to default codemap.enabled to on when codemap is available.
+var codemapDetect = func() bool {
+	_, err := exec.LookPath("codemap")
+	return err == nil
+}
 
 // ConfigSource represents where a config setting came from
 type ConfigSource int
@@ -95,6 +104,12 @@ func (r *ConfigResolution) Resolve(projectDir string) (*ResolvedConfig, error) {
 
 	// Step 1: Start with built-in defaults
 	// (already done above)
+
+	// Auto-enable the codemap integration when the codemap CLI is installed, so
+	// it works out of the box. This is only the resolution-base default: an
+	// explicit `codemap.enabled` in any config file or VECGREP_CODEMAP_ENABLED
+	// is merged on top below and still wins (including an explicit `false`).
+	result.Config.Codemap.Enabled = codemapDetect()
 
 	// Step 2: Load and merge global defaults
 	globalCfg, err := LoadGlobalConfig()

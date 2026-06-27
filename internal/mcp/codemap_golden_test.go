@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -86,6 +87,112 @@ func TestRelatedFilesParsesC1Contract(t *testing.T) {
 		if got.RelativePath != w.RelativePath || got.Reason != w.Reason || got.Confidence != w.Confidence {
 			t.Errorf("file[%d] = %+v, want %+v", i, got, w)
 		}
+	}
+}
+
+// TestImpactParsesV017Contract pins codemap v0.17.0's `impact --json` shape:
+// `found` (not `indexed`); the affected-file set derived from `locations` plus
+// the transitive `blast_radius` array (there is no flat `files` array); and
+// `blast_radius` as an array (not an int — the old `int` tag failed to
+// unmarshal). The old parser silently fell back on all of these and there was
+// no golden test for impact, so vecgrep_investigate always searched unscoped.
+func TestImpactParsesV017Contract(t *testing.T) {
+	fixture := fixturePath(t, "impact_c.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	res, err := c.Impact(context.Background(), t.TempDir(), "ValidateToken", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || !res.Indexed {
+		t.Fatalf("fixture is found:true; result.Indexed should be true, got %+v", res)
+	}
+	// definition (auth.go) + transitive blast radius (login.go, handler.go),
+	// deduplicated and definition-first; direct_callers are a subset of
+	// blast_radius so login.go is not double-counted.
+	wantFiles := []string{"app/auth.go", "app/login.go", "api/handler.go"}
+	if len(res.Files) != len(wantFiles) {
+		t.Fatalf("expected %d files, got %d: %+v", len(wantFiles), len(res.Files), res.Files)
+	}
+	for i, w := range wantFiles {
+		if res.Files[i].RelativePath != w {
+			t.Errorf("file[%d] = %q, want %q", i, res.Files[i].RelativePath, w)
+		}
+	}
+	if res.BlastRadius != 2 {
+		t.Errorf("BlastRadius = %d, want 2 (len of blast_radius array)", res.BlastRadius)
+	}
+	if len(res.Tests) != 1 || res.Tests[0] != "app/auth_test.go" {
+		t.Errorf("Tests = %v, want [app/auth_test.go]", res.Tests)
+	}
+}
+
+// TestImpactNotFound asserts the not-found state (codemap ran, symbol/graph not
+// resolvable) is a real result with Indexed==false and no error — so the caller
+// falls back to an unscoped search cleanly rather than treating it as a crash.
+func TestImpactNotFound(t *testing.T) {
+	fixture := fixturePath(t, "impact_not_found.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	res, err := c.Impact(context.Background(), t.TempDir(), "Nope", 0)
+	if err != nil {
+		t.Fatalf("not-found must not be an error, got: %v", err)
+	}
+	if res == nil || res.Indexed {
+		t.Fatalf("expected non-nil result with Indexed=false, got %+v", res)
+	}
+	if len(res.Files) != 0 {
+		t.Fatalf("expected no files when not found, got %d", len(res.Files))
+	}
+}
+
+// TestImpactAgainstRealCodemap is a live smoke test: when the real codemap
+// binary is installed and this repo is codemap-indexed, it proves Impact parses
+// the ACTUAL installed codemap's output, not just a fixture. It skips when
+// codemap is unavailable or the project isn't indexed, so CI without codemap
+// still passes.
+func TestImpactAgainstRealCodemap(t *testing.T) {
+	if _, err := exec.LookPath("codemap"); err != nil {
+		t.Skip("codemap not on PATH")
+	}
+	root := repoRoot(t)
+	c := &CodemapClient{bin: "codemap"}
+
+	res, err := c.Impact(context.Background(), root, "OpenSession", 0)
+	if err != nil {
+		t.Skipf("codemap impact failed (project may not be indexed): %v", err)
+	}
+	if !res.Indexed {
+		t.Skip("codemap project not indexed; run codemap_index first")
+	}
+	if len(res.Files) == 0 {
+		t.Fatalf("real codemap impact returned indexed=true but zero files — parser likely drifted again: %+v", res)
+	}
+	if res.BlastRadius == 0 {
+		t.Errorf("expected a non-zero blast radius for a widely-called symbol")
+	}
+	t.Logf("live: OpenSession blast radius = %d files, radius %d", len(res.Files), res.BlastRadius)
+}
+
+// repoRoot walks up from this test file to the module root (where go.mod is).
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(file)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found walking up from test file")
+		}
+		dir = parent
 	}
 }
 

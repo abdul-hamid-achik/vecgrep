@@ -1,0 +1,10 @@
+{
+  "found": false,
+  "symbol": "Nope",
+  "project": "demo",
+  "locations": [],
+  "direct_callers": [],
+  "blast_radius": [],
+  "tests": [],
+  "untested": false
+}

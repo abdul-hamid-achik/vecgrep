@@ -190,7 +190,7 @@ func TestMergeDaemonConfig(t *testing.T) {
 }
 
 func TestLoadResolvedIsolationClearsCodemapDaemonEnv(t *testing.T) {
-	isolateConfigTestEnv(t)
+	isolateConfigTestEnv(t) // stubs codemap as not installed
 	projectRoot := t.TempDir()
 
 	// Ensure env vars are cleared (isolateConfigTestEnv should handle this,
@@ -201,9 +201,44 @@ func TestLoadResolvedIsolationClearsCodemapDaemonEnv(t *testing.T) {
 	}
 
 	if resolved.Config.Codemap.Enabled {
-		t.Fatal("codemap.enabled should default to false")
+		t.Fatal("codemap.enabled should default to false when codemap is not installed")
 	}
 	if resolved.Config.Daemon.Autostart {
 		t.Fatal("daemon.autostart should default to false")
+	}
+}
+
+// TestLoadResolvedAutoEnablesCodemapWhenInstalled pins the new default: with no
+// explicit setting, codemap.enabled defaults to ON when the codemap CLI is
+// installed (detected on PATH), so the integration works out of the box.
+func TestLoadResolvedAutoEnablesCodemapWhenInstalled(t *testing.T) {
+	isolateConfigTestEnv(t)
+	codemapDetect = func() bool { return true } // simulate codemap installed
+	projectRoot := t.TempDir()
+
+	resolved, err := LoadResolved(projectRoot)
+	if err != nil {
+		t.Fatalf("LoadResolved failed: %v", err)
+	}
+	if !resolved.Config.Codemap.Enabled {
+		t.Fatal("codemap.enabled should auto-default to true when codemap is installed")
+	}
+}
+
+// TestLoadResolvedExplicitDisableOverridesDetection ensures an explicit
+// VECGREP_CODEMAP_ENABLED=false still wins even when codemap is installed — the
+// auto-enable is only the resolution-base default, not a forced override.
+func TestLoadResolvedExplicitDisableOverridesDetection(t *testing.T) {
+	isolateConfigTestEnv(t)
+	codemapDetect = func() bool { return true }  // installed...
+	t.Setenv("VECGREP_CODEMAP_ENABLED", "false") // ...but explicitly disabled
+	projectRoot := t.TempDir()
+
+	resolved, err := LoadResolved(projectRoot)
+	if err != nil {
+		t.Fatalf("LoadResolved failed: %v", err)
+	}
+	if resolved.Config.Codemap.Enabled {
+		t.Fatal("explicit VECGREP_CODEMAP_ENABLED=false must override the install-detected default")
 	}
 }

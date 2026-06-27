@@ -434,19 +434,36 @@ type ImpactResult struct {
 	BlastRadius int          // total transitive symbols affected
 }
 
-// impactEnvelope mirrors codemap's `impact --json` output:
+// impactNode is one symbol entry in codemap's impact output. The locations,
+// direct_callers, blast_radius, and tests lists all share this shape.
+type impactNode struct {
+	Symbol string `json:"symbol"`
+	FQN    string `json:"fqn"`
+	Kind   string `json:"kind"`
+	File   string `json:"file"`
+}
+
+// impactEnvelope mirrors codemap v0.17.0's `impact --json` output:
 //
-//	{ "project":"demo", "symbol":"pkg.Foo", "indexed":true,
-//	  "files":[{"relative_path":"app/login.go","reason":"caller"}],
-//	  "tests":["app/login_test.go"],
-//	  "blast_radius":42 }
+//	{ "found":true, "symbol":"OpenSession", "project":"vecgrep",
+//	  "locations":[{"file":"internal/app/session.go",...}],
+//	  "direct_callers":[{"file":"cmd/vecgrep/main.go",...}],
+//	  "blast_radius":[{"file":"...","depth":1,...}],   // transitive callers
+//	  "tests":[{"file":"..._test.go",...}], "untested":false }
+//
+// Older codemap emitted `indexed`, a flat `files` array, and an int
+// `blast_radius`. The affected-file set now has to be derived from the symbol's
+// own location(s) plus the transitive blast-radius nodes, and "found" replaced
+// "indexed". (`blast_radius` is now an array, so the old `int` tag would even
+// fail to unmarshal — the parse errored out entirely against current codemap.)
 type impactEnvelope struct {
-	Project     string       `json:"project"`
-	Symbol      string       `json:"symbol"`
-	Indexed     bool         `json:"indexed"`
-	Files       []ImpactFile `json:"files"`
-	Tests       []string     `json:"tests"`
-	BlastRadius int          `json:"blast_radius"`
+	Project       string       `json:"project"`
+	Symbol        string       `json:"symbol"`
+	Found         bool         `json:"found"`
+	Locations     []impactNode `json:"locations"`
+	DirectCallers []impactNode `json:"direct_callers"`
+	BlastRadius   []impactNode `json:"blast_radius"`
+	Tests         []impactNode `json:"tests"`
 }
 
 // Impact runs `codemap impact <symbol> --json` to compute the blast radius
@@ -481,16 +498,46 @@ func (c *CodemapClient) Impact(ctx context.Context, projectPath, symbol string, 
 		return nil, fmt.Errorf("codemap impact %q: parse: %w", symbol, err)
 	}
 
-	if !env.Indexed {
+	if !env.Found {
 		return &ImpactResult{Indexed: false, Symbol: env.Symbol}, nil
+	}
+
+	// The affected-file set used to scope the search is the symbol's own
+	// definition site(s) plus every file in the transitive blast radius
+	// (callers). Deduplicate, preserving first-seen order so the definition
+	// leads. direct_callers are a depth-1 subset of blast_radius, so iterating
+	// blast_radius already covers them.
+	seen := make(map[string]bool)
+	var files []ImpactFile
+	addFile := func(file, reason string) {
+		if file == "" || seen[file] {
+			return
+		}
+		seen[file] = true
+		files = append(files, ImpactFile{RelativePath: file, Reason: reason})
+	}
+	for _, n := range env.Locations {
+		addFile(n.File, "definition")
+	}
+	for _, n := range env.BlastRadius {
+		addFile(n.File, "caller")
+	}
+
+	var tests []string
+	testSeen := make(map[string]bool)
+	for _, n := range env.Tests {
+		if n.File != "" && !testSeen[n.File] {
+			testSeen[n.File] = true
+			tests = append(tests, n.File)
+		}
 	}
 
 	return &ImpactResult{
 		Indexed:     true,
 		Symbol:      env.Symbol,
-		Files:       env.Files,
-		Tests:       env.Tests,
-		BlastRadius: env.BlastRadius,
+		Files:       files,
+		Tests:       tests,
+		BlastRadius: len(env.BlastRadius),
 	}, nil
 }
 

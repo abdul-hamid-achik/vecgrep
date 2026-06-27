@@ -1,0 +1,59 @@
+{
+  "found": true,
+  "symbol": "ValidateToken",
+  "project": "demo",
+  "locations": [
+    {
+      "symbol": "ValidateToken",
+      "fqn": "app.ValidateToken",
+      "kind": "function",
+      "file": "app/auth.go",
+      "start_line": 40,
+      "end_line": 55,
+      "signature": "func ValidateToken(tok string) error"
+    }
+  ],
+  "direct_callers": [
+    {
+      "symbol": "Login",
+      "fqn": "app.Login",
+      "kind": "function",
+      "file": "app/login.go",
+      "start_line": 10,
+      "end_line": 30,
+      "signature": "func Login(u, p string) (*Session, error)"
+    }
+  ],
+  "blast_radius": [
+    {
+      "symbol": "Login",
+      "fqn": "app.Login",
+      "kind": "function",
+      "file": "app/login.go",
+      "start_line": 10,
+      "depth": 1,
+      "signature": "func Login(u, p string) (*Session, error)"
+    },
+    {
+      "symbol": "Handler",
+      "fqn": "api.Handler",
+      "kind": "function",
+      "file": "api/handler.go",
+      "start_line": 22,
+      "depth": 2,
+      "signature": "func Handler(w http.ResponseWriter, r *http.Request)"
+    }
+  ],
+  "tests": [
+    {
+      "symbol": "TestValidateToken",
+      "fqn": "app.TestValidateToken",
+      "kind": "test",
+      "file": "app/auth_test.go",
+      "start_line": 5,
+      "depth": 1,
+      "signature": "func TestValidateToken(t *testing.T)"
+    }
+  ],
+  "untested": false
+}

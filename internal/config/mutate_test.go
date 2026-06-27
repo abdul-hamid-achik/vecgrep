@@ -335,6 +335,14 @@ func isolateConfigTestEnv(t *testing.T) string {
 	t.Setenv("VECGREP_DAEMON_EMBED_RPS", "")
 	t.Setenv("VECGREP_DAEMON_EMBED_MAX_IN_FLIGHT", "")
 	t.Setenv("VECGREP_DAEMON_DEBOUNCE", "")
+
+	// Default codemap to "not installed" so config resolution is deterministic
+	// regardless of whether the dev machine has codemap on PATH. Tests that
+	// exercise the install-detected auto-enable stub it to true explicitly.
+	prevCodemapDetect := codemapDetect
+	codemapDetect = func() bool { return false }
+	t.Cleanup(func() { codemapDetect = prevCodemapDetect })
+
 	return home
 }
 
