@@ -397,6 +397,13 @@ func (p *OllamaProvider) doEmbedBatchRequest(ctx context.Context, jsonBody []byt
 		return nil, fmt.Errorf("no embeddings returned")
 	}
 
+	// A short response would otherwise leave trailing input texts with no
+	// embedding, which the indexer cannot distinguish from a successful empty
+	// slot — error instead of silently dropping those chunks.
+	if len(batchResp.Embeddings) != len(texts) {
+		return nil, fmt.Errorf("embedding count mismatch: got %d for %d inputs", len(batchResp.Embeddings), len(texts))
+	}
+
 	// Convert and validate each embedding.
 	results := make([][]float32, len(batchResp.Embeddings))
 	for i, raw := range batchResp.Embeddings {

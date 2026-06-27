@@ -1,7 +1,9 @@
 package index
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestNewChunker(t *testing.T) {
@@ -22,6 +24,117 @@ func TestNewChunker(t *testing.T) {
 	}
 	if c.config.ChunkOverlap != 128 {
 		t.Errorf("Expected ChunkOverlap 128, got %d", c.config.ChunkOverlap)
+	}
+}
+
+func TestNewChunker_DefaultMaxChunkChars(t *testing.T) {
+	c := NewChunker(ChunkerConfig{})
+	if c.config.MaxChunkChars != defaultMaxChunkChars {
+		t.Errorf("Expected default MaxChunkChars %d, got %d", defaultMaxChunkChars, c.config.MaxChunkChars)
+	}
+}
+
+// TestChunkFile_EnforcesMaxChars covers the pathological case behind the
+// embedding-truncation flood: a file with a single very long line slips past
+// the line-based chunker's size targeting. ChunkFile must clamp every chunk to
+// MaxChunkChars (bytes) so the embedder never receives oversized input.
+func TestChunkFile_EnforcesMaxChars(t *testing.T) {
+	const maxChars = 100
+	c := NewChunker(ChunkerConfig{ChunkSize: 2048, ChunkOverlap: 256, MaxChunkChars: maxChars})
+
+	// One giant line (no newlines to break on) — the worst case.
+	content := strings.Repeat("x", 1000)
+	chunks := c.ChunkFile(content, "data.txt")
+	if len(chunks) == 0 {
+		t.Fatal("expected chunks for non-empty content")
+	}
+	total := 0
+	for i, ch := range chunks {
+		if len(ch.Content) > maxChars {
+			t.Errorf("chunk %d exceeds MaxChunkChars: %d > %d bytes", i, len(ch.Content), maxChars)
+		}
+		total += len(ch.Content)
+	}
+	if total != len(content) {
+		t.Errorf("split lost content: got %d chars, want %d", total, len(content))
+	}
+}
+
+// TestChunkFile_EnforcesMaxChars_MultiByte guards the byte/rune-unit bug: the
+// cap is in BYTES, so multi-byte content (CJK/emoji) must still yield chunks
+// whose byte length is within the cap, and every chunk must remain valid UTF-8.
+func TestChunkFile_EnforcesMaxChars_MultiByte(t *testing.T) {
+	const maxChars = 100
+	c := NewChunker(ChunkerConfig{ChunkSize: 2048, ChunkOverlap: 256, MaxChunkChars: maxChars})
+
+	// 1000 3-byte runes = 3000 bytes on one line.
+	content := strings.Repeat("世", 1000)
+	chunks := c.ChunkFile(content, "data.txt")
+	if len(chunks) == 0 {
+		t.Fatal("expected chunks")
+	}
+	total := 0
+	for i, ch := range chunks {
+		if len(ch.Content) > maxChars {
+			t.Errorf("chunk %d exceeds byte cap: %d > %d bytes", i, len(ch.Content), maxChars)
+		}
+		if !utf8.ValidString(ch.Content) {
+			t.Errorf("chunk %d is not valid UTF-8 (rune split mid-character)", i)
+		}
+		total += len(ch.Content)
+	}
+	if total != len(content) {
+		t.Errorf("split lost content: got %d bytes, want %d", total, len(content))
+	}
+}
+
+// TestSplitByChars_RuneSafe ensures multi-byte runes are never cut in half and
+// the byte cap is respected.
+func TestSplitByChars_RuneSafe(t *testing.T) {
+	chunk := Chunk{Content: strings.Repeat("é", 50), StartLine: 1, EndLine: 1} // 100 bytes
+	parts := splitByChars(chunk, 10)
+	rejoined := ""
+	for _, p := range parts {
+		if len(p.Content) > 10 {
+			t.Errorf("piece exceeds byte cap: %d > 10 bytes", len(p.Content))
+		}
+		if !utf8.ValidString(p.Content) {
+			t.Error("piece is not valid UTF-8")
+		}
+		rejoined += p.Content
+	}
+	if rejoined != chunk.Content {
+		t.Errorf("rune-safe split corrupted content")
+	}
+}
+
+// TestSplitByChars_LineSpansMonotonic checks that splitting a multi-line chunk
+// produces non-decreasing, contiguous line spans (best-effort tracking).
+func TestSplitByChars_LineSpansMonotonic(t *testing.T) {
+	// 60 lines of 50 bytes each (~3060 bytes); cap 100 forces many splits that
+	// each span a couple of lines.
+	var b strings.Builder
+	for i := 0; i < 60; i++ {
+		b.WriteString(strings.Repeat("a", 49))
+		b.WriteByte('\n')
+	}
+	chunk := Chunk{Content: b.String(), StartLine: 10, EndLine: 69}
+	parts := splitByChars(chunk, 100)
+	if len(parts) < 2 {
+		t.Fatalf("expected multiple parts, got %d", len(parts))
+	}
+	prevEnd := chunk.StartLine
+	for i, p := range parts {
+		if p.StartLine < prevEnd {
+			t.Errorf("part %d StartLine %d went backwards (prev end %d)", i, p.StartLine, prevEnd)
+		}
+		if p.EndLine < p.StartLine {
+			t.Errorf("part %d EndLine %d < StartLine %d", i, p.EndLine, p.StartLine)
+		}
+		prevEnd = p.EndLine
+	}
+	if got := parts[0].StartLine; got != chunk.StartLine {
+		t.Errorf("first part StartLine = %d, want %d", got, chunk.StartLine)
 	}
 }
 

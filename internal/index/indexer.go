@@ -130,12 +130,23 @@ type IndexResult struct {
 
 // Index indexes the given paths.
 //
-// The file walk and the embedding workers run concurrently: as soon as the
-// walker hashes a file and confirms it needs re-indexing, it hands it off
-// to a buffered channel drained by the worker pool. This overlaps disk
-// I/O (walk + hash) with GPU work (embedding) so the GPU starts working
-// while the walk continues. Incremental db.Sync() calls flush the vector
-// store to disk periodically so a long indexing run is crash-resilient.
+// The pipeline has three concurrent stages so the embedder is never starved
+// and its batches stay well-packed (the dominant cost is the embedding calls):
+//
+//		walker → fileChan → [chunk workers] → itemChan → [batcher] → batchChan → [embed pool] → insert+report
+//
+//	  - chunk workers read + chunk each changed file (fast, CPU/IO bound) and emit
+//	    one item per chunk instead of embedding inline;
+//	  - the batcher coalesces items from *many* files into full BatchSize batches,
+//	    so a 6-chunk file no longer wastes a request — chunks ride along with
+//	    others. This is the key throughput win over per-file embedding;
+//	  - the embed pool runs several batches concurrently to overlap HTTP/queue
+//	    latency, scattering each result back to its file and inserting + reporting
+//	    a file the moment its last chunk is embedded.
+//
+// The walk overlaps with embedding (the GPU starts while the walk continues) and
+// incremental db.Sync() calls flush the vector store periodically so a long run
+// stays crash-resilient.
 func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...string) (*IndexResult, error) {
 	startTime := time.Now()
 
@@ -157,8 +168,17 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 		existingHashes = map[string]string{}
 	}
 
-	// Buffered channel so the walker stays ahead of the embedding workers.
+	batchSize := idx.config.BatchSize
+	if batchSize <= 0 {
+		batchSize = DefaultIndexerConfig().BatchSize
+	}
+
+	// Pipeline channels. itemChan/batchChan are sized so the stages stay busy
+	// without unbounded buffering: backpressure from a slow embedder propagates
+	// up through the batcher to the chunk workers and the walker.
 	fileChan := make(chan fileInfo, 100)
+	itemChan := make(chan embedItem, batchSize*2)
+	batchChan := make(chan []embedItem, idx.config.Workers)
 	resultsChan := make(chan fileResult, idx.config.Workers)
 
 	// Shared counters for progress reporting, updated by the walker and
@@ -166,32 +186,56 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 	var totalDiscovered int64 // files queued for indexing
 	var skippedCount int64    // files skipped (unchanged)
 
-	// Start workers immediately — they drain fileChan while the walk
-	// continues, so embedding work overlaps with the walk.
-	var wg sync.WaitGroup
+	// Stage 1: chunk workers. Read + chunk each changed file and emit one item
+	// per chunk; files needing no embedding (binary / empty) report immediately.
+	var chunkWG sync.WaitGroup
 	for i := 0; i < idx.config.Workers; i++ {
-		wg.Add(1)
+		chunkWG.Add(1)
 		go func() {
-			defer wg.Done()
-			idx.indexWorker(ctx, absRoot, fileChan, resultsChan)
+			defer chunkWG.Done()
+			idx.chunkWorker(ctx, absRoot, fileChan, itemChan, resultsChan)
 		}()
 	}
+	go func() {
+		chunkWG.Wait()
+		close(itemChan) // no more chunks → the batcher can flush and finish
+	}()
+
+	// Stage 2: batcher. Packs items from all files into full batches.
+	go func() {
+		idx.batchItems(itemChan, batchChan, batchSize)
+		close(batchChan)
+	}()
+
+	// Stage 3: embed pool. Concurrent batches overlap embedding latency.
+	var embedWG sync.WaitGroup
+	for i := 0; i < idx.config.Workers; i++ {
+		embedWG.Add(1)
+		go func() {
+			defer embedWG.Done()
+			for batch := range batchChan {
+				idx.embedBatch(ctx, batch, resultsChan)
+			}
+		}()
+	}
+	// resultsChan is fed by chunk workers (binary/empty files) and the embed
+	// pool (finished files). The embed pool drains only after the chunk workers
+	// close itemChan, so it always finishes last — closing here is safe for
+	// both producers.
+	go func() {
+		embedWG.Wait()
+		close(resultsChan)
+	}()
 
 	// Walker goroutine: walks the tree, hashes each file, applies the
 	// incremental filter inline, and sends files needing indexing to
 	// fileChan. Closes fileChan when the walk completes (or on
-	// error/cancel) so workers drain and exit.
+	// error/cancel) so the pipeline drains and exits.
 	walkErrCh := make(chan error, 1)
 	go func() {
 		err := idx.walkAndFilter(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, fileChan, &totalDiscovered, &skippedCount)
 		close(fileChan)
 		walkErrCh <- err
-	}()
-
-	// Close resultsChan once all workers are done.
-	go func() {
-		wg.Wait()
-		close(resultsChan)
 	}()
 
 	result := &IndexResult{}
@@ -257,7 +301,7 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 }
 
 // fileInfo holds information about a file to be indexed. The content
-// field caches the file bytes read during hashing so that indexFile can
+// field caches the file bytes read during hashing so that chunkFile can
 // reuse them without a second disk read. The content is nil'd after
 // chunking to avoid holding all file contents in memory simultaneously.
 type fileInfo struct {
@@ -275,8 +319,55 @@ type fileResult struct {
 	err           error
 }
 
-// indexWorker processes files from the channel.
-func (idx *Indexer) indexWorker(ctx context.Context, projectRoot string, files <-chan fileInfo, results chan<- fileResult) {
+// fileTask tracks one file's chunks as they are embedded across (potentially
+// several) shared batches. Its chunks may be scattered among batches that also
+// carry other files' chunks, so completion is reference-counted: the goroutine
+// that drives remaining to zero owns inserting the file and reporting it.
+type fileTask struct {
+	path    string
+	records []db.ChunkRecord // one per chunk, in chunk order
+	embeds  [][]float32      // filled in by slot as batches complete
+
+	mu        sync.Mutex
+	remaining int  // chunks not yet accounted for
+	failed    bool // at least one chunk failed to embed
+}
+
+// embedItem is a single chunk awaiting embedding, tagged with the file task and
+// the slot to write its embedding back into.
+type embedItem struct {
+	task *fileTask
+	slot int
+	text string
+}
+
+// complete records a chunk's embedding (or its failure) and returns true when
+// this was the file's last outstanding chunk.
+func (t *fileTask) complete(slot int, emb []float32, failed bool) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if failed {
+		t.failed = true
+	} else {
+		t.embeds[slot] = emb
+	}
+	t.remaining--
+	return t.remaining == 0
+}
+
+// skip accounts for n chunks that will never be embedded (e.g. context cancelled
+// before they were queued) and returns true if the file is now complete.
+func (t *fileTask) skip(n int) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.failed = true
+	t.remaining -= n
+	return t.remaining == 0
+}
+
+// chunkWorker reads and chunks files from fileChan, emitting one embedItem per
+// chunk. Files that need no embedding report completion directly.
+func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, files <-chan fileInfo, items chan<- embedItem, results chan<- fileResult) {
 	for file := range files {
 		select {
 		case <-ctx.Done():
@@ -284,20 +375,15 @@ func (idx *Indexer) indexWorker(ctx context.Context, projectRoot string, files <
 			return
 		default:
 		}
-
-		chunks, err := idx.indexFile(ctx, projectRoot, file)
-		results <- fileResult{
-			path:          file.path,
-			chunksCreated: chunks,
-			err:           err,
-		}
+		idx.chunkFile(ctx, projectRoot, file, items, results)
 	}
 }
 
-// indexFile indexes a single file using batch operations for efficiency.
-// It uses the content cached in fileInfo.content (read once during
-// hashing) instead of re-reading the file from disk.
-func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file fileInfo) (int, error) {
+// chunkFile reads a file (reusing the content cached during hashing), drops its
+// stale chunks, splits it, and hands each chunk to the embed pipeline. Binary
+// and empty files report immediately; everything else completes asynchronously
+// once its chunks are embedded and inserted.
+func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, file fileInfo, items chan<- embedItem, results chan<- fileResult) {
 	// Use cached content from the hash phase. If for some reason content is
 	// nil (e.g. fileInfo was constructed directly), fall back to reading.
 	content := file.content
@@ -305,92 +391,140 @@ func (idx *Indexer) indexFile(ctx context.Context, projectRoot string, file file
 		var err error
 		content, err = os.ReadFile(file.path)
 		if err != nil {
-			return 0, fmt.Errorf("read file: %w", err)
+			results <- fileResult{path: file.path, err: fmt.Errorf("read file: %w", err)}
+			return
 		}
 	}
 
-	// Check if text file
 	if !IsTextFile(content) {
-		return 0, nil // Skip binary files silently
+		results <- fileResult{path: file.path} // binary: skip silently
+		return
 	}
 
-	// Detect language
 	lang := DetectLanguage(file.path)
 
-	// Delete existing chunks for this file (for re-indexing)
+	// Drop existing chunks for this file before re-inserting (re-index).
 	_, _ = idx.db.DeleteFile(ctx, file.relativePath)
 
-	// Chunk the content
 	chunks := idx.chunker.ChunkFile(string(content), file.path)
-	// Release the file content reference so it can be garbage collected
-	// while we process the chunks. This avoids holding all file contents
-	// in memory simultaneously when the worker pool processes many files.
+	// Release the content reference so it can be GC'd while chunks are embedded.
 	file.content = nil
+
+	// Defensively drop empty / whitespace-only chunks. They carry no semantic
+	// signal, and an empty text makes the whole shared embed batch fail
+	// (provider ErrEmptyText) — which would then fail every OTHER file packed
+	// into that batch too. The chunker shouldn't emit these, but guarding here
+	// keeps one bad chunk from poisoning unrelated files.
+	if len(chunks) > 0 {
+		kept := chunks[:0]
+		for _, c := range chunks {
+			if strings.TrimSpace(c.Content) != "" {
+				kept = append(kept, c)
+			}
+		}
+		chunks = kept
+	}
+
 	if len(chunks) == 0 {
-		return 0, nil
+		results <- fileResult{path: file.path}
+		return
 	}
 
-	// Process chunks in batches for embedding and insert
-	var totalChunks int
-	for i := 0; i < len(chunks); i += idx.config.BatchSize {
-		end := i + idx.config.BatchSize
-		if end > len(chunks) {
-			end = len(chunks)
-		}
-		batch := chunks[i:end]
-
-		// Get texts for embedding
-		texts := make([]string, len(batch))
-		for j, chunk := range batch {
-			texts[j] = chunk.Content
-		}
-
-		// Generate document embeddings in batch.
-		embeddings, err := embedDocuments(ctx, idx.provider, texts)
-		if err != nil {
-			return totalChunks, fmt.Errorf("embed batch: %w", err)
-		}
-
-		// Build chunk records for batch insert
-		records := make([]db.ChunkRecord, 0, len(batch))
-		validEmbeddings := make([][]float32, 0, len(batch))
-
-		for j, chunk := range batch {
-			if j >= len(embeddings) || embeddings[j] == nil {
-				continue
-			}
-
-			record := db.NewChunkRecord(
-				file.path,
-				file.relativePath,
-				file.hash,
-				file.size,
-				string(lang),
-				chunk.Content,
-				chunk.StartLine,
-				chunk.EndLine,
-				chunk.StartByte,
-				chunk.EndByte,
-				string(chunk.ChunkType),
-				chunk.SymbolName,
-				projectRoot,
-			)
-
-			records = append(records, record)
-			validEmbeddings = append(validEmbeddings, embeddings[j])
-		}
-
-		// Use batch insert for efficiency
-		if len(records) > 0 {
-			ids, err := idx.db.InsertChunkBatch(records, validEmbeddings)
-			if err != nil {
-				return totalChunks, fmt.Errorf("batch insert: %w", err)
-			}
-			totalChunks += len(ids)
-		}
+	// Pre-build the records; embeddings are filled in as batches complete.
+	records := make([]db.ChunkRecord, len(chunks))
+	for i, chunk := range chunks {
+		records[i] = db.NewChunkRecord(
+			file.path, file.relativePath, file.hash, file.size, string(lang),
+			chunk.Content, chunk.StartLine, chunk.EndLine, chunk.StartByte, chunk.EndByte,
+			string(chunk.ChunkType), chunk.SymbolName, projectRoot,
+		)
+	}
+	task := &fileTask{
+		path:      file.path,
+		records:   records,
+		embeds:    make([][]float32, len(chunks)),
+		remaining: len(chunks),
 	}
 
-	return totalChunks, nil
+	for i, chunk := range chunks {
+		select {
+		case items <- embedItem{task: task, slot: i, text: chunk.Content}:
+		case <-ctx.Done():
+			// Stop feeding; let any already-queued chunks finish the file with
+			// what was embedded so far.
+			if task.skip(len(chunks) - i) {
+				idx.finishFile(task, results)
+			}
+			return
+		}
+	}
+}
+
+// batchItems coalesces per-chunk items from every file into batches of up to
+// batchSize. A partial trailing batch is flushed when items closes. Because
+// chunking far outpaces embedding, the buffer reaches batchSize and flushes a
+// full batch on the steady path; only the final tail is ever short.
+func (idx *Indexer) batchItems(items <-chan embedItem, batches chan<- []embedItem, batchSize int) {
+	buf := make([]embedItem, 0, batchSize)
+	for it := range items {
+		buf = append(buf, it)
+		if len(buf) >= batchSize {
+			batches <- buf
+			buf = make([]embedItem, 0, batchSize)
+		}
+	}
+	if len(buf) > 0 {
+		batches <- buf
+	}
+}
+
+// embedBatch embeds one packed batch and scatters the results back to the files
+// the chunks came from, inserting and reporting each file as it completes.
+func (idx *Indexer) embedBatch(ctx context.Context, batch []embedItem, results chan<- fileResult) {
+	texts := make([]string, len(batch))
+	for i, it := range batch {
+		texts[i] = it.text
+	}
+	embeddings, err := embedDocuments(ctx, idx.provider, texts)
+	for i, it := range batch {
+		var emb []float32
+		if err == nil && i < len(embeddings) {
+			emb = embeddings[i]
+		}
+		// A nil/missing embedding (a short or partial provider response that did
+		// not itself error) is a failure, not a silently-dropped chunk: mark it
+		// so the file is reported and retried rather than recorded as complete.
+		failed := err != nil || emb == nil
+		if it.task.complete(it.slot, emb, failed) {
+			idx.finishFile(it.task, results)
+		}
+	}
+}
+
+// finishFile inserts a fully-embedded file and reports the result. It runs only
+// after the file's last chunk is accounted for, so reading the task's slices
+// without the lock is safe (the reference-count handoff happens-before via the
+// mutex in complete/skip).
+//
+// If ANY of the file's chunks failed to embed, nothing is inserted: persisting
+// only the good chunks would also persist the file's hash, so the next
+// incremental run would see the hash match and permanently skip the missing
+// chunks. Inserting nothing leaves the file un-hashed, so it is retried in full
+// next time (the stale chunks were already dropped by chunkFile's DeleteFile).
+func (idx *Indexer) finishFile(task *fileTask, results chan<- fileResult) {
+	if task.failed {
+		results <- fileResult{path: task.path, err: fmt.Errorf("embed: one or more chunks failed for %s", task.path)}
+		return
+	}
+
+	ids, err := idx.db.InsertChunkBatch(task.records, task.embeds)
+	res := fileResult{path: task.path}
+	if err != nil {
+		res.err = fmt.Errorf("batch insert: %w", err)
+	} else {
+		res.chunksCreated = len(ids)
+	}
+	results <- res
 }
 
 func embedDocuments(ctx context.Context, provider embed.Provider, texts []string) ([][]float32, error) {
@@ -628,7 +762,7 @@ func (idx *Indexer) walkAndFilter(
 
 // hashFile calculates the SHA256 hash of a file and returns both the
 // hex-encoded hash and the file content. Reading the full content once
-// avoids a second disk read in indexFile.
+// avoids a second disk read in chunkFile.
 func hashFile(path string) (string, []byte, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {

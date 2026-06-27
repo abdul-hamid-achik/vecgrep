@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -85,6 +86,45 @@ func TestOllamaProvider_EmbedDocumentsEmptyText(t *testing.T) {
 	_, err := provider.EmbedDocuments(context.Background(), []string{"ok", ""})
 	if err == nil {
 		t.Fatal("expected error for empty text in batch")
+	}
+}
+
+func TestOllamaProvider_EmbedDocumentsCountMismatch(t *testing.T) {
+	// The provider returns FEWER embeddings than inputs. The count-mismatch
+	// guard must surface an error rather than silently dropping/zero-filling
+	// the trailing chunks (which would otherwise be recorded as embedded).
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollamaBatchEmbedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		// Return one fewer embedding than requested.
+		n := len(req.Input)
+		if n > 0 {
+			n--
+		}
+		embeddings := make([][]float64, n)
+		for i := range embeddings {
+			embeddings[i] = []float64{float64(i), float64(i + 1), float64(i + 2)}
+		}
+		resp := ollamaBatchEmbedResponse{Model: "nomic-embed-text", Embeddings: embeddings}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	provider := NewOllamaProvider(OllamaConfig{
+		URL:        server.URL,
+		Model:      "nomic-embed-text",
+		Dimensions: 3,
+	})
+
+	_, err := provider.EmbedDocuments(context.Background(), []string{"a", "b", "c"})
+	if err == nil {
+		t.Fatal("expected an error when the provider returns fewer embeddings than inputs")
+	}
+	if !strings.Contains(err.Error(), "count mismatch") {
+		t.Fatalf("expected a count-mismatch error, got: %v", err)
 	}
 }
 

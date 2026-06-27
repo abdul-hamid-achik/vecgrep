@@ -30,17 +30,34 @@ type Chunk struct {
 	SymbolName string
 }
 
+// defaultMaxChunkChars is a hard upper bound on the bytes in any single chunk
+// handed to the embedder. nomic-embed-text (the default model) has a 2048-token
+// context window and silently truncates beyond it. Tokenization density varies
+// (~4 chars/token for prose, ~3 for typical code, as low as ~2 for dense JSON /
+// minified blobs), so to stay under 2048 tokens for the *worst realistic* case
+// the cap must be <= 2048*2 = 4096 bytes. 4096 also matches the chunker's own
+// oversized-split threshold (ChunkSize*2 at the default ChunkSize), so it only
+// further splits pathological line-based chunks. Oversized inputs are slow to
+// embed and lose their tail to truncation, so every chunk path is clamped to
+// this as a final pass.
+const defaultMaxChunkChars = 4096
+
 // ChunkerConfig holds configuration for the chunker.
 type ChunkerConfig struct {
 	ChunkSize    int // Target chunk size in characters (approximation of tokens)
 	ChunkOverlap int // Overlap between chunks in characters
+	// MaxChunkChars is the hard ceiling on a chunk's size in bytes. Any chunk
+	// exceeding it is split on rune boundaries before embedding so the model
+	// never truncates oversized input. Zero falls back to defaultMaxChunkChars.
+	MaxChunkChars int
 }
 
 // DefaultChunkerConfig returns default chunker configuration.
 func DefaultChunkerConfig() ChunkerConfig {
 	return ChunkerConfig{
-		ChunkSize:    2048, // ~512 tokens * 4 chars/token
-		ChunkOverlap: 256,  // ~64 tokens * 4 chars/token
+		ChunkSize:     2048, // ~512 tokens * 4 chars/token
+		ChunkOverlap:  256,  // ~64 tokens * 4 chars/token
+		MaxChunkChars: defaultMaxChunkChars,
 	}
 }
 
@@ -57,6 +74,9 @@ func NewChunker(cfg ChunkerConfig) *Chunker {
 	if cfg.ChunkOverlap == 0 {
 		cfg.ChunkOverlap = DefaultChunkerConfig().ChunkOverlap
 	}
+	if cfg.MaxChunkChars <= 0 {
+		cfg.MaxChunkChars = defaultMaxChunkChars
+	}
 	return &Chunker{config: cfg}
 }
 
@@ -68,13 +88,85 @@ func (c *Chunker) ChunkFile(content string, filename string) []Chunk {
 
 	lang := DetectLanguage(filename)
 
-	// For certain languages, try semantic chunking first
-	if chunks := c.semanticChunk(content, lang); len(chunks) > 0 {
-		return chunks
+	// For certain languages, try semantic chunking first; otherwise fall back
+	// to line-based chunking.
+	chunks := c.semanticChunk(content, lang)
+	if len(chunks) == 0 {
+		chunks = c.lineBasedChunk(content)
 	}
 
-	// Fall back to line-based chunking
-	return c.lineBasedChunk(content)
+	// Final safety pass: neither chunker guarantees a hard size bound (a single
+	// very long line — minified JS, a long Markdown paragraph, a JSON blob — or
+	// a large unsplit block can slip through). Clamp every chunk so the embedder
+	// never receives oversized input it would silently truncate.
+	return c.enforceMaxChunkChars(chunks)
+}
+
+// enforceMaxChunkChars splits any chunk whose content exceeds MaxChunkChars
+// BYTES into rune-safe sub-chunks, each at most MaxChunkChars bytes. The bound
+// is in bytes because that is what the embedder's token budget tracks; measuring
+// the guard in bytes and the split in bytes keeps the two consistent (a
+// rune-based split would let a multi-byte chunk slip past the byte guard).
+// Line numbers are tracked best-effort by counting newlines; these splits only
+// ever hit pathological chunks (huge single lines / unsplit blocks), so
+// approximate spans are fine.
+func (c *Chunker) enforceMaxChunkChars(chunks []Chunk) []Chunk {
+	maxChars := c.config.MaxChunkChars
+	if maxChars <= 0 {
+		return chunks
+	}
+	var out []Chunk
+	for _, chunk := range chunks {
+		if len(chunk.Content) <= maxChars {
+			out = append(out, chunk)
+			continue
+		}
+		out = append(out, splitByChars(chunk, maxChars)...)
+	}
+	return out
+}
+
+// splitByChars divides a chunk's content into pieces of at most maxBytes bytes,
+// never splitting a multi-byte rune (so a piece may be slightly under maxBytes
+// to avoid cutting a rune). StartLine/EndLine are advanced by the number of
+// newlines consumed so search results still point near the source.
+func splitByChars(chunk Chunk, maxBytes int) []Chunk {
+	var parts []Chunk
+	startLine := chunk.StartLine
+	rest := chunk.Content
+	for len(rest) > 0 {
+		end := len(rest)
+		if end > maxBytes {
+			// Back off to the last rune boundary at or before maxBytes so we
+			// never emit a piece exceeding the byte cap or split a rune.
+			end = maxBytes
+			for end > 0 && !utf8.RuneStart(rest[end]) {
+				end--
+			}
+			if end == 0 {
+				// A single rune longer than maxBytes (only possible with a tiny
+				// cap); take the whole rune to make progress.
+				_, sz := utf8.DecodeRuneInString(rest)
+				end = sz
+			}
+		}
+		piece := rest[:end]
+		newlines := strings.Count(piece, "\n")
+
+		part := chunk
+		part.Content = piece
+		part.StartLine = startLine
+		part.EndLine = startLine + newlines
+		// Byte offsets can't be recovered cleanly after splitting; drop them
+		// rather than report misleading spans.
+		part.StartByte = 0
+		part.EndByte = 0
+		parts = append(parts, part)
+
+		startLine += newlines
+		rest = rest[end:]
+	}
+	return parts
 }
 
 // semanticChunk attempts to chunk based on code structure.

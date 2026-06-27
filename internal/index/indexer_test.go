@@ -2,8 +2,12 @@ package index
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -429,6 +433,330 @@ func TestIndex_ContextCancellation(t *testing.T) {
 	if err != nil && err != context.Canceled {
 		// Some errors are acceptable when context is canceled
 		t.Logf("Index returned error (expected): %v", err)
+	}
+}
+
+// batchRecordingProvider records the size of every EmbedDocuments call so the
+// packing test can verify chunks from many files coalesce into full batches.
+type batchRecordingProvider struct {
+	*mockEmbedProvider
+	mu         sync.Mutex
+	batchSizes []int
+}
+
+func (m *batchRecordingProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	m.mu.Lock()
+	m.batchSizes = append(m.batchSizes, len(texts))
+	m.mu.Unlock()
+	results := make([][]float32, len(texts))
+	for i := range texts {
+		results[i] = make([]float32, m.dimensions)
+	}
+	return results, nil
+}
+
+// TestIndex_PacksBatchesAcrossFiles is the regression test for the throughput
+// fix: with per-file embedding, N single-chunk files produced N tiny batches.
+// The batcher must instead coalesce them into full BatchSize batches (only the
+// trailing batch may be short) while losing no chunks.
+func TestIndex_PacksBatchesAcrossFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	database, err := db.OpenWithOptions(db.OpenOptions{Dimensions: 8, DataDir: tmpDir})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	provider := &batchRecordingProvider{mockEmbedProvider: newMockEmbedProvider(8)}
+
+	const batchSize = 8
+	cfg := DefaultIndexerConfig()
+	cfg.BatchSize = batchSize
+	cfg.Workers = 4
+	indexer := NewIndexer(database, provider, cfg)
+
+	// 21 one-function Go files → 21 single-chunk files.
+	projectDir := filepath.Join(tmpDir, "proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	const numFiles = 21
+	for i := 0; i < numFiles; i++ {
+		src := fmt.Sprintf("package p\n\nfunc F%d() int { return %d }\n", i, i)
+		if err := os.WriteFile(filepath.Join(projectDir, fmt.Sprintf("f%d.go", i)), []byte(src), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	result, err := indexer.Index(context.Background(), projectDir)
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+
+	total := result.ChunksCreated
+	if total == 0 {
+		t.Fatal("no chunks created")
+	}
+
+	// No chunk may be lost in the scatter/gather.
+	sum := 0
+	full := 0
+	for _, s := range provider.batchSizes {
+		sum += s
+		if s == batchSize {
+			full++
+		} else if s > batchSize {
+			t.Errorf("batch larger than BatchSize: %d > %d", s, batchSize)
+		}
+	}
+	if sum != total {
+		t.Errorf("embedded %d chunks across batches, want %d", sum, total)
+	}
+
+	// The batcher flushes only at BatchSize or at end-of-stream, so every batch
+	// but the trailing remainder must be exactly full.
+	wantFull := total / batchSize
+	wantBatches := wantFull
+	if total%batchSize != 0 {
+		wantBatches++
+	}
+	if full != wantFull {
+		t.Errorf("got %d full batches, want %d (sizes=%v)", full, wantFull, provider.batchSizes)
+	}
+	if len(provider.batchSizes) != wantBatches {
+		t.Errorf("got %d batches, want %d (sizes=%v)", len(provider.batchSizes), wantBatches, provider.batchSizes)
+	}
+	// Packing must beat the old one-batch-per-file behavior.
+	if len(provider.batchSizes) >= numFiles {
+		t.Errorf("no packing: %d batches for %d files", len(provider.batchSizes), numFiles)
+	}
+}
+
+// errEmbedProvider always fails embedding, to exercise the error path.
+type errEmbedProvider struct {
+	*mockEmbedProvider
+}
+
+func (m *errEmbedProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	return nil, errors.New("boom")
+}
+
+// blockingEmbedProvider parks in EmbedDocuments until the context is cancelled,
+// to create in-flight backpressure for the mid-index cancellation test.
+type blockingEmbedProvider struct {
+	*mockEmbedProvider
+	started chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingEmbedProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	m.once.Do(func() { close(m.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func openTestDB(t *testing.T, dims int) *db.DB {
+	t.Helper()
+	database, err := db.OpenWithOptions(db.OpenOptions{Dimensions: dims, DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	return database
+}
+
+// TestNewIndexer_DefaultMaxChunkChars pins that the chunk cap actually engages
+// through the production NewIndexer path (which does NOT set MaxChunkChars and
+// relies on NewChunker's default). A regression that disabled the default here
+// would silently re-introduce oversized chunks with every other test still green.
+func TestNewIndexer_DefaultMaxChunkChars(t *testing.T) {
+	idx := NewIndexer(openTestDB(t, 8), newMockEmbedProvider(8), DefaultIndexerConfig())
+	if idx.chunker.config.MaxChunkChars != defaultMaxChunkChars {
+		t.Errorf("NewIndexer chunker MaxChunkChars = %d, want default %d", idx.chunker.config.MaxChunkChars, defaultMaxChunkChars)
+	}
+}
+
+// TestIndex_NoStoredChunkExceedsCap is the end-to-end original-problem guard: a
+// file with one enormous line, indexed through the full pipeline, must store
+// multiple chunks each within the byte cap (never one oversized blob).
+func TestIndex_NoStoredChunkExceedsCap(t *testing.T) {
+	database := openTestDB(t, 8)
+	indexer := NewIndexer(database, newMockEmbedProvider(8), DefaultIndexerConfig())
+
+	projectDir := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bigPath := filepath.Join(projectDir, "big.txt")
+	if err := os.WriteFile(bigPath, []byte(strings.Repeat("x", 50000)), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	result, err := indexer.Index(context.Background(), projectDir)
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	if result.ChunksCreated <= 1 {
+		t.Fatalf("expected the giant line to be split into >1 chunk, got %d", result.ChunksCreated)
+	}
+
+	stored, err := database.GetChunksByFile(bigPath)
+	if err != nil {
+		t.Fatalf("GetChunksByFile: %v", err)
+	}
+	if len(stored) == 0 {
+		t.Fatal("no chunks stored")
+	}
+	for i, ch := range stored {
+		if len(ch.Content) > defaultMaxChunkChars {
+			t.Errorf("stored chunk %d exceeds cap: %d > %d bytes", i, len(ch.Content), defaultMaxChunkChars)
+		}
+	}
+}
+
+// TestIndex_SingleFileSpansMultipleBatches exercises the hardest property of the
+// rewrite: one file whose chunks are scattered across SEVERAL embedding batches
+// must be gathered back and inserted exactly once, losing no chunk.
+func TestIndex_SingleFileSpansMultipleBatches(t *testing.T) {
+	database := openTestDB(t, 8)
+	provider := &batchRecordingProvider{mockEmbedProvider: newMockEmbedProvider(8)}
+
+	cfg := DefaultIndexerConfig()
+	cfg.BatchSize = 2
+	cfg.Workers = 4
+	indexer := NewIndexer(database, provider, cfg)
+
+	// One Go file with 12 functions -> 12 single chunks, far exceeding BatchSize.
+	var b strings.Builder
+	b.WriteString("package p\n\n")
+	for i := 0; i < 12; i++ {
+		fmt.Fprintf(&b, "func F%d() int { return %d }\n", i, i)
+	}
+	content := b.String()
+
+	projectDir := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	fpath := filepath.Join(projectDir, "f.go")
+	if err := os.WriteFile(fpath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	want := len(NewChunker(ChunkerConfig{ChunkSize: cfg.ChunkSize, ChunkOverlap: cfg.ChunkOverlap}).ChunkFile(content, fpath))
+	if want <= cfg.BatchSize {
+		t.Fatalf("test precondition: want %d chunks must exceed BatchSize %d", want, cfg.BatchSize)
+	}
+
+	result, err := indexer.Index(context.Background(), projectDir)
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	if result.FilesProcessed != 1 {
+		t.Errorf("FilesProcessed = %d, want 1", result.FilesProcessed)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("unexpected errors: %v", result.Errors)
+	}
+	if result.ChunksCreated != want {
+		t.Errorf("ChunksCreated = %d, want %d (chunk lost across batches)", result.ChunksCreated, want)
+	}
+	// Confirm the file's chunks genuinely spanned more than one batch.
+	provider.mu.Lock()
+	nbatches := len(provider.batchSizes)
+	provider.mu.Unlock()
+	if nbatches < 2 {
+		t.Errorf("expected chunks to span >1 batch, got %d batches", nbatches)
+	}
+}
+
+// TestIndex_ProviderErrorIsReported verifies an embedding failure is surfaced in
+// result.Errors (and the file is not silently recorded), while Index itself
+// still returns without dropping the whole run.
+func TestIndex_ProviderErrorIsReported(t *testing.T) {
+	database := openTestDB(t, 8)
+	provider := &errEmbedProvider{mockEmbedProvider: newMockEmbedProvider(8)}
+	indexer := NewIndexer(database, provider, DefaultIndexerConfig())
+
+	projectDir := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	setupTestFiles(t, projectDir)
+
+	result, err := indexer.Index(context.Background(), projectDir)
+	if err != nil {
+		t.Fatalf("Index should not return a top-level error on per-file embed failure: %v", err)
+	}
+	if result == nil {
+		t.Fatal("nil result")
+	}
+	if len(result.Errors) == 0 {
+		t.Fatal("expected embed errors to be reported, got none")
+	}
+	if result.ChunksCreated != 0 {
+		t.Errorf("ChunksCreated = %d, want 0 (failed files must not be persisted)", result.ChunksCreated)
+	}
+	foundEmbed := false
+	for _, e := range result.Errors {
+		if strings.Contains(e.Error(), "embed") {
+			foundEmbed = true
+		}
+	}
+	if !foundEmbed {
+		t.Errorf("expected an error mentioning 'embed', got %v", result.Errors)
+	}
+
+	// The failed file must NOT have recorded a hash, so a re-run retries it.
+	hashes, err := database.GetFileHashes(projectDir)
+	if err == nil && len(hashes) != 0 {
+		t.Errorf("failed files should leave no recorded hashes, got %d", len(hashes))
+	}
+}
+
+// TestIndex_CancelMidIndexReturns proves the 3-stage pipeline drains without
+// deadlock when the context is cancelled WHILE embedding is in flight (the
+// fileTask.skip path and the channel-close chain under backpressure).
+func TestIndex_CancelMidIndexReturns(t *testing.T) {
+	database := openTestDB(t, 8)
+	provider := &blockingEmbedProvider{mockEmbedProvider: newMockEmbedProvider(8), started: make(chan struct{})}
+
+	cfg := DefaultIndexerConfig()
+	cfg.BatchSize = 2 // small batches + small itemChan -> chunkFile hits the skip path
+	cfg.Workers = 2
+	indexer := NewIndexer(database, provider, cfg)
+
+	projectDir := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for i := 0; i < 60; i++ {
+		src := fmt.Sprintf("package p\n\nfunc F%d() int { return %d }\n", i, i)
+		if err := os.WriteFile(filepath.Join(projectDir, fmt.Sprintf("f%d.go", i)), []byte(src), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := indexer.Index(ctx, projectDir)
+		done <- err
+	}()
+
+	select {
+	case <-provider.started:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("embedding never started; cannot exercise mid-index cancellation")
+	}
+
+	cancel()
+
+	select {
+	case <-done: // returned without hanging — the property under test
+	case <-time.After(10 * time.Second):
+		t.Fatal("Index hung on mid-index cancellation (pipeline deadlock)")
 	}
 }
 
