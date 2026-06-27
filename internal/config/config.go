@@ -257,6 +257,16 @@ type DaemonConfig struct {
 	// entries. Use a string duration (e.g. "24h", "6h"). Zero or empty
 	// disables periodic sweeps (default: 24h).
 	SweepInterval string `mapstructure:"sweep_interval" yaml:"sweep_interval,omitempty"`
+	// LogOffload enables rotating the daemon's own log to a managed file and
+	// periodically stashing rotated segments into the fcheap vault. Off by
+	// default. When enabled the daemon also keeps logging to stderr.
+	LogOffload bool `mapstructure:"log_offload" yaml:"log_offload,omitempty"`
+	// LogOffloadInterval is how often the managed log is rotated and offloaded
+	// (string duration, e.g. "1h"). Empty/invalid disables offload (default 1h).
+	LogOffloadInterval string `mapstructure:"log_offload_interval" yaml:"log_offload_interval,omitempty"`
+	// LogOffloadTTL is the fcheap TTL applied to stashed log segments so they
+	// auto-expire (e.g. "30d"). Empty means the stash never expires.
+	LogOffloadTTL string `mapstructure:"log_offload_ttl" yaml:"log_offload_ttl,omitempty"`
 }
 
 // Default daemon constants.
@@ -266,6 +276,8 @@ const (
 	DefaultDaemonEmbedMaxInFlight = 8
 	DefaultDaemonDebounceMs       = 500
 	DefaultDaemonSweepInterval    = "24h"
+	DefaultDaemonLogOffloadInt    = "1h"
+	DefaultDaemonLogOffloadTTL    = "30d"
 )
 
 // DefaultConfig returns the default configuration
@@ -317,6 +329,9 @@ func DefaultConfig() *Config {
 			EmbedMaxInFlight: DefaultDaemonEmbedMaxInFlight,
 			Debounce:         DefaultDaemonDebounceMs,
 			SweepInterval:    DefaultDaemonSweepInterval,
+			// LogOffload defaults to off; interval/TTL apply only once enabled.
+			LogOffloadInterval: DefaultDaemonLogOffloadInt,
+			LogOffloadTTL:      DefaultDaemonLogOffloadTTL,
 		},
 		Cache: CacheConfig{
 			FcheapStash: boolPtr(true),

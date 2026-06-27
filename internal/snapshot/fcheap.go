@@ -41,14 +41,26 @@ type SaveResult struct {
 	Tool    string `json:"tool"`
 }
 
-// Save stores a directory in the fcheap vault and returns the stash ID.
-// tags are applied to the stash for later filtering.
+// Save stores a file or directory in the fcheap vault and returns the stash ID.
+// tags are applied to the stash for later filtering. The stash never expires;
+// use SaveWithTTL to set an expiry.
 func (f *Fcheap) Save(ctx context.Context, dir, name, tool string, tags []string) (*SaveResult, error) {
+	return f.SaveWithTTL(ctx, dir, name, tool, "", tags)
+}
+
+// SaveWithTTL is Save with an explicit time-to-live. An empty ttl means the
+// stash never expires; otherwise ttl uses fcheap duration syntax (e.g. "30d",
+// "24h"). The path is passed positionally — `fcheap save <path>` takes no
+// --path flag.
+func (f *Fcheap) SaveWithTTL(ctx context.Context, path, name, tool, ttl string, tags []string) (*SaveResult, error) {
 	if !f.Available() {
 		return nil, fmt.Errorf("fcheap not available")
 	}
 
-	args := []string{"save", "--json", "--path", dir, "--name", name, "--tool", tool}
+	args := []string{"save", "--json", path, "--name", name, "--tool", tool}
+	if ttl != "" {
+		args = append(args, "--ttl", ttl)
+	}
 	for _, tag := range tags {
 		args = append(args, "--tag", tag)
 	}

@@ -430,6 +430,15 @@ func mergeDaemonConfig(dst, src *Config) {
 	if src.Daemon.SweepInterval != "" || src.has("daemon.sweep_interval") {
 		dst.Daemon.SweepInterval = src.Daemon.SweepInterval
 	}
+	if src.Daemon.LogOffload || src.has("daemon.log_offload") {
+		dst.Daemon.LogOffload = src.Daemon.LogOffload
+	}
+	if src.Daemon.LogOffloadInterval != "" || src.has("daemon.log_offload_interval") {
+		dst.Daemon.LogOffloadInterval = src.Daemon.LogOffloadInterval
+	}
+	if src.Daemon.LogOffloadTTL != "" || src.has("daemon.log_offload_ttl") {
+		dst.Daemon.LogOffloadTTL = src.Daemon.LogOffloadTTL
+	}
 }
 
 // applyEnvironment applies VECGREP_* environment variables
@@ -596,6 +605,17 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 	if val := os.Getenv("VECGREP_DAEMON_SWEEP_INTERVAL"); val != "" {
 		cfg.Daemon.SweepInterval = val
 	}
+	if val := os.Getenv("VECGREP_DAEMON_LOG_OFFLOAD"); val != "" {
+		if enabled, err := strconv.ParseBool(val); err == nil {
+			cfg.Daemon.LogOffload = enabled
+		}
+	}
+	if val := os.Getenv("VECGREP_DAEMON_LOG_OFFLOAD_INTERVAL"); val != "" {
+		cfg.Daemon.LogOffloadInterval = val
+	}
+	if val := os.Getenv("VECGREP_DAEMON_LOG_OFFLOAD_TTL"); val != "" {
+		cfg.Daemon.LogOffloadTTL = val
+	}
 
 	// Cache settings
 	if val := os.Getenv("VECGREP_CACHE_FCHEAP_STASH"); val != "" {
@@ -631,6 +651,12 @@ func FindProjectRoot() (string, error) {
 func FindProjectRootFrom(startDir string) (string, error) {
 	dir := startDir
 
+	// The global store also lives in a ".vecgrep" directory (~/.vecgrep) and shares
+	// its name with the project-local marker. Never treat the global directory as a
+	// project-root marker, otherwise the home directory resolves as a project and
+	// indexing walks the entire home tree (~/.asdf, ~/Library, etc.).
+	globalDir, _ := GetGlobalConfigDir()
+
 	for {
 		// Check for project config files in order of preference
 		configFiles := []string{
@@ -644,7 +670,7 @@ func FindProjectRootFrom(startDir string) (string, error) {
 			if info, err := os.Stat(cf); err == nil {
 				// For .vecgrep, check if it's a directory
 				if strings.HasSuffix(cf, DefaultDataDir) {
-					if info.IsDir() {
+					if info.IsDir() && (globalDir == "" || cf != globalDir) {
 						return dir, nil
 					}
 				} else if info.Mode().IsRegular() {

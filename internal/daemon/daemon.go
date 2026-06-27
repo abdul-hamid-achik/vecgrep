@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -62,6 +63,11 @@ type Daemon struct {
 
 	// sweepDoneCh signals the periodic sweep goroutine to exit.
 	sweepDoneCh chan struct{}
+
+	// logSink, when non-nil, is the managed log file the daemon writes to and
+	// periodically offloads to fcheap. logOffloadDoneCh signals that loop to exit.
+	logSink          *rotatingSink
+	logOffloadDoneCh chan struct{}
 }
 
 // Config holds the daemon startup configuration.
@@ -126,16 +132,17 @@ func New(cfg Config) (*Daemon, error) {
 	lockPath := filepath.Join(dataDir, "daemon.lock")
 
 	d := &Daemon{
-		cfg:         appCfg,
-		session:     session,
-		indexer:     indexer,
-		throttled:   throttled,
-		socketPath:  socketPath,
-		statePath:   statePath,
-		lockPath:    lockPath,
-		stopCh:      make(chan struct{}),
-		doneCh:      make(chan struct{}),
-		sweepDoneCh: make(chan struct{}),
+		cfg:              appCfg,
+		session:          session,
+		indexer:          indexer,
+		throttled:        throttled,
+		socketPath:       socketPath,
+		statePath:        statePath,
+		lockPath:         lockPath,
+		stopCh:           make(chan struct{}),
+		doneCh:           make(chan struct{}),
+		sweepDoneCh:      make(chan struct{}),
+		logOffloadDoneCh: make(chan struct{}),
 		state: DaemonState{
 			ProjectRoot:  session.ProjectRoot,
 			ProjectName:  session.ProjectName,
@@ -161,6 +168,12 @@ func (d *Daemon) SocketPath() string {
 // begins listening on the unix socket. It blocks until Stop is called or
 // the context is canceled.
 func (d *Daemon) Start(ctx context.Context) error {
+	// Raise the open-file limit before the watcher opens a descriptor per
+	// directory (kqueue on macOS). Without this, a large tree exhausts the
+	// default soft limit and the later net.Listen fails with the misleading
+	// "too many open files". Best-effort: it never aborts startup.
+	raiseFDLimit()
+
 	// Acquire the lock
 	if err := d.acquireLock(); err != nil {
 		return fmt.Errorf("acquire daemon lock: %w", err)
@@ -207,6 +220,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go d.sweepLoop(ctx, sweepInterval)
 	}
 
+	// Optional: capture the daemon log to a managed file and periodically
+	// offload rotated segments to the fcheap vault.
+	if d.cfg.Daemon.LogOffload {
+		d.startLogOffload(ctx)
+	}
+
 	// Wait for stop
 	<-d.stopCh
 	_ = d.listener.Close()
@@ -214,12 +233,23 @@ func (d *Daemon) Start(ctx context.Context) error {
 		_ = d.watcher.Stop()
 	}
 
-	// Signal the sweep goroutine to exit.
+	// Signal the periodic goroutines to exit.
 	close(d.sweepDoneCh)
+	close(d.logOffloadDoneCh)
 
 	// Wait for in-flight reindex and switchBranch operations to complete
 	// before closing the throttled provider and DB.
 	d.reindexWg.Wait()
+
+	// Final best-effort offload of whatever the daemon logged this session,
+	// then restore plain stderr logging and close the managed log file. Rotate
+	// is mutex-guarded, so racing with a late loop tick is safe (one wins the
+	// segment, the other sees an empty file).
+	if d.logSink != nil {
+		d.offloadLog(context.Background(), snapshot.NewFcheap(), time.Now())
+		log.SetOutput(os.Stderr)
+		_ = d.logSink.Close()
+	}
 
 	d.throttled.Close()
 	_ = d.cleanup()
@@ -556,6 +586,94 @@ func (d *Daemon) sweepLoop(ctx context.Context, interval time.Duration) {
 			log.Printf("periodic fcheap sweep complete: swept %d stashes", result.Swept)
 		}
 	}
+}
+
+// startLogOffload redirects the daemon's log to a managed file (while keeping
+// stderr, so launchd/nohup logs still work) and launches the offload loop. It
+// is best-effort: on any setup failure it logs and leaves logging on stderr.
+func (d *Daemon) startLogOffload(ctx context.Context) {
+	interval := parseSweepInterval(d.cfg.Daemon.LogOffloadInterval)
+	if interval <= 0 {
+		log.Printf("daemon: log offload enabled but interval %q is invalid; disabling",
+			d.cfg.Daemon.LogOffloadInterval)
+		return
+	}
+
+	logPath := filepath.Join(d.session.Config.DataDir, "daemon.log")
+	sink, err := newRotatingSink(logPath)
+	if err != nil {
+		log.Printf("daemon: log offload disabled: %v", err)
+		return
+	}
+	d.logSink = sink
+	log.SetOutput(io.MultiWriter(os.Stderr, sink))
+	log.Printf("daemon: log offload enabled (every %s, ttl %q) → %s",
+		interval, d.cfg.Daemon.LogOffloadTTL, logPath)
+
+	go d.logOffloadLoop(ctx, interval)
+}
+
+// logOffloadLoop rotates and offloads the managed log on a fixed interval until
+// the daemon stops.
+func (d *Daemon) logOffloadLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	f := snapshot.NewFcheap()
+	if !f.Available() {
+		log.Printf("daemon: log offload: fcheap not available, rotating logs locally only")
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.logOffloadDoneCh:
+			return
+		case <-ticker.C:
+			d.offloadLog(ctx, f, time.Now())
+		}
+	}
+}
+
+// offloadLog rotates the managed log and, when fcheap is available, stashes the
+// rotated segment with the configured TTL, deleting the local copy on success.
+// A rotation that finds an empty log is a no-op.
+func (d *Daemon) offloadLog(ctx context.Context, f *snapshot.Fcheap, now time.Time) {
+	if d.logSink == nil {
+		return
+	}
+	rotated, err := d.logSink.Rotate(now)
+	if err != nil {
+		log.Printf("daemon: log rotate failed: %v", err)
+		return
+	}
+	if rotated == "" {
+		return // nothing written since the last rotation
+	}
+	if f == nil || !f.Available() {
+		return // keep the rotated segment locally; nothing else to do
+	}
+
+	label := d.projectLabel()
+	name := fmt.Sprintf("%s-daemon-log-%s", label, filepath.Base(rotated))
+	tags := []string{"daemon-log", label}
+	if _, err := f.SaveWithTTL(ctx, rotated, name, "vecgrep-daemon", d.cfg.Daemon.LogOffloadTTL, tags); err != nil {
+		log.Printf("daemon: log offload to fcheap failed (kept %s): %v", rotated, err)
+		return
+	}
+	if err := os.Remove(rotated); err != nil {
+		log.Printf("daemon: removing offloaded log %s: %v", rotated, err)
+	}
+}
+
+// projectLabel is a stable, non-empty identifier for tagging stashes: the
+// registered project name, falling back to the project root's base name.
+func (d *Daemon) projectLabel() string {
+	if d.session.ProjectName != "" {
+		return d.session.ProjectName
+	}
+	return filepath.Base(d.session.ProjectRoot)
 }
 
 // parseSweepInterval parses the SweepInterval config string into a
