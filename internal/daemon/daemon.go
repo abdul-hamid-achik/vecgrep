@@ -1,7 +1,11 @@
 // Package daemon provides a background indexing daemon that watches files,
-// throttles Ollama embedding requests, and serves MCP queries over a unix
-// socket. The daemon is the sole writer — all other surfaces (CLI, MCP
-// server) connect to it over the socket or fall back to read-only sessions.
+// throttles Ollama embedding requests, and serves queries over a unix socket.
+//
+// The daemon is a multi-project hub: one process listens on a single global
+// socket (~/.vecgrep/daemon.sock) and routes JSON-RPC requests to per-project
+// workers, opening projects lazily on first request. It is the sole writer for
+// every project it has open; all other surfaces (CLI, MCP server) connect over
+// the socket or fall back to read-only sessions.
 package daemon
 
 import (
@@ -16,15 +20,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
-	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
-	"github.com/abdul-hamid-achik/vecgrep/internal/index"
-	"github.com/abdul-hamid-achik/vecgrep/internal/search"
 	"github.com/abdul-hamid-achik/vecgrep/internal/snapshot"
 )
 
-// DaemonState is the metadata written to daemon.json for status inspection.
+// DaemonState is the per-project metadata written to each project's daemon.json
+// for status inspection and as the MCP reload signal.
 type DaemonState struct {
 	ProjectRoot  string    `json:"project_root"`
 	ProjectName  string    `json:"project_name"`
@@ -36,229 +37,154 @@ type DaemonState struct {
 	QueueDepth   int       `json:"queue_depth"`
 }
 
-// Daemon is the background indexing process. It owns one writable session
-// and serves requests over a unix socket using newline-delimited JSON-RPC.
-type Daemon struct {
-	cfg       *config.Config
-	session   *app.Session
-	indexer   *index.Indexer
-	watcher   *index.Watcher
-	throttled *embed.ThrottledProvider
+// HubState is the hub-level metadata written to ~/.vecgrep/daemon.json. It lets
+// `vecgrep daemon stop`/`status` find the hub PID and the set of open projects
+// without connecting to the socket.
+type HubState struct {
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+	Projects  []string  `json:"projects"`
+}
 
-	state   DaemonState
-	stateMu sync.Mutex
+// Daemon is the multi-project hub. It listens on one global unix socket and
+// routes requests to per-project workers, opening projects lazily.
+type Daemon struct {
+	cfg     *config.Config // hub-level config (sweep, log offload, throttle defaults)
+	dataDir string         // global data dir (~/.vecgrep)
 
 	socketPath string
 	statePath  string
 	lockPath   string
+	logPath    string
 
 	listener net.Listener
-	stopCh   chan struct{}
-	doneCh   chan struct{}
 
-	// reindexWg tracks in-flight reindex and switchBranch operations so
-	// that Stop() can wait for them to complete before closing the DB and
-	// throttled provider.
-	reindexWg sync.WaitGroup
+	workersMu sync.Mutex
+	workers   map[string]*projectWorker
 
-	// sweepDoneCh signals the periodic sweep goroutine to exit.
+	startedAt time.Time
+
+	stopCh      chan struct{}
+	doneCh      chan struct{}
 	sweepDoneCh chan struct{}
 
-	// logSink, when non-nil, is the managed log file the daemon writes to and
+	// logSink, when non-nil, is the managed log file the hub writes to and
 	// periodically offloads to fcheap. logOffloadDoneCh signals that loop to exit.
 	logSink          *rotatingSink
 	logOffloadDoneCh chan struct{}
 }
 
-// Config holds the daemon startup configuration.
+// Config holds the hub startup configuration.
 type Config struct {
-	// Session is the writable session opened by the daemon. The daemon
-	// is the sole writer; all other surfaces must use read-only sessions
-	// or connect to the daemon over its socket.
-	Session *app.Session
-	// ResolvedConfig is the full resolved config.
+	// ResolvedConfig is the global resolved config (defaults + global + env)
+	// used for hub-level settings: sweep interval, log offload, throttle
+	// defaults. Per-project settings come from each project's own session.
 	ResolvedConfig *config.Config
+	// DataDir is the global data dir where the hub's socket, lock, state and
+	// log live (~/.vecgrep). If empty it is resolved from GetGlobalConfigDir.
+	DataDir string
 }
 
-// New creates a new daemon from a writable session.
+// New creates a new hub daemon.
 func New(cfg Config) (*Daemon, error) {
-	session := cfg.Session
-	if session == nil {
-		return nil, fmt.Errorf("daemon requires a writable session")
-	}
-
 	appCfg := cfg.ResolvedConfig
 	if appCfg == nil {
-		appCfg = session.Config
+		appCfg = config.DefaultConfig()
+	}
+	dataDir := cfg.DataDir
+	if dataDir == "" {
+		gd, err := config.GetGlobalConfigDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve global data dir: %w", err)
+		}
+		dataDir = gd
 	}
 
-	// Build the throttled provider
-	throttleCfg := embed.ThrottleConfig{
-		Workers:     appCfg.Daemon.EmbedWorkers,
-		RPS:         appCfg.Daemon.EmbedRPS,
-		MaxInFlight: appCfg.Daemon.EmbedMaxInFlight,
-		CacheSize:   1000,
-	}
-	if throttleCfg.Workers == 0 {
-		throttleCfg.Workers = config.DefaultDaemonEmbedWorkers
-	}
-	if throttleCfg.MaxInFlight == 0 {
-		throttleCfg.MaxInFlight = config.DefaultDaemonEmbedMaxInFlight
-	}
-
-	throttled := embed.NewThrottledProvider(session.Provider, throttleCfg)
-
-	// Build the indexer with the throttled provider
-	indexerCfg := index.DefaultIndexerConfig()
-	if appCfg.Indexing.ChunkSize > 0 {
-		indexerCfg.ChunkSize = appCfg.Indexing.ChunkSize
-	}
-	if appCfg.Indexing.ChunkOverlap > 0 {
-		indexerCfg.ChunkOverlap = appCfg.Indexing.ChunkOverlap
-	}
-	if appCfg.Indexing.MaxFileSize > 0 {
-		indexerCfg.MaxFileSize = appCfg.Indexing.MaxFileSize
-	}
-	if len(appCfg.Indexing.IgnorePatterns) > 0 {
-		indexerCfg.IgnorePatterns = appCfg.Indexing.IgnorePatterns
-	}
-
-	indexer := index.NewIndexer(session.DB, throttled, indexerCfg)
-
-	// Determine socket and state paths
-	dataDir := session.Config.DataDir
-	socketPath := filepath.Join(dataDir, "daemon.sock")
-	statePath := filepath.Join(dataDir, "daemon.json")
-	lockPath := filepath.Join(dataDir, "daemon.lock")
-
-	d := &Daemon{
+	return &Daemon{
 		cfg:              appCfg,
-		session:          session,
-		indexer:          indexer,
-		throttled:        throttled,
-		socketPath:       socketPath,
-		statePath:        statePath,
-		lockPath:         lockPath,
+		dataDir:          dataDir,
+		socketPath:       filepath.Join(dataDir, "daemon.sock"),
+		statePath:        filepath.Join(dataDir, "daemon.json"),
+		lockPath:         filepath.Join(dataDir, "daemon.lock"),
+		logPath:          filepath.Join(dataDir, "daemon.log"),
+		workers:          make(map[string]*projectWorker),
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 		sweepDoneCh:      make(chan struct{}),
 		logOffloadDoneCh: make(chan struct{}),
-		state: DaemonState{
-			ProjectRoot:  session.ProjectRoot,
-			ProjectName:  session.ProjectName,
-			PID:          os.Getpid(),
-			StartedAt:    time.Now(),
-			LastActivity: time.Now(),
-		},
-	}
-
-	if session.Resolved != nil {
-		d.state.ActiveBranch = session.Resolved.Branch
-	}
-
-	return d, nil
+	}, nil
 }
 
-// SocketPath returns the path to the daemon's unix socket.
-func (d *Daemon) SocketPath() string {
-	return d.socketPath
-}
+// SocketPath returns the path to the hub's unix socket.
+func (d *Daemon) SocketPath() string { return d.socketPath }
 
-// Start begins the daemon: starts the watcher, writes the state file, and
-// begins listening on the unix socket. It blocks until Stop is called or
-// the context is canceled.
-func (d *Daemon) Start(ctx context.Context) error {
-	// Raise the open-file limit before the watcher opens a descriptor per
-	// directory (kqueue on macOS). Without this, a large tree exhausts the
-	// default soft limit and the later net.Listen fails with the misleading
+// Start launches the hub: raises the FD limit, acquires the global lock,
+// pre-opens any given project roots, then listens and serves until Stop. It
+// blocks until Stop is called or the context is canceled.
+func (d *Daemon) Start(ctx context.Context, preopen ...string) error {
+	// Raise the open-file limit before any watcher opens a descriptor per
+	// directory (kqueue on macOS). Without this, large trees exhaust the
+	// default soft limit and net.Listen fails with the misleading
 	// "too many open files". Best-effort: it never aborts startup.
 	raiseFDLimit()
 
-	// Acquire the lock
 	if err := d.acquireLock(); err != nil {
 		return fmt.Errorf("acquire daemon lock: %w", err)
 	}
-
-	// Write the initial state file
+	d.startedAt = time.Now()
 	if err := d.writeState(); err != nil {
 		_ = d.releaseLock()
 		return fmt.Errorf("write daemon state: %w", err)
 	}
 
-	// Start the watcher
-	if d.cfg.Daemon.Debounce > 0 {
-		watcherCfg := index.DefaultWatcherConfig()
-		watcherCfg.Debounce = time.Duration(d.cfg.Daemon.Debounce) * time.Millisecond
-		w, err := index.WatchAndIndex(ctx, d.indexer, d.session.ProjectRoot, watcherCfg)
-		if err != nil {
-			_ = d.releaseLock()
-			return fmt.Errorf("start watcher: %w", err)
+	// Pre-open requested projects. Best-effort: a bad project is logged, not fatal.
+	for _, root := range preopen {
+		if _, err := d.getOrOpenWorker(ctx, root); err != nil {
+			log.Printf("daemon: pre-open %s failed: %v", root, err)
+		} else {
+			log.Printf("daemon: opened project %s", root)
 		}
-		d.watcher = w
 	}
 
-	// Listen on the unix socket
 	var err error
 	d.listener, err = net.Listen("unix", d.socketPath)
 	if err != nil {
+		d.closeAllWorkers()
 		_ = d.cleanup()
 		return fmt.Errorf("listen on socket: %w", err)
 	}
+	log.Printf("daemon hub listening on %s (%d project(s) open)", d.socketPath, len(d.listWorkers()))
 
-	log.Printf("daemon listening on %s", d.socketPath)
-
-	// Accept loop
 	go d.acceptLoop(ctx)
 
-	// Idle timeout goroutine
-	if d.cfg.Daemon.IdleTimeout > 0 {
-		go d.idleWatcher(ctx)
-	}
-
-	// Periodic fcheap sweep goroutine
 	if sweepInterval := parseSweepInterval(d.cfg.Daemon.SweepInterval); sweepInterval > 0 {
 		go d.sweepLoop(ctx, sweepInterval)
 	}
-
-	// Optional: capture the daemon log to a managed file and periodically
-	// offload rotated segments to the fcheap vault.
 	if d.cfg.Daemon.LogOffload {
 		d.startLogOffload(ctx)
 	}
 
-	// Wait for stop
 	<-d.stopCh
 	_ = d.listener.Close()
-	if d.watcher != nil {
-		_ = d.watcher.Stop()
-	}
+	d.closeAllWorkers()
 
-	// Signal the periodic goroutines to exit.
 	close(d.sweepDoneCh)
 	close(d.logOffloadDoneCh)
 
-	// Wait for in-flight reindex and switchBranch operations to complete
-	// before closing the throttled provider and DB.
-	d.reindexWg.Wait()
-
-	// Final best-effort offload of whatever the daemon logged this session,
-	// then restore plain stderr logging and close the managed log file. Rotate
-	// is mutex-guarded, so racing with a late loop tick is safe (one wins the
-	// segment, the other sees an empty file).
+	// Final best-effort offload of whatever the hub logged this session, then
+	// restore plain stderr logging and close the managed log file.
 	if d.logSink != nil {
 		d.offloadLog(context.Background(), snapshot.NewFcheap(), time.Now())
 		log.SetOutput(os.Stderr)
 		_ = d.logSink.Close()
 	}
 
-	d.throttled.Close()
 	_ = d.cleanup()
 	close(d.doneCh)
-
 	return nil
 }
 
-// Stop signals the daemon to shut down.
+// Stop signals the hub to shut down and waits for it to finish.
 func (d *Daemon) Stop() {
 	select {
 	case <-d.stopCh:
@@ -269,7 +195,100 @@ func (d *Daemon) Stop() {
 	<-d.doneCh
 }
 
-// acceptLoop accepts connections on the unix socket.
+// --- worker registry ---
+
+// getOrOpenWorker returns the worker for root, opening it lazily if not already
+// present. Opening happens outside the registry lock (OpenSession can be slow).
+func (d *Daemon) getOrOpenWorker(ctx context.Context, root string) (*projectWorker, error) {
+	canon := canonicalRoot(root)
+
+	d.workersMu.Lock()
+	if w, ok := d.workers[canon]; ok {
+		d.workersMu.Unlock()
+		return w, nil
+	}
+	d.workersMu.Unlock()
+
+	w, err := newProjectWorker(ctx, canon)
+	if err != nil {
+		return nil, err
+	}
+
+	d.workersMu.Lock()
+	if existing, ok := d.workers[canon]; ok {
+		// A concurrent request opened it first; discard our duplicate.
+		d.workersMu.Unlock()
+		w.close()
+		return existing, nil
+	}
+	d.workers[canon] = w
+	d.workersMu.Unlock()
+
+	_ = d.writeState()
+	return w, nil
+}
+
+// removeWorker closes and unregisters a project. Returns false if not open.
+func (d *Daemon) removeWorker(root string) bool {
+	canon := canonicalRoot(root)
+	d.workersMu.Lock()
+	w, ok := d.workers[canon]
+	if ok {
+		delete(d.workers, canon)
+	}
+	d.workersMu.Unlock()
+	if ok {
+		w.close()
+		_ = d.writeState()
+	}
+	return ok
+}
+
+func (d *Daemon) lookupWorker(root string) (*projectWorker, bool) {
+	canon := canonicalRoot(root)
+	d.workersMu.Lock()
+	defer d.workersMu.Unlock()
+	w, ok := d.workers[canon]
+	return w, ok
+}
+
+func (d *Daemon) listWorkers() []*projectWorker {
+	d.workersMu.Lock()
+	defer d.workersMu.Unlock()
+	out := make([]*projectWorker, 0, len(d.workers))
+	for _, w := range d.workers {
+		out = append(out, w)
+	}
+	return out
+}
+
+func (d *Daemon) closeAllWorkers() {
+	d.workersMu.Lock()
+	workers := make([]*projectWorker, 0, len(d.workers))
+	for _, w := range d.workers {
+		workers = append(workers, w)
+	}
+	d.workers = make(map[string]*projectWorker)
+	d.workersMu.Unlock()
+	for _, w := range workers {
+		w.close()
+	}
+}
+
+// canonicalRoot normalizes a project root for use as a registry key.
+func canonicalRoot(root string) string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
+// --- connection handling / routing ---
+
 func (d *Daemon) acceptLoop(ctx context.Context) {
 	for {
 		conn, err := d.listener.Accept()
@@ -286,21 +305,15 @@ func (d *Daemon) acceptLoop(ctx context.Context) {
 	}
 }
 
-// handleConn handles a single client connection using newline-delimited JSON.
 func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-
 	dec := json.NewDecoder(conn)
 	enc := json.NewEncoder(conn)
-
 	for {
 		var req jsonRPCRequest
 		if err := dec.Decode(&req); err != nil {
 			return // connection closed or malformed
 		}
-
-		d.touchActivity()
-
 		resp := d.handleRequest(ctx, &req)
 		if err := enc.Encode(resp); err != nil {
 			return
@@ -308,29 +321,26 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// handleRequest dispatches a single JSON-RPC request.
 func (d *Daemon) handleRequest(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
 	switch req.Method {
 	case "daemon.ping":
 		return jsonRPCResponse{ID: req.ID, Result: map[string]any{"ok": true}}
 	case "daemon.status":
-		d.stateMu.Lock()
-		state := d.state
-		d.stateMu.Unlock()
-		return jsonRPCResponse{ID: req.ID, Result: state}
+		return d.handleStatus(req)
+	case "daemon.listProjects":
+		return d.handleListProjects(req)
+	case "daemon.addProject":
+		return d.handleAddProject(ctx, req)
+	case "daemon.removeProject":
+		return d.handleRemoveProject(req)
 	case "daemon.reindex":
-		d.reindexWg.Add(1)
-		go func() {
-			defer d.reindexWg.Done()
-			d.reindex(ctx)
-		}()
-		return jsonRPCResponse{ID: req.ID, Result: map[string]any{"started": true}}
+		return d.handleReindex(ctx, req)
 	case "daemon.switchBranch":
 		return d.handleSwitchBranch(ctx, req)
 	case "daemon.search":
 		return d.handleSearch(ctx, req)
 	case "daemon.stats":
-		return d.handleStats(req)
+		return d.handleStats(ctx, req)
 	default:
 		return jsonRPCResponse{
 			ID:    req.ID,
@@ -339,59 +349,158 @@ func (d *Daemon) handleRequest(ctx context.Context, req *jsonRPCRequest) jsonRPC
 	}
 }
 
-// reindex triggers a full reindex of the project.
-func (d *Daemon) reindex(ctx context.Context) {
-	_, err := d.indexer.Index(ctx, d.session.ProjectRoot)
-	if err != nil {
-		log.Printf("daemon reindex failed: %v", err)
-		return
-	}
-
-	d.stateMu.Lock()
-	d.state.LastReindex = time.Now()
-	d.stateMu.Unlock()
-	_ = d.writeState()
+// projectParam is the routing field every project-scoped request carries.
+type projectParam struct {
+	Project string `json:"project"`
 }
 
-// idleWatcher shuts down the daemon after the configured idle timeout.
-func (d *Daemon) idleWatcher(ctx context.Context) {
-	timeout := time.Duration(d.cfg.Daemon.IdleTimeout) * time.Minute
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+// workerForReq resolves (lazily opening) the worker named by the request's
+// project field.
+func (d *Daemon) workerForReq(ctx context.Context, req *jsonRPCRequest) (*projectWorker, *jsonRPCError) {
+	var p projectParam
+	if len(req.Params) > 0 {
+		_ = json.Unmarshal(req.Params, &p)
+	}
+	if p.Project == "" {
+		return nil, &jsonRPCError{Code: -32602, Message: "project is required"}
+	}
+	w, err := d.getOrOpenWorker(ctx, p.Project)
+	if err != nil {
+		return nil, &jsonRPCError{Code: -32603, Message: fmt.Sprintf("open project %q: %v", p.Project, err)}
+	}
+	return w, nil
+}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-d.stopCh:
-			return
-		case <-ticker.C:
-			d.stateMu.Lock()
-			lastActivity := d.state.LastActivity
-			d.stateMu.Unlock()
-
-			if time.Since(lastActivity) > timeout {
-				log.Printf("daemon idle for %s, shutting down", time.Since(lastActivity))
-				d.Stop()
-				return
-			}
+func (d *Daemon) handleSearch(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	var params searchParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return errResp(req, -32602, fmt.Sprintf("invalid params: %v", err))
 		}
 	}
+	if params.Query == "" {
+		return errResp(req, -32602, "query is required")
+	}
+	if params.Limit <= 0 {
+		params.Limit = 10
+	}
+	w, rpcErr := d.workerForReq(ctx, req)
+	if rpcErr != nil {
+		return jsonRPCResponse{ID: req.ID, Error: rpcErr}
+	}
+	w.touchActivity()
+	results, mode, err := w.search(ctx, params)
+	if err != nil {
+		return errResp(req, -32603, fmt.Sprintf("search failed: %v", err))
+	}
+	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"results": results, "mode": mode}}
 }
 
-// touchActivity updates the last activity timestamp.
-func (d *Daemon) touchActivity() {
-	d.stateMu.Lock()
-	d.state.LastActivity = time.Now()
-	d.stateMu.Unlock()
+func (d *Daemon) handleStats(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	w, rpcErr := d.workerForReq(ctx, req)
+	if rpcErr != nil {
+		return jsonRPCResponse{ID: req.ID, Error: rpcErr}
+	}
+	w.touchActivity()
+	stats, err := w.stats(ctx)
+	if err != nil {
+		return errResp(req, -32603, fmt.Sprintf("stats failed: %v", err))
+	}
+	return jsonRPCResponse{ID: req.ID, Result: stats}
 }
 
-// acquireLock writes the lock file, failing if it already exists.
+func (d *Daemon) handleReindex(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	w, rpcErr := d.workerForReq(ctx, req)
+	if rpcErr != nil {
+		return jsonRPCResponse{ID: req.ID, Error: rpcErr}
+	}
+	w.reindexWg.Add(1)
+	go func() {
+		defer w.reindexWg.Done()
+		w.reindex(ctx)
+	}()
+	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"started": true}}
+}
+
+func (d *Daemon) handleAddProject(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	w, rpcErr := d.workerForReq(ctx, req)
+	if rpcErr != nil {
+		return jsonRPCResponse{ID: req.ID, Error: rpcErr}
+	}
+	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"project": w.root(), "opened": true}}
+}
+
+func (d *Daemon) handleRemoveProject(req *jsonRPCRequest) jsonRPCResponse {
+	var p projectParam
+	if len(req.Params) > 0 {
+		_ = json.Unmarshal(req.Params, &p)
+	}
+	if p.Project == "" {
+		return errResp(req, -32602, "project is required")
+	}
+	removed := d.removeWorker(p.Project)
+	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"project": p.Project, "removed": removed}}
+}
+
+func (d *Daemon) handleListProjects(req *jsonRPCRequest) jsonRPCResponse {
+	workers := d.listWorkers()
+	roots := make([]string, 0, len(workers))
+	for _, w := range workers {
+		roots = append(roots, w.root())
+	}
+	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"projects": roots}}
+}
+
+func (d *Daemon) handleStatus(req *jsonRPCRequest) jsonRPCResponse {
+	var p projectParam
+	if len(req.Params) > 0 {
+		_ = json.Unmarshal(req.Params, &p)
+	}
+	if p.Project != "" {
+		w, ok := d.lookupWorker(p.Project)
+		if !ok {
+			return errResp(req, -32603, fmt.Sprintf("project %q is not open", p.Project))
+		}
+		return jsonRPCResponse{ID: req.ID, Result: w.statusState()}
+	}
+	workers := d.listWorkers()
+	states := make([]DaemonState, 0, len(workers))
+	for _, w := range workers {
+		states = append(states, w.statusState())
+	}
+	return jsonRPCResponse{ID: req.ID, Result: map[string]any{
+		"pid":        os.Getpid(),
+		"started_at": d.startedAt,
+		"projects":   states,
+	}}
+}
+
+// handleSwitchBranch rejects in-place branch switching. A worker holds an
+// exclusive lock on a single branch's index directory for its whole lifetime,
+// and its watcher, indexer, and serving paths are all bound to that one open
+// handle. Branch switching is a CLI operation: remove the project from the
+// daemon (or stop it), run `vecgrep branch switch`, then re-add/restart.
+func (d *Daemon) handleSwitchBranch(_ context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	return jsonRPCResponse{
+		ID: req.ID,
+		Error: &jsonRPCError{
+			Code:    -32601,
+			Message: "branch switching is not supported while the daemon holds the project; run `vecgrep branch switch <branch>` (stop the daemon or remove the project first), then re-add it",
+		},
+	}
+}
+
+func errResp(req *jsonRPCRequest, code int, msg string) jsonRPCResponse {
+	return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: code, Message: msg}}
+}
+
+// --- lifecycle helpers ---
+
 func (d *Daemon) acquireLock() error {
-	if err := os.MkdirAll(filepath.Dir(d.lockPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(d.lockPath), 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(d.lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(d.lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("daemon already running (lock file exists: %s)", d.lockPath)
 	}
@@ -400,35 +509,50 @@ func (d *Daemon) acquireLock() error {
 	return nil
 }
 
-// releaseLock removes the lock file.
-func (d *Daemon) releaseLock() error {
-	return os.Remove(d.lockPath)
-}
+func (d *Daemon) releaseLock() error { return os.Remove(d.lockPath) }
 
-// cleanup removes the socket, state, and lock files.
 func (d *Daemon) cleanup() error {
 	_ = os.Remove(d.socketPath)
 	_ = os.Remove(d.statePath)
 	return d.releaseLock()
 }
 
-// writeState writes the daemon state to the state file.
 func (d *Daemon) writeState() error {
-	d.stateMu.Lock()
-	state := d.state
-	d.stateMu.Unlock()
+	d.workersMu.Lock()
+	roots := make([]string, 0, len(d.workers))
+	for _, w := range d.workers {
+		roots = append(roots, w.root())
+	}
+	d.workersMu.Unlock()
 
-	data, err := json.MarshalIndent(state, "", "  ")
+	data, err := json.MarshalIndent(HubState{
+		PID:       os.Getpid(),
+		StartedAt: d.startedAt,
+		Projects:  roots,
+	}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.statePath, data, 0644)
+	return os.WriteFile(d.statePath, data, 0o644)
 }
 
-// ReadState reads the daemon state from the state file (without a running daemon).
+// ReadHubState reads the hub state file from the given global data dir.
+func ReadHubState(dataDir string) (*HubState, error) {
+	data, err := os.ReadFile(filepath.Join(dataDir, "daemon.json"))
+	if err != nil {
+		return nil, err
+	}
+	var st HubState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("parse daemon state: %w", err)
+	}
+	return &st, nil
+}
+
+// ReadState reads a per-project daemon.json (used by callers that inspect a
+// single project's worker state).
 func ReadState(dataDir string) (*DaemonState, error) {
-	path := filepath.Join(dataDir, "daemon.json")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Join(dataDir, "daemon.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -439,13 +563,13 @@ func ReadState(dataDir string) (*DaemonState, error) {
 	return &state, nil
 }
 
-// IsRunning checks if a daemon is running for the given data directory.
+// IsRunning checks if a daemon is listening on the given data directory's socket
+// (the global data dir for the hub).
 func IsRunning(dataDir string) bool {
 	lockPath := filepath.Join(dataDir, "daemon.lock")
 	if _, err := os.Stat(lockPath); err != nil {
 		return false
 	}
-	// Try to ping the socket to confirm it's actually alive
 	socketPath := filepath.Join(dataDir, "daemon.sock")
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
@@ -466,6 +590,7 @@ func IsRunning(dataDir string) bool {
 
 // searchParams holds the parameters for a daemon.search request.
 type searchParams struct {
+	Project     string   `json:"project"`
 	Query       string   `json:"query"`
 	Limit       int      `json:"limit"`
 	Mode        string   `json:"mode"`
@@ -482,84 +607,10 @@ type searchParams struct {
 	Symbol      string   `json:"symbol,omitempty"`
 }
 
-// handleSearch runs a semantic/keyword/hybrid search using the daemon's warm
-// session and returns the results as JSON. This lets CLI clients and MCP
-// servers search through the socket instead of opening their own read-only
-// session, avoiding any file-lock contention.
-func (d *Daemon) handleSearch(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
-	var params searchParams
-	if len(req.Params) > 0 {
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32602, Message: fmt.Sprintf("invalid params: %v", err)}}
-		}
-	}
-	if params.Query == "" {
-		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32602, Message: "query is required"}}
-	}
-	if params.Limit <= 0 {
-		params.Limit = 10
-	}
+// --- periodic background loops (hub-level) ---
 
-	mode := app.ParseSearchMode(params.Mode, d.cfg.Search.DefaultMode)
-
-	searcher := search.NewSearcher(d.session.DB, d.throttled)
-	results, err := searcher.Search(ctx, params.Query, search.SearchOptions{
-		Limit:       params.Limit,
-		Language:    params.Language,
-		Languages:   params.Languages,
-		ChunkType:   params.ChunkType,
-		ChunkTypes:  params.ChunkTypes,
-		FilePattern: params.FilePattern,
-		Directory:   params.Directory,
-		MinLine:     params.MinLine,
-		MaxLine:     params.MaxLine,
-		FilePaths:   params.FilePaths,
-		ProjectRoot: d.session.ProjectRoot,
-		Mode:        mode,
-	})
-	if err != nil {
-		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32603, Message: fmt.Sprintf("search failed: %v", err)}}
-	}
-
-	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"results": results, "mode": string(mode)}}
-}
-
-// handleStats returns index statistics (files, chunks, languages) using the
-// daemon's warm session. This lets MCP servers and CLI clients check the index
-// state through the socket without opening their own read-only session.
-func (d *Daemon) handleStats(req *jsonRPCRequest) jsonRPCResponse {
-	searcher := search.NewSearcher(d.session.DB, d.throttled)
-	stats, err := searcher.GetIndexStats(context.Background())
-	if err != nil {
-		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32603, Message: fmt.Sprintf("stats failed: %v", err)}}
-	}
-	return jsonRPCResponse{ID: req.ID, Result: stats}
-}
-
-// handleSwitchBranch rejects in-place branch switching. The daemon holds an
-// exclusive lock on a single branch's index directory for its whole lifetime,
-// and its watcher, indexer, and serving paths are all bound to that one open
-// handle, so it cannot snapshot the current branch, restore another, and rebind
-// its database without tearing down and reopening all of that.
-//
-// The previous implementation tried to snapshot the current branch via a second
-// read-only session, which deadlocked against the daemon's own exclusive lock
-// (and on the rare path it didn't, it indexed into the wrong branch directory
-// because the open handle was never rebound). Branch switching is a CLI
-// operation: stop the daemon, run `vecgrep branch switch`, then restart it.
-func (d *Daemon) handleSwitchBranch(_ context.Context, req *jsonRPCRequest) jsonRPCResponse {
-	return jsonRPCResponse{
-		ID: req.ID,
-		Error: &jsonRPCError{
-			Code:    -32601,
-			Message: "branch switching is not supported while the daemon is running; stop it (`vecgrep daemon stop`), run `vecgrep branch switch <branch>`, then restart the daemon",
-		},
-	}
-}
-
-// sweepLoop periodically runs fcheap vacuum to clean up orphaned stash
-// entries from the fcheap vault. It is best-effort: if fcheap is not
-// available, it logs and continues.
+// sweepLoop periodically runs fcheap vacuum to clean up orphaned stash entries.
+// Best-effort: if fcheap is not available it logs and returns.
 func (d *Daemon) sweepLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -588,9 +639,8 @@ func (d *Daemon) sweepLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// startLogOffload redirects the daemon's log to a managed file (while keeping
-// stderr, so launchd/nohup logs still work) and launches the offload loop. It
-// is best-effort: on any setup failure it logs and leaves logging on stderr.
+// startLogOffload redirects the hub's log to a managed file (while keeping
+// stderr) and launches the offload loop. Best-effort.
 func (d *Daemon) startLogOffload(ctx context.Context) {
 	interval := parseSweepInterval(d.cfg.Daemon.LogOffloadInterval)
 	if interval <= 0 {
@@ -598,9 +648,7 @@ func (d *Daemon) startLogOffload(ctx context.Context) {
 			d.cfg.Daemon.LogOffloadInterval)
 		return
 	}
-
-	logPath := filepath.Join(d.session.Config.DataDir, "daemon.log")
-	sink, err := newRotatingSink(logPath)
+	sink, err := newRotatingSink(d.logPath)
 	if err != nil {
 		log.Printf("daemon: log offload disabled: %v", err)
 		return
@@ -608,13 +656,11 @@ func (d *Daemon) startLogOffload(ctx context.Context) {
 	d.logSink = sink
 	log.SetOutput(io.MultiWriter(os.Stderr, sink))
 	log.Printf("daemon: log offload enabled (every %s, ttl %q) → %s",
-		interval, d.cfg.Daemon.LogOffloadTTL, logPath)
+		interval, d.cfg.Daemon.LogOffloadTTL, d.logPath)
 
 	go d.logOffloadLoop(ctx, interval)
 }
 
-// logOffloadLoop rotates and offloads the managed log on a fixed interval until
-// the daemon stops.
 func (d *Daemon) logOffloadLoop(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -638,7 +684,6 @@ func (d *Daemon) logOffloadLoop(ctx context.Context, interval time.Duration) {
 
 // offloadLog rotates the managed log and, when fcheap is available, stashes the
 // rotated segment with the configured TTL, deleting the local copy on success.
-// A rotation that finds an empty log is a no-op.
 func (d *Daemon) offloadLog(ctx context.Context, f *snapshot.Fcheap, now time.Time) {
 	if d.logSink == nil {
 		return
@@ -654,10 +699,8 @@ func (d *Daemon) offloadLog(ctx context.Context, f *snapshot.Fcheap, now time.Ti
 	if f == nil || !f.Available() {
 		return // keep the rotated segment locally; nothing else to do
 	}
-
-	label := d.projectLabel()
-	name := fmt.Sprintf("%s-daemon-log-%s", label, filepath.Base(rotated))
-	tags := []string{"daemon-log", label}
+	name := fmt.Sprintf("vecgrep-hub-log-%s", filepath.Base(rotated))
+	tags := []string{"daemon-log", "hub"}
 	if _, err := f.SaveWithTTL(ctx, rotated, name, "vecgrep-daemon", d.cfg.Daemon.LogOffloadTTL, tags); err != nil {
 		log.Printf("daemon: log offload to fcheap failed (kept %s): %v", rotated, err)
 		return
@@ -667,18 +710,8 @@ func (d *Daemon) offloadLog(ctx context.Context, f *snapshot.Fcheap, now time.Ti
 	}
 }
 
-// projectLabel is a stable, non-empty identifier for tagging stashes: the
-// registered project name, falling back to the project root's base name.
-func (d *Daemon) projectLabel() string {
-	if d.session.ProjectName != "" {
-		return d.session.ProjectName
-	}
-	return filepath.Base(d.session.ProjectRoot)
-}
-
-// parseSweepInterval parses the SweepInterval config string into a
-// time.Duration. Returns 0 for empty or invalid values, which disables
-// the periodic sweep.
+// parseSweepInterval parses a duration config string (e.g. "24h", "1h"). It
+// returns 0 for empty or invalid values, which disables the associated loop.
 func parseSweepInterval(s string) time.Duration {
 	if s == "" {
 		return 0

@@ -76,7 +76,7 @@ func startTestDaemon(t *testing.T, handler func(method string, params json.RawMe
 }
 
 func TestDaemonClientAvailableFalseForMissingSocket(t *testing.T) {
-	c := newDaemonClient("/nonexistent/path")
+	c := newDaemonClient("/nonexistent/path", "")
 	if c.available() {
 		t.Fatal("available should be false for missing socket")
 	}
@@ -88,7 +88,7 @@ func TestDaemonClientAvailableTrueForLiveSocket(t *testing.T) {
 	})
 	defer shutdown()
 
-	c := newDaemonClient(filepath.Dir(socketPath))
+	c := newDaemonClient(filepath.Dir(socketPath), "")
 	// The socket is at dir/daemon.sock
 	c.socketPath = socketPath
 

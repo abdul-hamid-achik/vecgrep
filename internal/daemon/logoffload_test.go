@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 )
 
 func TestOffloadLogWithoutFcheapKeepsSegment(t *testing.T) {
@@ -38,18 +36,6 @@ func TestOffloadLogNilSinkIsSafe(t *testing.T) {
 	// Offload disabled (no sink) must be a safe no-op, not a nil-deref panic.
 	d := &Daemon{}
 	d.offloadLog(context.Background(), nil, time.Now())
-}
-
-func TestProjectLabelFallsBackToRootBase(t *testing.T) {
-	withName := &Daemon{session: &app.Session{ProjectName: "named", ProjectRoot: "/tmp/whatever"}}
-	if got := withName.projectLabel(); got != "named" {
-		t.Errorf("projectLabel() = %q, want %q", got, "named")
-	}
-
-	noName := &Daemon{session: &app.Session{ProjectName: "", ProjectRoot: "/tmp/projects/monitor"}}
-	if got := noName.projectLabel(); got != "monitor" {
-		t.Errorf("projectLabel() = %q, want %q", got, "monitor")
-	}
 }
 
 func findRotatedSegment(t *testing.T, dir, livePath string) string {

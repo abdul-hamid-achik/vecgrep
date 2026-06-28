@@ -336,21 +336,28 @@ var daemonCmd = &cobra.Command{
 	Short: "Manage the background indexing daemon",
 	Long: `Manage the background indexing daemon.
 
-The daemon watches files for changes, throttles Ollama embedding
-requests, and serves MCP queries over a unix socket. It is the sole
-writer to the index database — the CLI and MCP server connect to it
-over the socket or fall back to read-only sessions.
+The daemon is a multi-project hub: one process listens on a single global
+unix socket (~/.vecgrep/daemon.sock) and serves many projects, opening each
+lazily on first request. It watches files for changes, throttles Ollama
+embedding requests, and is the sole writer to each project's index — the CLI
+and MCP server connect over the socket or fall back to read-only sessions.
 
 Subcommands:
-  start    Start the daemon (foreground unless --detach)
-  stop     Stop the running daemon
-  status   Show daemon status`,
+  start    Start the daemon hub (foreground)
+  stop     Stop the running daemon hub
+  status   Show daemon hub status and open projects`,
 }
 
 var daemonStartCmd = &cobra.Command{
-	Use:   "start",
-	Short: "Start the background indexing daemon",
-	RunE:  runDaemonStart,
+	Use:   "start [project-root...]",
+	Short: "Start the background indexing daemon hub",
+	Long: `Start the background indexing daemon hub.
+
+The hub serves all projects over one socket. Any project roots given as
+arguments are pre-opened (warmed) at startup; others open lazily on first
+request. With no arguments, the current project (if cwd is inside one) is
+pre-opened.`,
+	RunE: runDaemonStart,
 }
 
 var daemonStopCmd = &cobra.Command{
@@ -899,11 +906,12 @@ func tryDaemonSearch(
 	if err != nil {
 		return false
 	}
-	resolved, err := config.LoadResolved(projectRoot)
+	// The hub listens on one global socket and routes by project root.
+	globalDir, err := config.GetGlobalConfigDir()
 	if err != nil {
 		return false
 	}
-	socketPath := filepath.Join(resolved.Config.DataDir, "daemon.sock")
+	socketPath := filepath.Join(globalDir, "daemon.sock")
 
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
@@ -915,11 +923,13 @@ func tryDaemonSearch(
 	dec := json.NewDecoder(conn)
 
 	params := struct {
+		Project  string `json:"project"`
 		Query    string `json:"query"`
 		Limit    int    `json:"limit"`
 		Mode     string `json:"mode"`
 		Language string `json:"language,omitempty"`
 	}{
+		Project:  projectRoot,
 		Query:    query,
 		Limit:    limit,
 		Mode:     modeStr,
@@ -1972,39 +1982,45 @@ fi
 func runDaemonStart(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	cwd, err := os.Getwd()
+	// Resolve the global data dir and hub-level config (defaults + global + env).
+	globalDir, err := config.GetGlobalConfigDir()
 	if err != nil {
-		return fmt.Errorf("get cwd: %w", err)
+		return fmt.Errorf("resolve global data dir: %w", err)
+	}
+	resolved, err := config.LoadResolved("")
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
 	}
 
-	projectRoot, err := config.FindProjectRootFrom(cwd)
-	if err != nil {
-		return fmt.Errorf("no vecgrep project found: %w; run 'vecgrep init' first", err)
+	if daemon.IsRunning(globalDir) {
+		return fmt.Errorf("daemon hub already running")
 	}
 
-	// Open a writable session (the daemon is the sole writer)
-	session, err := app.OpenSession(ctx, projectRoot)
-	if err != nil {
-		return fmt.Errorf("open session: %w", err)
-	}
-	defer session.Close()
-
-	// Check if a daemon is already running
-	if daemon.IsRunning(session.Config.DataDir) {
-		return fmt.Errorf("daemon already running for this project")
+	// Decide which projects to pre-open: explicit args, else the current
+	// project if cwd is inside one. Others open lazily on first request.
+	var preopen []string
+	if len(args) > 0 {
+		preopen = args
+	} else if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+		if root, rErr := config.FindProjectRootFrom(cwd); rErr == nil {
+			preopen = []string{root}
+		}
 	}
 
 	d, err := daemon.New(daemon.Config{
-		Session:        session,
-		ResolvedConfig: session.Config,
+		ResolvedConfig: resolved.Config,
+		DataDir:        globalDir,
 	})
 	if err != nil {
 		return fmt.Errorf("create daemon: %w", err)
 	}
 
-	fmt.Printf("Starting daemon for project: %s\n", session.ProjectName)
+	fmt.Println("Starting vecgrep daemon hub")
 	fmt.Printf("  Socket: %s\n", d.SocketPath())
 	fmt.Printf("  PID: %d\n", os.Getpid())
+	if len(preopen) > 0 {
+		fmt.Printf("  Pre-opening: %s\n", strings.Join(preopen, ", "))
+	}
 
 	// Handle signals for graceful shutdown
 	go func() {
@@ -2014,69 +2030,26 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 		d.Stop()
 	}()
 
-	return d.Start(ctx)
+	return d.Start(ctx, preopen...)
 }
 
 func runDaemonStop(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	globalDir, err := config.GetGlobalConfigDir()
 	if err != nil {
-		return fmt.Errorf("get cwd: %w", err)
+		return fmt.Errorf("resolve global data dir: %w", err)
 	}
 
-	projectRoot, err := config.FindProjectRootFrom(cwd)
-	if err != nil {
-		return fmt.Errorf("no vecgrep project found: %w", err)
-	}
-
-	// Load config to get data dir
-	resolved, err := config.LoadResolved(projectRoot)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
-	dataDir := resolved.Config.DataDir
-
-	// Check if the daemon is running
-	if !daemon.IsRunning(dataDir) {
-		fmt.Println("No daemon running for this project.")
+	if !daemon.IsRunning(globalDir) {
+		fmt.Println("No daemon hub running.")
 		return nil
 	}
 
-	// Send stop via socket
-	socketPath := filepath.Join(dataDir, "daemon.sock")
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		return fmt.Errorf("connect to daemon socket: %w", err)
-	}
-	defer conn.Close()
-
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-
-	if err := enc.Encode(struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Method  string          `json:"method"`
-	}{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage("1"),
-		Method:  "daemon.ping",
-	}); err != nil {
-		return fmt.Errorf("send stop: %w", err)
-	}
-
-	// Read response (ping confirms it's alive, then it will shut down)
-	var resp json.RawMessage
-	_ = dec.Decode(&resp)
-
-	// TODO: send a proper "daemon.stop" method once the handler supports it.
-	// For now, the signal handler in the daemon process handles SIGTERM.
-	// Kill via PID from state file.
-	state, err := daemon.ReadState(dataDir)
+	// The hub process handles SIGTERM for graceful shutdown. Read its PID from
+	// the hub state file and signal it.
+	state, err := daemon.ReadHubState(globalDir)
 	if err != nil {
 		return fmt.Errorf("read daemon state: %w", err)
 	}
-
 	if state.PID > 0 {
 		p, err := os.FindProcess(state.PID)
 		if err != nil {
@@ -2087,52 +2060,35 @@ func runDaemonStop(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Println("Daemon stopped.")
+	fmt.Println("Daemon hub stopped.")
 	return nil
 }
 
 func runDaemonStatus(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	globalDir, err := config.GetGlobalConfigDir()
 	if err != nil {
-		return fmt.Errorf("get cwd: %w", err)
+		return fmt.Errorf("resolve global data dir: %w", err)
 	}
 
-	projectRoot, err := config.FindProjectRootFrom(cwd)
-	if err != nil {
-		return fmt.Errorf("no vecgrep project found: %w", err)
+	if !daemon.IsRunning(globalDir) {
+		fmt.Println("Daemon hub: not running")
+		return nil
 	}
 
-	resolved, err := config.LoadResolved(projectRoot)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
-	dataDir := resolved.Config.DataDir
-
-	running := daemon.IsRunning(dataDir)
-	if running {
-		fmt.Println("Daemon: running")
-	} else {
-		fmt.Println("Daemon: not running")
-	}
-
-	// Read state file (may exist even if daemon is stopped)
-	state, err := daemon.ReadState(dataDir)
+	fmt.Println("Daemon hub: running")
+	state, err := daemon.ReadHubState(globalDir)
 	if err == nil && state != nil {
 		fmt.Printf("  PID: %d\n", state.PID)
-		fmt.Printf("  Project: %s\n", state.ProjectName)
 		fmt.Printf("  Started: %s\n", state.StartedAt.Format(time.RFC3339))
-		fmt.Printf("  Last activity: %s\n", state.LastActivity.Format(time.RFC3339))
-		if state.ActiveBranch != "" {
-			fmt.Printf("  Active branch: %s\n", state.ActiveBranch)
+		fmt.Printf("  Socket: %s\n", filepath.Join(globalDir, "daemon.sock"))
+		if len(state.Projects) == 0 {
+			fmt.Println("  Projects: (none open — they open lazily on first request)")
+		} else {
+			fmt.Printf("  Projects (%d):\n", len(state.Projects))
+			for _, p := range state.Projects {
+				fmt.Printf("    - %s\n", p)
+			}
 		}
-		if !state.LastReindex.IsZero() {
-			fmt.Printf("  Last reindex: %s\n", state.LastReindex.Format(time.RFC3339))
-		}
-	}
-
-	if running {
-		fmt.Printf("  Socket: %s\n", filepath.Join(dataDir, "daemon.sock"))
 	}
 
 	return nil

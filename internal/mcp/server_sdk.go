@@ -213,7 +213,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 			}
 			if provider != nil {
 				s.session = newMCPSession(resolved.Config, cfg.ProjectRoot, provider)
-				s.daemon = newDaemonClient(resolved.Config.DataDir)
+				s.daemon = newDaemonClient(hubDataDir(), cfg.ProjectRoot)
 				s.initialized = true
 			}
 		}
@@ -649,7 +649,7 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	s.stateMu.Lock()
 	oldSession := s.session
 	s.session = newSession
-	s.daemon = newDaemonClient(cfg.DataDir)
+	s.daemon = newDaemonClient(hubDataDir(), projectPath)
 	s.projectRoot = projectPath
 	s.initialized = true
 	s.codemap = NewCodemapClient(cfg.Codemap)

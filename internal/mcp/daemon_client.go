@@ -7,22 +7,39 @@ import (
 	"net"
 	"path/filepath"
 	"time"
+
+	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 )
 
-// daemonClient talks to a running vecgrep daemon over its unix socket.
-// It is used to route read operations (search, status, similar, batch_search)
-// through the daemon's warm writable session, avoiding any file-lock contention.
-// When the daemon is not running, the MCP server falls back to a read-only
-// database session.
-type daemonClient struct {
-	socketPath string
+// hubDataDir returns the global data dir (~/.vecgrep) where the daemon hub's
+// socket lives. On error it returns "" — daemonClient.available() then fails
+// fast and callers fall back to a read-only session.
+func hubDataDir() string {
+	dir, err := config.GetGlobalConfigDir()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
-// newDaemonClient creates a daemon client for the given data directory.
-// The socket path is dataDir/daemon.sock.
-func newDaemonClient(dataDir string) *daemonClient {
+// daemonClient talks to the vecgrep daemon hub over its global unix socket.
+// It is used to route read operations (search, status, similar, batch_search)
+// through the daemon's warm writable session, avoiding any file-lock contention.
+// The hub serves many projects, so every request carries the project root; the
+// hub opens that project lazily on first request. When the daemon is not
+// running, the MCP server falls back to a read-only database session.
+type daemonClient struct {
+	socketPath  string
+	projectRoot string
+}
+
+// newDaemonClient creates a daemon client for the hub at globalDataDir
+// (~/.vecgrep), scoped to projectRoot. The socket path is
+// globalDataDir/daemon.sock.
+func newDaemonClient(globalDataDir, projectRoot string) *daemonClient {
 	return &daemonClient{
-		socketPath: filepath.Join(dataDir, "daemon.sock"),
+		socketPath:  filepath.Join(globalDataDir, "daemon.sock"),
+		projectRoot: projectRoot,
 	}
 }
 
@@ -108,6 +125,7 @@ func (c *daemonClient) call(ctx context.Context, method string, params any) (jso
 
 // searchParams holds the parameters for a daemon.search request.
 type daemonSearchParams struct {
+	Project     string   `json:"project,omitempty"`
 	Query       string   `json:"query"`
 	Limit       int      `json:"limit"`
 	Mode        string   `json:"mode"`
@@ -125,18 +143,20 @@ type daemonSearchParams struct {
 }
 
 // search sends a daemon.search request and returns the raw JSON result.
-// The result contains {"results": [...], "mode": "..."}.
+// The result contains {"results": [...], "mode": "..."}. The client's project
+// root is injected so the hub routes to (and lazily opens) the right project.
 func (c *daemonClient) search(ctx context.Context, params daemonSearchParams) (json.RawMessage, error) {
+	params.Project = c.projectRoot
 	return c.call(ctx, "daemon.search", params)
 }
 
 // reindex sends a daemon.reindex request (async — returns immediately).
 func (c *daemonClient) reindex(ctx context.Context) error {
-	_, err := c.call(ctx, "daemon.reindex", map[string]any{})
+	_, err := c.call(ctx, "daemon.reindex", map[string]any{"project": c.projectRoot})
 	return err
 }
 
 // stats sends a daemon.stats request and returns index statistics.
 func (c *daemonClient) stats(ctx context.Context) (json.RawMessage, error) {
-	return c.call(ctx, "daemon.stats", map[string]any{})
+	return c.call(ctx, "daemon.stats", map[string]any{"project": c.projectRoot})
 }
