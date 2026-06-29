@@ -294,7 +294,7 @@ func TestReadOnlySetsStatusAndHeader(t *testing.T) {
 			ProjectRoot: "/tmp/proj",
 			ProjectName: "proj",
 		},
-		status:  &app.StatusResponse{ProjectRoot: "/tmp/proj", Stats: map[string]int64{"files": 4, "chunks": 9}},
+		status:   &app.StatusResponse{ProjectRoot: "/tmp/proj", Stats: map[string]int64{"files": 4, "chunks": 9}},
 		readOnly: true,
 	})
 	m := updated.(Model)

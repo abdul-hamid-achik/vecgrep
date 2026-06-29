@@ -27,6 +27,7 @@ type reindexSyncResult struct {
 	Duration       time.Duration `json:"duration"`
 	Errors         []string      `json:"errors"`
 }
+
 const reindexSyncReadTimeout = 30 * time.Minute
 
 // reindexSyncClient wire types (kept local; the daemon's jsonRPCRequest/
@@ -42,7 +43,7 @@ type rpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
 	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *rpcError        `json:"error,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
 }
 
 type rpcError struct {

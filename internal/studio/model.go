@@ -93,9 +93,9 @@ type Model struct {
 }
 
 type sessionLoadedMsg struct {
-	session *app.Session
-	status  *app.StatusResponse
-	err     error
+	session  *app.Session
+	status   *app.StatusResponse
+	err      error
 	readOnly bool
 }
 
