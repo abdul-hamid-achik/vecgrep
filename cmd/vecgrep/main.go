@@ -1019,7 +1019,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// running daemon over its socket — so it never holds a file lock while
 	// idle. Opening a writable session up front would hold an exclusive lock
 	// for the entire lifetime of the server, blocking `vecgrep daemon start`
-	// and other readers with "database file is locked by another process".
+	// (a second writer) with "database file is locked by another process".
+	// (Read-only opens are lock-free since veclite v0.22.0, so an idle server
+	// no longer blocks readers either.)
 	projectRoot := ""
 	if root, rootErr := config.GetProjectRoot(); rootErr == nil {
 		projectRoot = root

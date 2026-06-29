@@ -117,7 +117,7 @@ func TestMCPSessionLeaseBlocksWriteUntilReleased(t *testing.T) {
 }
 
 func TestMCPSessionReleaseIfIdleEvictsHandle(t *testing.T) {
-	sess, dir := newTestMCPSession(t, true)
+	sess, _ := newTestMCPSession(t, true)
 	defer func() { _ = sess.close() }()
 
 	sess.idleThreshold = 20 * time.Millisecond
@@ -125,10 +125,9 @@ func TestMCPSessionReleaseIfIdleEvictsHandle(t *testing.T) {
 	// Open and release a lease so the handle is cached but idle.
 	openRO(t, sess)
 
-	lockPath := db.VecLitePath(dir) + ".lock"
-	if _, err := os.Stat(lockPath); err != nil {
-		t.Fatalf("expected lock file while RO handle is open: %v", err)
-	}
+	// Read-only opens are lock-free (veclite v0.22.0+), so no .lock file is
+	// left on disk while the RO handle is cached — a writer is never blocked
+	// by it. Eviction is now about memory hygiene, not releasing a shared lock.
 
 	// Not idle long enough yet.
 	if sess.releaseIfIdle() {
@@ -141,8 +140,9 @@ func TestMCPSessionReleaseIfIdleEvictsHandle(t *testing.T) {
 		t.Fatal("releaseIfIdle should have evicted the idle handle")
 	}
 
-	// A fresh writer can now acquire the exclusive lock (the shared lock was
-	// released) — this is what unblocks `vecgrep daemon start`.
+	// After eviction the cached RO handle is gone; a writer opens cleanly.
+	// (Lock-free reads mean the writer was never blocked by the RO handle in
+	// the first place — this just confirms eviction + write still work.)
 	rw, err := sess.readWriteDB()
 	if err != nil {
 		t.Fatalf("readWriteDB after idle eviction: %v", err)
