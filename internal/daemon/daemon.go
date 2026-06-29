@@ -335,6 +335,8 @@ func (d *Daemon) handleRequest(ctx context.Context, req *jsonRPCRequest) jsonRPC
 		return d.handleRemoveProject(req)
 	case "daemon.reindex":
 		return d.handleReindex(ctx, req)
+	case "daemon.reindex_sync":
+		return d.handleReindexSync(ctx, req)
 	case "daemon.switchBranch":
 		return d.handleSwitchBranch(ctx, req)
 	case "daemon.search":
@@ -420,6 +422,44 @@ func (d *Daemon) handleReindex(ctx context.Context, req *jsonRPCRequest) jsonRPC
 		w.reindex(ctx)
 	}()
 	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"started": true}}
+}
+
+// reindexSyncParams are the parameters for a daemon.reindex_sync request.
+type reindexSyncParams struct {
+	Project string `json:"project"`
+	Full    bool   `json:"full"`
+}
+
+// handleReindexSync runs an incremental (or full) reindex synchronously and
+// returns the index.IndexResult, so a CLI `vecgrep index` that finds the
+// daemon running can delegate and render the same summary as a local index
+// instead of opening a second write handle (which would collide with the
+// daemon's exclusive lock). Tracked by reindexWg so close() drains it.
+func (d *Daemon) handleReindexSync(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
+	var p reindexSyncParams
+	if len(req.Params) > 0 {
+		_ = json.Unmarshal(req.Params, &p)
+	}
+	w, rpcErr := d.workerForReq(ctx, req)
+	if rpcErr != nil {
+		return jsonRPCResponse{ID: req.ID, Error: rpcErr}
+	}
+	w.reindexWg.Add(1)
+	defer w.reindexWg.Done()
+	result, err := w.reindexSync(ctx, p.Full)
+	if err != nil {
+		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32000, Message: err.Error()}}
+	}
+	wire := reindexSyncResult{
+		FilesProcessed: result.FilesProcessed,
+		FilesSkipped:   result.FilesSkipped,
+		ChunksCreated:  result.ChunksCreated,
+		Duration:       result.Duration,
+	}
+	for _, e := range result.Errors {
+		wire.Errors = append(wire.Errors, e.Error())
+	}
+	return jsonRPCResponse{ID: req.ID, Result: wire}
 }
 
 func (d *Daemon) handleAddProject(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {

@@ -27,6 +27,11 @@ type WatcherConfig struct {
 
 	// Recursive enables recursive directory watching.
 	Recursive bool
+
+	// Locker, if non-nil, is held around each auto-reindex callback so watcher
+	// reindexes don't race an explicit reindex on the same indexer (e.g. a
+	// daemon's synchronous reindex RPC). Optional.
+	Locker sync.Locker
 }
 
 // DefaultWatcherConfig returns sensible defaults for the watcher.
@@ -359,6 +364,11 @@ func WatchAndIndex(ctx context.Context, indexer *Indexer, rootPath string, cfg W
 			}
 		}
 
+		// Serialize against explicit reindexes on the same indexer (e.g. a
+		// daemon's synchronous reindex RPC) when a Locker is configured.
+		if cfg.Locker != nil {
+			cfg.Locker.Lock()
+		}
 		// Index changed files
 		if len(toIndex) > 0 {
 			paths := make([]string, 0, len(toIndex))
@@ -383,6 +393,9 @@ func WatchAndIndex(ctx context.Context, indexer *Indexer, rootPath string, cfg W
 					log.Printf("auto-reindex: delete removed file %s: %v", relPath, err)
 				}
 			}
+		}
+		if cfg.Locker != nil {
+			cfg.Locker.Unlock()
 		}
 	})
 

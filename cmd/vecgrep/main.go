@@ -638,6 +638,14 @@ func runInitLocal(cwd string, force bool) error {
 }
 
 func runIndex(cmd *cobra.Command, args []string) error {
+	// If the daemon hub is running, it owns the exclusive write lock for every
+	// open project. Delegate the reindex to it over the socket instead of
+	// opening a second write session (which would collide with the daemon's
+	// lock — the "database file is locked by another process" error). --dry-run
+	// is a read-only preview, so it uses a read-only session instead.
+	if gdir, err := config.GetGlobalConfigDir(); err == nil && daemon.IsRunning(gdir) {
+		return indexViaDaemon(cmd, args, gdir)
+	}
 	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
 		if errors.Is(err, veclite.ErrFileLocked) || strings.Contains(strings.ToLower(err.Error()), "locked") {
@@ -757,6 +765,73 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	return nil
+}
+
+// indexViaDaemon handles `vecgrep index` when the daemon hub is running. The
+// real reindex is delegated to the daemon over its control socket (so the CLI
+// never opens a second write handle that would collide with the daemon's
+// exclusive lock); --dry-run uses a read-only session for the preview. Forwards
+// --full. --ignore (additional ignores) is NOT forwarded — the daemon's
+// configured ignores apply; stop + restart the daemon to change them.
+func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) error {
+	projectRoot, err := config.GetProjectRoot()
+	if err != nil {
+		return fmt.Errorf("resolve project root: %w", err)
+	}
+	verbose, _ := rootCmd.PersistentFlags().GetBool("verbose")
+
+	if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
+		session, err := app.OpenReadOnlySession(cmd.Context(), "")
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+		service := app.NewService(session)
+		preview, err := service.DryRunPreview(cmd.Context())
+		if err != nil {
+			return fmt.Errorf("dry-run failed: %w", err)
+		}
+		fmt.Printf("Dry run for %s\n", session.ProjectRoot)
+		fmt.Printf("  New files:       %d\n", preview.NewFiles)
+		fmt.Printf("  Modified files:  %d\n", preview.ModifiedFiles)
+		fmt.Printf("  Deleted files:   %d\n", preview.DeletedFiles)
+		fmt.Printf("  Files to embed:  %d\n", preview.FilesToEmbed)
+		fmt.Printf("  Estimated chunks: %d\n", preview.EstimatedChunks)
+		if preview.TotalPending == 0 {
+			fmt.Println("\nIndex is up to date — nothing to do.")
+		} else {
+			fmt.Printf("\nRun 'vecgrep index' to update the index.\n")
+		}
+		return nil
+	}
+
+	fullReindex, _ := cmd.Flags().GetBool("full")
+	fmt.Printf("Indexing %s (via daemon)...\n", projectRoot)
+	if fullReindex {
+		fmt.Println("  Mode: full re-index")
+	} else {
+		fmt.Println("  Mode: incremental")
+	}
+
+	result, err := daemon.ReindexSync(cmd.Context(), globalDataDir, projectRoot, fullReindex)
+	if err != nil {
+		return fmt.Errorf("delegate to daemon: %w", err)
+	}
+
+	fmt.Printf("\nIndexing complete (via daemon):\n")
+	fmt.Printf("  Files processed: %d\n", result.FilesProcessed)
+	fmt.Printf("  Files skipped (unchanged): %d\n", result.FilesSkipped)
+	fmt.Printf("  Chunks created: %d\n", result.ChunksCreated)
+	fmt.Printf("  Duration: %s\n", result.Duration.Round(100*1000000))
+	if len(result.Errors) > 0 {
+		fmt.Printf("\nWarnings: %d\n", len(result.Errors))
+		if verbose {
+			for _, e := range result.Errors {
+				fmt.Printf("  - %v\n", e)
+			}
+		}
+	}
 	return nil
 }
 

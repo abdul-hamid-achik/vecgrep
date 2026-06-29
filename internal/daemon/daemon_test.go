@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -152,4 +154,125 @@ func TestParseSweepInterval(t *testing.T) {
 			t.Errorf("parseSweepInterval(%q) = %v, want %v", tc.input, got, tc.want)
 		}
 	}
+}
+
+// TestReindexSyncWireRoundTrip verifies the daemon→client wire shape for a
+// daemon.reindex_sync result round-trips through JSON (errors stringified,
+// duration preserved), so the CLI decodes a faithful IndexResult.
+func TestReindexSyncWireRoundTrip(t *testing.T) {
+	original := reindexSyncResult{
+		FilesProcessed: 12,
+		FilesSkipped:   3,
+		ChunksCreated:  40,
+		Duration:       1500 * time.Millisecond,
+		Errors:         []string{"boom", "warn"},
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var loaded reindexSyncResult
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if loaded.FilesProcessed != original.FilesProcessed || loaded.ChunksCreated != original.ChunksCreated ||
+		loaded.Duration != original.Duration || len(loaded.Errors) != 2 {
+		t.Fatalf("round-trip mismatch: %+v", loaded)
+	}
+}
+
+// TestReindexSyncClientNoDaemon verifies the client errors clearly when no
+// daemon is listening (the CLI falls back to a local index in that case, but
+// if it ever calls this with a stale IsRunning, it must not hang).
+func TestReindexSyncClientNoDaemon(t *testing.T) {
+
+	tmp := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := ReindexSync(ctx, tmp, "/some/project", false); err == nil {
+		t.Fatal("ReindexSync with no daemon should error")
+	}
+}
+
+// TestReindexSyncClientDecodesResult starts a stub unix-socket server that
+// answers daemon.reindex_sync with a canned result and an error envelope, and
+// verifies the client decodes the IndexResult and surfaces the daemon error.
+func TestReindexSyncClientDecodesResult(t *testing.T) {
+	// A short /tmp-based dir keeps the unix socket path within the OS limit.
+	base := "/tmp"
+	if _, err := os.Stat(base); err != nil {
+		base = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(base, "vecgsync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	sock := filepath.Join(dir, "daemon.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callCount atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handleStubReindex(c, &callCount)
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// First call: canned success result.
+	res, err := ReindexSync(ctx, dir, "/proj", true)
+	if err != nil {
+		t.Fatalf("ReindexSync success: %v", err)
+	}
+	if res.FilesProcessed != 7 || res.ChunksCreated != 19 {
+		t.Errorf("decoded result = %+v, want FilesProcessed=7 ChunksCreated=19", res)
+	}
+	if len(res.Errors) != 1 || res.Errors[0].Error() != "stub warning" {
+		t.Errorf("decoded errors = %v, want [stub warning]", res.Errors)
+	}
+
+	// Second call: the stub returns a JSON-RPC error envelope.
+	_, err = ReindexSync(ctx, dir, "/proj", false)
+	if err == nil || !strings.Contains(err.Error(), "stub failure") {
+		t.Fatalf("expected 'stub failure' error, got %v", err)
+	}
+}
+
+// handleStubReindex answers one request per connection: the first connection
+// gets a success result, the second gets a JSON-RPC error envelope.
+func handleStubReindex(c net.Conn, count *atomic.Int32) {
+	defer c.Close()
+	dec := json.NewDecoder(c)
+	enc := json.NewEncoder(c)
+	var req rpcRequestExternal
+	if err := dec.Decode(&req); err != nil {
+		return
+	}
+	if count.Add(1) == 1 {
+		out := reindexSyncResult{FilesProcessed: 7, ChunksCreated: 19, Duration: 42 * time.Millisecond, Errors: []string{"stub warning"}}
+		resultJSON, _ := json.Marshal(out)
+		_ = enc.Encode(map[string]any{
+			"jsonrpc": "2.0", "id": "1", "result": json.RawMessage(resultJSON),
+		})
+		return
+	}
+	_ = enc.Encode(map[string]any{
+		"jsonrpc": "2.0", "id": "1",
+		"error": map[string]any{"code": -32000, "message": "stub failure"},
+	})
+}
+
+// rpcRequestExternal mirrors the wire request shape for the stub server.
+type rpcRequestExternal struct {
+	Method string `json:"method"`
 }

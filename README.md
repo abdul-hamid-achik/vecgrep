@@ -147,6 +147,15 @@ Options:
 - `--full` - Force full re-index (ignores file hashes)
 - `--ignore` - Additional patterns to ignore
 - `-v, --verbose` - Show detailed progress
+- `--no-progress` - Disable the live progress bar
+
+When a background daemon hub is running, `vecgrep index` **delegates** the
+reindex to it over the daemon's control socket instead of opening a second
+write handle (which would collide with the daemon's exclusive lock). The
+output is the normal "Indexing complete" summary, annotated `(via daemon)`,
+and forwards `--full`. `--ignore` (additional ignores) is not forwarded — the
+daemon's configured ignores apply; stop + restart the daemon to change them.
+`--dry-run` uses a read-only session for the preview.
 
 vecgrep records an embedding profile in VecLite collection metadata after a successful first index or full re-index. Existing projects with a legacy `embedding_profile.json` sidecar are migrated transparently on the next open: the sidecar is read, written into collection metadata, and removed. If the active embedding provider, model, dimensions, distance, or chunker profile no longer matches the indexed vectors, incremental indexing and vector search fail with rebuild guidance. Run `vecgrep index --full` or `vecgrep reset --force` to refresh stale vectors.
 
@@ -403,7 +412,7 @@ vector:
 
 ### Vector Backend
 
-vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.17.0 as its vector storage backend with:
+vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.22.1 as its vector storage backend with:
 - **Cosine similarity** - Returns scores from 0.0 (orthogonal) to 1.0 (identical)
 - **HNSW indexing** - Fast approximate nearest neighbor search
 - **Native filtering** - Glob patterns, prefix matching, range queries

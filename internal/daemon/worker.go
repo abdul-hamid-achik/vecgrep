@@ -39,6 +39,11 @@ type projectWorker struct {
 	// reindexWg tracks in-flight reindexes so close() can drain them before
 	// closing the DB and throttled provider.
 	reindexWg sync.WaitGroup
+
+	// reindexMu serializes explicit reindexes (async + sync) against the
+	// watcher's auto-reindex on the same indexer, so concurrent runs don't
+	// race the indexer / DB state. The watcher holds it via WatcherConfig.Locker.
+	reindexMu sync.Mutex
 }
 
 // newProjectWorker opens a writable session for root and starts its file
@@ -102,6 +107,7 @@ func newProjectWorker(ctx context.Context, root string) (*projectWorker, error) 
 	if cfg.Daemon.Debounce > 0 {
 		watcherCfg := index.DefaultWatcherConfig()
 		watcherCfg.Debounce = time.Duration(cfg.Daemon.Debounce) * time.Millisecond
+		watcherCfg.Locker = &w.reindexMu // serialize watcher vs explicit reindex
 		watcher, werr := index.WatchAndIndex(ctx, indexer, session.ProjectRoot, watcherCfg)
 		if werr != nil {
 			throttled.Close()
@@ -144,7 +150,10 @@ func (w *projectWorker) writeState() error {
 // reindex runs a full reindex of the project. It is tracked by reindexWg so
 // close() can wait for it to finish before tearing the worker down.
 func (w *projectWorker) reindex(ctx context.Context) {
-	if _, err := w.indexer.Index(ctx, w.session.ProjectRoot); err != nil {
+	w.reindexMu.Lock()
+	_, err := w.indexer.Index(ctx, w.session.ProjectRoot)
+	w.reindexMu.Unlock()
+	if err != nil {
 		log.Printf("daemon: reindex %s failed: %v", w.root(), err)
 		return
 	}
@@ -152,6 +161,32 @@ func (w *projectWorker) reindex(ctx context.Context) {
 	w.state.LastReindex = time.Now()
 	w.stateMu.Unlock()
 	_ = w.writeState()
+}
+
+// reindexSync runs an incremental or full reindex synchronously and returns
+// the result, so a CLI `vecgrep index` that finds the daemon running can
+// delegate and render the same summary as a local index (instead of opening a
+// second write handle that would collide with the daemon's exclusive lock).
+// Holds reindexMu to serialize against the watcher's auto-reindex. The caller
+// must track the run via reindexWg so close() drains it.
+func (w *projectWorker) reindexSync(ctx context.Context, full bool) (*index.IndexResult, error) {
+	w.reindexMu.Lock()
+	defer w.reindexMu.Unlock()
+	var result *index.IndexResult
+	var err error
+	if full {
+		result, err = w.indexer.ReindexAll(ctx, w.session.ProjectRoot)
+	} else {
+		result, err = w.indexer.Index(ctx, w.session.ProjectRoot)
+	}
+	if err != nil {
+		return nil, err
+	}
+	w.stateMu.Lock()
+	w.state.LastReindex = time.Now()
+	w.stateMu.Unlock()
+	_ = w.writeState()
+	return result, nil
 }
 
 // search runs a search against the worker's warm session and returns the
