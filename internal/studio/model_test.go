@@ -267,6 +267,53 @@ func TestModelRenderUnavailableProjectOmitsResetHintForLiveLock(t *testing.T) {
 	}
 }
 
+func TestIsLockHeldByDaemon(t *testing.T) {
+	// No daemon running in the test env, so even a genuine lock-error string
+	// must report false (the studio only falls back to read-only when the
+	// daemon is actually the holder).
+	if isLockHeldByDaemon(nil) {
+		t.Fatal("nil error should not be a daemon lock")
+	}
+	if isLockHeldByDaemon(errString("open database: not locked at all")) {
+		t.Fatal("non-lock error should not be a daemon lock")
+	}
+	// A lock error with no daemon running → false (don't fall back to RO for
+	// a non-daemon holder; surface the error instead).
+	if isLockHeldByDaemon(errString("veclite: database file is locked by PID 123 (locked 1h ago)")) {
+		t.Fatal("lock error with no daemon running should not trigger RO fallback")
+	}
+}
+
+func TestReadOnlySetsStatusAndHeader(t *testing.T) {
+	model := NewModel(context.Background(), "")
+	updated, _ := model.Update(sessionLoadedMsg{
+		session: &app.Session{
+			Config: &config.Config{
+				Search: config.SearchConfig{DefaultMode: "hybrid"},
+			},
+			ProjectRoot: "/tmp/proj",
+			ProjectName: "proj",
+		},
+		status:  &app.StatusResponse{ProjectRoot: "/tmp/proj", Stats: map[string]int64{"files": 4, "chunks": 9}},
+		readOnly: true,
+	})
+	m := updated.(Model)
+	m.width = 120
+	if !m.readOnly {
+		t.Fatal("readOnly should be set after a readOnly session load")
+	}
+	if !contains(m.statusMessage, "read-only") {
+		t.Fatalf("status should mention read-only, got %q", m.statusMessage)
+	}
+	if !contains(m.renderHeader(), "read-only") {
+		t.Fatalf("header should show read-only indicator, got %q", m.renderHeader())
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
 func TestModelRenderUnavailableProjectOffersGlobalRegistration(t *testing.T) {
 	m := NewModel(context.Background(), "")
 

@@ -15,6 +15,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/abdul-hamid-achik/vecgrep/internal/app"
+	"github.com/abdul-hamid-achik/vecgrep/internal/config"
+	"github.com/abdul-hamid-achik/vecgrep/internal/daemon"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
 )
@@ -87,12 +89,14 @@ type Model struct {
 	statusMessage string
 	errMessage    string
 	confirm       confirmAction
+	readOnly      bool // true when opened read-only because the daemon owns the write lock
 }
 
 type sessionLoadedMsg struct {
 	session *app.Session
 	status  *app.StatusResponse
 	err     error
+	readOnly bool
 }
 
 type statusLoadedMsg struct {
@@ -185,11 +189,24 @@ func newTextInput(prompt, placeholder string, width int) textinput.Model {
 func (m Model) Init() tea.Cmd {
 	return loadSessionCmd(m.ctx, m.startDir)
 }
-
 func loadSessionCmd(ctx context.Context, startDir string) tea.Cmd {
 	return func() tea.Msg {
 		session, err := app.OpenSession(ctx, startDir)
 		if err != nil {
+			// If the write lock is held by a running daemon, fall back to a
+			// read-only session so the studio can still browse/search. Writes
+			// (reindex/reset/delete) are then routed to the daemon or blocked.
+			if isLockHeldByDaemon(err) {
+				if roSession, roErr := app.OpenReadOnlySession(ctx, startDir); roErr == nil {
+					roService := app.NewService(roSession)
+					status, statusErr := roService.Status(ctx)
+					if statusErr != nil {
+						_ = roSession.Close()
+						return sessionLoadedMsg{err: statusErr}
+					}
+					return sessionLoadedMsg{session: roSession, status: status, readOnly: true}
+				}
+			}
 			return sessionLoadedMsg{err: err}
 		}
 		service := app.NewService(session)
@@ -200,6 +217,22 @@ func loadSessionCmd(ctx context.Context, startDir string) tea.Cmd {
 		}
 		return sessionLoadedMsg{session: session, status: status}
 	}
+}
+
+// isLockHeldByDaemon reports whether the open error is a veclite lock error
+// AND a daemon hub is currently running (so a read-only fallback is safe and
+// writes can be delegated to the daemon).
+func isLockHeldByDaemon(err error) bool {
+	if err == nil {
+		return false
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "locked") {
+		return false
+	}
+	if dir, derr := config.GetGlobalConfigDir(); derr == nil {
+		return daemon.IsRunning(dir)
+	}
+	return false
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -216,7 +249,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.service = app.NewService(msg.session)
 		m.status = msg.status
 		m.mode = app.ParseSearchMode("", msg.session.Config.Search.DefaultMode)
-		m.statusMessage = "ready"
+		m.readOnly = msg.readOnly
+		if msg.readOnly {
+			m.statusMessage = "ready (read-only — daemon owns the index)"
+		} else {
+			m.statusMessage = "ready"
+		}
 		return m, nil
 
 	case statusLoadedMsg:
@@ -255,6 +293,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			mode = "reindexed"
 		}
 		m.statusMessage = fmt.Sprintf("%s %d files, %d skipped, %d chunks in %s", mode, msg.result.FilesProcessed, msg.result.FilesSkipped, msg.result.ChunksCreated, msg.result.Duration.Round(time.Millisecond))
+		m.errMessage = ""
+		return m, m.reloadStatusCmd()
+
+	case daemonReindexDoneMsg:
+		m.indexing = false
+		if msg.err != nil {
+			m.errMessage = fmt.Sprintf("daemon reindex failed: %v", msg.err)
+			return m, nil
+		}
+		mode := "indexed"
+		if msg.full {
+			mode = "reindexed"
+		}
+		m.statusMessage = fmt.Sprintf("%s via daemon: %d files, %d skipped, %d chunks in %s", mode, msg.result.FilesProcessed, msg.result.FilesSkipped, msg.result.ChunksCreated, msg.result.Duration.Round(time.Millisecond))
 		m.errMessage = ""
 		return m, m.reloadStatusCmd()
 
@@ -474,11 +526,19 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		m.confirm = confirmFullReindex
 		return nil, true
 	case "x":
+		if m.readOnly {
+			m.statusMessage = "can't delete in read-only mode — stop the daemon (`vecgrep daemon stop`) first"
+			return nil, true
+		}
 		if len(m.results) > 0 {
 			m.confirm = confirmDelete
 			return nil, true
 		}
 	case "!":
+		if m.readOnly {
+			m.statusMessage = "can't reset in read-only mode — stop the daemon (`vecgrep daemon stop`) first"
+			return nil, true
+		}
 		m.confirm = confirmReset
 		return nil, true
 	case "o":
@@ -619,6 +679,12 @@ func (m *Model) indexCmd(full bool) tea.Cmd {
 	if m.service == nil {
 		return nil
 	}
+	// Read-only mode (daemon owns the write lock): delegate the reindex to the
+	// daemon over its socket instead of calling service.Index on a read-only
+	// session (which can't write).
+	if m.readOnly {
+		return m.daemonReindexCmd(full)
+	}
 	m.indexing = true
 	start := time.Now()
 	m.indexProgress = &index.Progress{StartTime: start}
@@ -642,6 +708,38 @@ func (m *Model) indexCmd(full bool) tea.Cmd {
 		return indexDoneMsg{result: result, err: err, full: full}
 	}
 	return tea.Batch(waitForIndexProgressCmd(progressCh), indexTask)
+}
+
+// daemonReindexDoneMsg is returned by daemonReindexCmd when the daemon finishes
+// the delegated reindex (or it fails / the daemon is unreachable).
+type daemonReindexDoneMsg struct {
+	result *index.IndexResult
+	err    error
+	full   bool
+}
+
+// daemonReindexCmd delegates a reindex to the running daemon hub and reports
+// the result. Used in read-only mode, where the studio can't write directly.
+// There's no live progress stream (the RPC is synchronous), so the status bar
+// just shows "reindexing via daemon" until it completes.
+func (m *Model) daemonReindexCmd(full bool) tea.Cmd {
+	if m.service == nil || m.session == nil {
+		return nil
+	}
+	m.indexing = true
+	m.indexRecent = nil
+	m.errMessage = ""
+	if full {
+		m.statusMessage = "full reindexing via daemon"
+	} else {
+		m.statusMessage = "indexing via daemon"
+	}
+	root := m.session.ProjectRoot
+	return func() tea.Msg {
+		dir, _ := config.GetGlobalConfigDir()
+		result, err := daemon.ReindexSync(m.ctx, dir, root, full)
+		return daemonReindexDoneMsg{result: result, err: err, full: full}
+	}
 }
 
 func waitForIndexProgressCmd(ch <-chan index.Progress) tea.Cmd {
@@ -822,6 +920,9 @@ func (m Model) renderHeader() string {
 	}
 	left := titleStyle.Render("vecgrep") + " " + mutedStyle.Render(truncateDisplay(project, clamp(m.width/2, 24, 80)))
 	rightParts := []string{fmt.Sprintf("mode %s", m.mode), fmt.Sprintf("limit %d", m.limit)}
+	if m.readOnly {
+		rightParts = append([]string{"read-only"}, rightParts...)
+	}
 	if m.status != nil {
 		rightParts = append(rightParts,
 			fmt.Sprintf("files %d", m.status.Stats["files"]),
