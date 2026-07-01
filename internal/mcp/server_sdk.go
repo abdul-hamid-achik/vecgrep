@@ -216,6 +216,22 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 				s.daemon = newDaemonClient(hubDataDir(), cfg.ProjectRoot)
 				s.initialized = true
 			}
+
+			// Re-resolve the codemap client from the project's fully resolved
+			// config, not the (usually zero-value) cfg.Codemap passed into
+			// SDKServerConfig. `vecgrep serve` always starts with just a
+			// ProjectRoot (see cmd/vecgrep/main.go runServe) and leaves
+			// SDKServerConfig.Codemap unset, so the codemap:NewCodemapClient(...)
+			// call above always builds a nil client — even when codemap is
+			// installed and codemapDetect() would have auto-enabled it in
+			// resolved.Config.Codemap. Without this, every tool call reports
+			// "Codemap integration: enabled / Status: codemap binary not
+			// found" regardless of whether codemap is actually reachable,
+			// because s.codemap never gets a second look. activateProject
+			// (used when a project is attached after startup) already does
+			// this same re-resolution; this mirrors it for the up-front path.
+			s.codemap = NewCodemapClient(resolved.Config.Codemap)
+			s.codemapCfg = resolved.Config.Codemap
 		}
 	}
 

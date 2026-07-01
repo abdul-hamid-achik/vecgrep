@@ -26,6 +26,16 @@ type CodemapClient struct {
 // NewCodemapClient creates a client from the codemap config. If codemap is
 // not enabled or the binary cannot be found, the returned client is nil-safe
 // (all methods return zero values and Available() returns false).
+//
+// Binary resolution goes through config.ResolveBinary rather than a bare
+// exec.LookPath: a bare lookup only searches the current process's $PATH,
+// which — when vecgrep runs as an MCP server subprocess — can be a minimal
+// PATH set by whatever spawned it, missing directories like /opt/homebrew/bin
+// that a login shell would have. That produces a false "codemap binary not
+// found" even when codemap is genuinely installed and working. ResolveBinary
+// falls back to common install directories in that case. The resolved path
+// is stored as an absolute path so every subsequent exec.Command call below
+// uses it directly instead of re-running (and re-failing) a $PATH lookup.
 func NewCodemapClient(cfg config.CodemapConfig) *CodemapClient {
 	if !cfg.Enabled {
 		return nil
@@ -34,10 +44,11 @@ func NewCodemapClient(cfg config.CodemapConfig) *CodemapClient {
 	if bin == "" {
 		bin = "codemap"
 	}
-	if _, err := exec.LookPath(bin); err != nil {
+	resolved, err := config.ResolveBinary(bin)
+	if err != nil {
 		return nil
 	}
-	return &CodemapClient{bin: bin}
+	return &CodemapClient{bin: resolved}
 }
 
 // Available reports whether the codemap binary is usable.

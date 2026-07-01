@@ -15,12 +15,78 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// codemapDetect reports whether the codemap CLI is installed (on PATH). It is a
-// package var so tests can stub it for deterministic results regardless of the
-// host. Used to default codemap.enabled to on when codemap is available.
+// codemapDetect reports whether the codemap CLI is installed (on PATH, or in
+// one of the common install directories — see ResolveBinary). It is a
+// package var so tests can stub it for deterministic results regardless of
+// the host. Used to default codemap.enabled to on when codemap is available.
 var codemapDetect = func() bool {
-	_, err := exec.LookPath("codemap")
+	_, err := ResolveBinary("codemap")
 	return err == nil
+}
+
+// commonBinDirs lists installation directories that hold interactively
+// installed CLI tools (Homebrew, Go, asdf, etc.) but are frequently absent
+// from $PATH when vecgrep runs as a subprocess spawned by an MCP host (many
+// GUI-launched parents hand child processes a minimal PATH such as
+// "/usr/bin:/bin:/usr/sbin:/sbin" — a login/interactive shell's PATH is
+// never consulted). A bare exec.LookPath against that minimal PATH reports
+// "not found" for a tool that is plainly installed, which is exactly the
+// false negative this list exists to catch. It is only consulted as a
+// fallback, after a plain PATH lookup has already failed.
+func commonBinDirs() []string {
+	dirs := []string{
+		"/opt/homebrew/bin", // Homebrew on Apple Silicon
+		"/usr/local/bin",    // Homebrew on Intel / generic installs
+		"/opt/local/bin",    // MacPorts
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		dirs = append(dirs,
+			filepath.Join(home, "go", "bin"),      // go install
+			filepath.Join(home, ".local", "bin"),  // pipx / user-local installs
+			filepath.Join(home, ".asdf", "shims"), // asdf
+			filepath.Join(home, ".bun", "bin"),    // bun-installed CLIs
+		)
+	}
+	if prefix := os.Getenv("HOMEBREW_PREFIX"); prefix != "" {
+		dirs = append(dirs, filepath.Join(prefix, "bin"))
+	}
+	return dirs
+}
+
+// ResolveBinary finds an executable by name and returns its resolved
+// absolute path. It first tries the normal $PATH lookup (exec.LookPath) and,
+// only if that fails, falls back to checking commonBinDirs directly via
+// os.Stat. This guards against the false-negative case where a tool is
+// genuinely installed but the current process's $PATH — inherited from
+// whatever spawned it — doesn't happen to include the directory it lives in
+// (see commonBinDirs).
+//
+// If name already contains a path separator (an explicit absolute/relative
+// path, e.g. a user-configured `codemap.bin`), the fallback search is
+// skipped: exec.LookPath already handles that case correctly on its own,
+// and joining it against commonBinDirs would not make sense.
+//
+// The returned path is always resolved (absolute when found via the
+// fallback), so callers can pass it straight to exec.Command without
+// triggering a second, equally PATH-sensitive lookup at invocation time.
+func ResolveBinary(name string) (string, error) {
+	if path, err := exec.LookPath(name); err == nil {
+		return path, nil
+	}
+	if strings.ContainsRune(name, os.PathSeparator) {
+		return "", fmt.Errorf("%s: executable file not found", name)
+	}
+	for _, dir := range commonBinDirs() {
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("%s: executable file not found in $PATH or common install directories", name)
 }
 
 // ConfigSource represents where a config setting came from

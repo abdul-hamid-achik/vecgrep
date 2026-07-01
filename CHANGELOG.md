@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Resolve codemap from the project's fully resolved config in `NewSDKServer` when a project root is known up front. Previously `s.codemap` was built from the zero-value `SDKServerConfig.Codemap` (always `nil`), so `vecgrep serve` reported "Codemap integration: enabled / Status: codemap binary not found" regardless of whether codemap was installed, silently disabling structural re-ranking and impact-based search scoping. The up-front path now mirrors `activateProject`'s existing re-resolution.
+- Add `config.ResolveBinary` and route codemap binary lookup through it (instead of a bare `exec.LookPath`) in `codemapDetect` and `NewCodemapClient`. Falls back to common install directories (`/opt/homebrew/bin`, `$HOME/go/bin`, etc.) when `$PATH` is a minimal subprocess PATH, and stores the resolved absolute path so subsequent `exec.Command` calls don't re-fail a `$PATH` lookup.
+
 ## [2.2.0] - 2026-06-21
 
 ### Added
