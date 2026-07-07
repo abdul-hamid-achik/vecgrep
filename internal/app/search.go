@@ -23,6 +23,7 @@ type SearchRequest struct {
 	FilePaths   []string // Allow-list of relative paths (blast-radius scoping)
 	MinLine     int
 	MaxLine     int
+	MinScore    float32 // Drop hits below this score (0-1); 0 keeps all
 	ProjectRoot string
 	Explain     bool
 }
@@ -49,7 +50,6 @@ type SimilarTarget struct {
 	Line     int
 	Text     string
 }
-
 type SimilarRequest struct {
 	Target          SimilarTarget
 	Limit           int
@@ -62,6 +62,7 @@ type SimilarRequest struct {
 	FilePaths       []string // Allow-list of relative paths (blast-radius scoping)
 	MinLine         int
 	MaxLine         int
+	MinScore        float32 // Drop hits below this score (0-1); 0 keeps all
 	ExcludeSameFile bool
 }
 
@@ -95,6 +96,7 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (*SearchRespons
 		FilePaths:    req.FilePaths,
 		MinLine:      req.MinLine,
 		MaxLine:      req.MaxLine,
+		MinScore:     req.MinScore,
 		ProjectRoot:  req.ProjectRoot,
 		Mode:         mode,
 		VectorWeight: s.session.Config.Search.VectorWeight,
@@ -153,6 +155,7 @@ func (s *Service) Similar(ctx context.Context, req SimilarRequest) (*SearchRespo
 			FilePaths:   req.FilePaths,
 			MinLine:     req.MinLine,
 			MaxLine:     req.MaxLine,
+			MinScore:    req.MinScore,
 			ProjectRoot: s.session.ProjectRoot,
 		},
 		ExcludeSameFile: req.ExcludeSameFile,

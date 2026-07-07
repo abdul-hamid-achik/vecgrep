@@ -395,7 +395,7 @@ func init() {
 
 	// Search command flags
 	searchCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
-	searchCmd.Flags().StringP("format", "f", "default", "output format (default, json, compact)")
+	searchCmd.Flags().StringP("format", "f", "default", "output format (default, json, compact, json-envelope)")
 	searchCmd.Flags().StringP("lang", "l", "", "filter by programming language")
 	searchCmd.Flags().StringSlice("languages", nil, "filter by multiple languages (comma-separated)")
 	searchCmd.Flags().StringP("type", "t", "", "filter by chunk type (function, class, block)")
@@ -407,6 +407,7 @@ func init() {
 	searchCmd.Flags().Bool("explain", false, "show search diagnostics")
 	searchCmd.Flags().StringSlice("scope-files", nil, "restrict search to these relative paths (comma-separated)")
 	searchCmd.Flags().String("symbol", "", "scope search to a symbol's blast radius via codemap impact")
+	searchCmd.Flags().Float32("min-score", 0, "drop results with score below this threshold (0-1)")
 
 	// Serve command flags
 	serveCmd.Flags().Bool("mcp", false, "start MCP server (stdio)")
@@ -423,6 +424,7 @@ func init() {
 	similarCmd.Flags().String("lines", "", "filter by line range (e.g., '1-100')")
 	similarCmd.Flags().Bool("exclude-same-file", false, "exclude results from the same file as the source")
 	similarCmd.Flags().StringP("text", "T", "", "find code similar to this text snippet")
+	similarCmd.Flags().Float32("min-score", 0, "drop results with score below this threshold (0-1)")
 
 	// Status command flags
 	statusCmd.Flags().StringP("format", "f", "default", "output format (default, json)")
@@ -850,6 +852,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	explain, _ := cmd.Flags().GetBool("explain")
 	scopeFiles, _ := cmd.Flags().GetStringSlice("scope-files")
 	symbol, _ := cmd.Flags().GetString("symbol")
+	minScore, _ := cmd.Flags().GetFloat32("min-score")
 
 	// Parse line range
 	var minLine, maxLine int
@@ -860,9 +863,12 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	// Try searching via the daemon socket first. If the daemon is running,
 	// this avoids opening a separate read-only session and re-initializing
 	// the embedding provider. Falls back transparently if the socket is
-	// unavailable or the request fails.
-	if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, explain, format, scopeFiles, symbol); ok {
-		return nil
+	// unavailable or the request fails. The json-envelope format needs
+	// index metadata from a session, so it always takes the session path.
+	if format != "json-envelope" {
+		if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, explain, format, scopeFiles, symbol); ok {
+			return nil
+		}
 	}
 
 	// Fallback: open a read-only session and search directly.
@@ -876,16 +882,28 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	// Parse search mode
 	mode := app.ParseSearchMode(modeStr, session.Config.Search.DefaultMode)
 
+	// Machine formats (json/compact/json-envelope) must keep stdout a single
+	// parseable JSON document, so human-facing scope/diagnostic notes go to
+	// stderr when those formats are in use.
+	machine := isMachineFormat(format)
+	noteOut := func(format string, args ...any) {
+		if machine {
+			fmt.Fprintf(os.Stderr, format, args...)
+		} else {
+			fmt.Printf(format, args...)
+		}
+	}
+
 	// Resolve file scoping. When --symbol is set, use codemap impact to
 	// compute the blast radius. When --scope-files is set, use it directly.
 	var filePaths []string
 	if len(scopeFiles) > 0 {
 		filePaths = scopeFiles
-		fmt.Printf("Scope: restricted to %d file(s)\n", len(filePaths))
+		noteOut("Scope: restricted to %d file(s)\n", len(filePaths))
 	} else if symbol != "" {
 		resolvedPaths, scopeNote := resolveSymbolScope(cmd.Context(), session, symbol)
 		if scopeNote != "" {
-			fmt.Println(scopeNote)
+			noteOut("%s\n", scopeNote)
 		}
 		filePaths = resolvedPaths
 	}
@@ -902,6 +920,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		FilePaths:   filePaths,
 		MinLine:     minLine,
 		MaxLine:     maxLine,
+		MinScore:    minScore,
 		Mode:        mode,
 		Explain:     explain,
 	})
@@ -910,13 +929,18 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	if explain && resp.Diagnostics != nil {
-		// Print explanation
-		fmt.Printf("Search Diagnostics:\n")
-		fmt.Printf("  Index type: %s\n", resp.Diagnostics.IndexType)
-		fmt.Printf("  Nodes visited: %d\n", resp.Diagnostics.NodesVisited)
-		fmt.Printf("  Duration: %v\n", resp.Diagnostics.Duration)
-		fmt.Printf("  Mode: %s\n", resp.Diagnostics.Mode)
-		fmt.Println()
+		// Print explanation. Routed to stderr for machine formats so stdout
+		// stays a single JSON document.
+		noteOut("Search Diagnostics:\n")
+		noteOut("  Index type: %s\n", resp.Diagnostics.IndexType)
+		noteOut("  Nodes visited: %d\n", resp.Diagnostics.NodesVisited)
+		noteOut("  Duration: %v\n", resp.Diagnostics.Duration)
+		noteOut("  Mode: %s\n", resp.Diagnostics.Mode)
+		noteOut("\n")
+	}
+
+	if format == "json-envelope" {
+		return printSearchEnvelope(cmd.Context(), service, resp.Results)
 	}
 
 	printSearchResults(resp.Results, format)
@@ -943,6 +967,50 @@ func isCharDevice(f *os.File) bool {
 // printSearchResults formats and prints search results.
 func printSearchResults(results []search.Result, format string) {
 	fmt.Print(render.Results(results, render.ParseOutputFormat(format)))
+}
+
+// isMachineFormat reports whether format emits machine-parseable output on
+// stdout, where any leading non-JSON text (scope notes, diagnostics) would
+// corrupt a single-document decode. json/compact/json-envelope all qualify.
+func isMachineFormat(format string) bool {
+	switch format {
+	case "json", "compact", "json-envelope":
+		return true
+	}
+	return false
+}
+
+// printSearchEnvelope emits the json-envelope contract: a single JSON object
+// carrying index state alongside the hits, so a consumer can distinguish
+// "never indexed" (indexed=false) from "indexed but nothing matched"
+// (indexed=true, hits=[]). The bare-array `json` format is unchanged.
+func printSearchEnvelope(ctx context.Context, service *app.Service, results []search.Result) error {
+	indexed, fresh, chunks, err := service.IndexMeta(ctx)
+	if err != nil {
+		return fmt.Errorf("index metadata: %w", err)
+	}
+	envelope := struct {
+		Index struct {
+			Indexed bool `json:"indexed"`
+			Fresh   bool `json:"fresh"`
+			Chunks  int  `json:"chunks"`
+		} `json:"index"`
+		Hits []search.Result `json:"hits"`
+	}{
+		Hits: results,
+	}
+	envelope.Index.Indexed = indexed
+	envelope.Index.Fresh = fresh
+	envelope.Index.Chunks = chunks
+	if envelope.Hits == nil {
+		envelope.Hits = []search.Result{}
+	}
+	data, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal envelope: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
 }
 
 // tryDaemonSearch attempts to run a search through the daemon's unix socket.
@@ -1471,6 +1539,7 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 	directory, _ := cmd.Flags().GetString("dir")
 	linesRange, _ := cmd.Flags().GetString("lines")
 	excludeSameFile, _ := cmd.Flags().GetBool("exclude-same-file")
+	minScore, _ := cmd.Flags().GetFloat32("min-score")
 
 	// Parse line range
 	var minLine, maxLine int
@@ -1505,6 +1574,7 @@ func runSimilar(cmd *cobra.Command, args []string) error {
 		Directory:       directory,
 		MinLine:         minLine,
 		MaxLine:         maxLine,
+		MinScore:        minScore,
 		ExcludeSameFile: excludeSameFile,
 	})
 	if err != nil {

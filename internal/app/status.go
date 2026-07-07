@@ -188,6 +188,41 @@ func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {
 	}, nil
 }
 
+// IndexMeta reports a lightweight index-state summary for machine consumers
+// (the `search --format json-envelope` contract): whether the project has been
+// indexed at all, whether the index is fresh (no pending changes), and how many
+// chunks are searchable. An absent or empty index reports indexed=false,
+// fresh=false, chunks=0 so a consumer can distinguish "never indexed" from
+// "indexed but nothing matched" — the bare-array `json` format cannot.
+func (s *Service) IndexMeta(ctx context.Context) (indexed bool, fresh bool, chunks int, err error) {
+	if s == nil || s.session == nil {
+		return false, false, 0, fmt.Errorf("service not initialized")
+	}
+
+	stats, err := s.session.DB.StatsForProject(s.session.ProjectRoot)
+	if err != nil {
+		return false, false, 0, fmt.Errorf("get stats: %w", err)
+	}
+	chunks = int(stats["chunks"])
+	indexed = chunks > 0 || stats["files"] > 0
+
+	// Freshness only matters once something is indexed. An absent/empty
+	// index is reported as not fresh so consumers never mistake "nothing
+	// here" for "up to date".
+	if !indexed {
+		return indexed, false, chunks, nil
+	}
+
+	indexer := index.NewIndexer(s.session.DB, nil, s.indexerConfig(nil))
+	pending, perr := indexer.GetPendingChanges(ctx, s.session.ProjectRoot)
+	if perr != nil || pending == nil {
+		// Could not determine pending changes; report not fresh rather than
+		// fabricating an "up to date" signal.
+		return indexed, false, chunks, nil
+	}
+	return indexed, pending.TotalPending == 0, chunks, nil
+}
+
 func fileSize(path string) int64 {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {

@@ -387,6 +387,17 @@ func (s *MemoryStore) Close() error {
 	return nil
 }
 
+// Ping checks whether the embedding provider backing this store is reachable.
+// Callers use it to classify a Recall/Remember failure as "provider
+// unavailable" versus a genuine data error, so a consumer can distinguish
+// "recall unavailable" from "no matching memory".
+func (s *MemoryStore) Ping(ctx context.Context) error {
+	if s.provider == nil {
+		return fmt.Errorf("embedding provider not configured")
+	}
+	return s.provider.Ping(ctx)
+}
+
 // Helper functions
 
 func recordToMemory(r *veclite.Record, score float32) Memory {

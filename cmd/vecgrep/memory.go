@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -111,9 +114,15 @@ func runMemoryRecall(cmd *cobra.Command, args []string) error {
 
 	store, err := openMemoryStore(cmd.Context())
 	if err != nil {
-		// Fail closed: in json mode emit an empty array (a tool gets a valid,
-		// empty answer — never a partial or a crash that leaks scope), and
-		// signal the failure via a non-zero exit so a human sees the cause.
+		// Provider unreachable at open time. For the json contract, keep
+		// stdout empty and emit the degraded-signal envelope to stderr with
+		// a distinct exit code so a consumer can distinguish "recall
+		// unavailable" from "recall ran, no matches". For human output,
+		// fall through so cobra prints the cause and exits non-zero.
+		if format == "json" && errors.Is(err, embed.ErrProviderUnavailable) {
+			writeMemoryProviderUnavailable(cmd.ErrOrStderr())
+			os.Exit(exitProviderUnavailable)
+		}
 		if format == "json" {
 			fmt.Fprintln(cmd.OutOrStdout(), "[]")
 		}
@@ -123,6 +132,15 @@ func runMemoryRecall(cmd *cobra.Command, args []string) error {
 
 	memories, err := store.Recall(cmd.Context(), query, opts)
 	if err != nil {
+		// A Recall failure mid-call may be the provider going down between
+		// ping and embed; re-ping to classify. If the provider is down, emit
+		// the degraded-signal envelope instead of an empty array (which a
+		// consumer would mistake for an authoritative "no memory").
+		if format == "json" && store.Ping(cmd.Context()) != nil {
+			_ = store.Close()
+			writeMemoryProviderUnavailable(cmd.ErrOrStderr())
+			os.Exit(exitProviderUnavailable)
+		}
 		if format == "json" {
 			fmt.Fprintln(cmd.OutOrStdout(), "[]")
 		}
@@ -171,6 +189,20 @@ func writeMemoriesHuman(cmd *cobra.Command, memories []memory.Memory) {
 			fmt.Fprintf(w, "   tags: %s\n", strings.Join(m.Tags, ", "))
 		}
 	}
+}
+
+// exitProviderUnavailable is the exit code used when `memory recall` cannot
+// reach the embedding provider. Distinct from the generic cobra failure (1)
+// so a consumer can tell "recall unavailable" from "recall ran, no matches".
+const exitProviderUnavailable = 3
+
+// writeMemoryProviderUnavailable writes the degraded-signal envelope that
+// `memory recall --format json` emits when the embedding provider is down:
+// a single JSON object on the given writer (stderr in production) so stdout
+// stays empty and a consumer can decode the failure without conflating it
+// with an empty-but-authoritative result.
+func writeMemoryProviderUnavailable(w io.Writer) {
+	fmt.Fprintln(w, `{"error":"provider_unavailable"}`)
 }
 
 func runMemoryRemember(cmd *cobra.Command, args []string) error {
