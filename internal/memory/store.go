@@ -135,8 +135,11 @@ func (s *MemoryStore) Remember(ctx context.Context, content string, opts Remembe
 		"expires_at": expiresAt,
 	}
 
-	// Insert into veclite
-	id, err := s.coll.Insert(embedding, payload)
+	// Insert into veclite. Importance is set both in the payload (for GTE
+	// filtering) and on the Record itself (so WithImportanceBoost sees it
+	// at recall time).
+	id, err := s.coll.InsertWithOptions(embedding, payload,
+		veclite.WithImportance(float32(opts.Importance)))
 	if err != nil {
 		return 0, fmt.Errorf("failed to store memory: %w", err)
 	}
@@ -189,6 +192,20 @@ func (s *MemoryStore) Recall(ctx context.Context, query string, opts RecallOptio
 	searchOpts := []veclite.SearchOption{veclite.TopK(opts.Limit * 2)} // Get more for filtering
 	if len(filters) > 0 {
 		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
+	}
+
+	// Ranking intelligence: recent + important memories surface first.
+	// Exponential decay halves a memory's score every half-life; the
+	// importance boost lifts records the agent marked as significant.
+	// Both are ranking modifiers only — no memory is ever excluded by them.
+	if s.config.DecayHalfLifeHours > 0 {
+		searchOpts = append(searchOpts, veclite.WithDecay(
+			veclite.DecayExponential,
+			time.Duration(s.config.DecayHalfLifeHours)*time.Hour,
+		))
+	}
+	if s.config.ImportanceBoost > 0 {
+		searchOpts = append(searchOpts, veclite.WithImportanceBoost(float32(s.config.ImportanceBoost)))
 	}
 
 	// Search

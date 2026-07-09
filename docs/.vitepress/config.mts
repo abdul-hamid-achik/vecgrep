@@ -47,7 +47,8 @@ export default defineConfig({
         text: 'Internals',
         items: [
           { text: 'Development Guide', link: '/development' },
-          { text: 'VecLite Integration', link: '/veclite-integration' }
+          { text: 'VecLite Integration', link: '/veclite-integration' },
+          { text: 'codemap Integration', link: '/codemap-integration' }
         ]
       }
     ],

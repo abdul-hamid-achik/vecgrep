@@ -990,10 +990,13 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	}, nil, nil
 }
 
-// formatSearchResults formats search results into markdown.
+// formatSearchResults formats search results into markdown, including match
+// provenance (semantic vs structural) and next-action affordances so a weak
+// agent knows why each hit ranked where it did and what to do next.
 func formatSearchResults(sb *strings.Builder, results []search.Result) {
 	if len(results) == 0 {
-		sb.WriteString("No results found.")
+		sb.WriteString("No results found.\n")
+		sb.WriteString("\nNext steps: try mode:\"keyword\" for exact identifiers, broaden the query phrasing, or check vecgrep_status to confirm the index is fresh.\n")
 		return
 	}
 
@@ -1008,6 +1011,9 @@ func formatSearchResults(sb *strings.Builder, results []search.Result) {
 		if r.Language != "" && r.Language != "unknown" {
 			fmt.Fprintf(sb, "**Language:** %s\n", r.Language)
 		}
+		if r.Reranked {
+			fmt.Fprintf(sb, "**Why ranked here:** semantic %.2f + structural hub score %.2f (this symbol has high fan-in — many callers depend on it)\n", r.Score, r.StructuralScore)
+		}
 		sb.WriteString("\n```")
 		if r.Language != "" && r.Language != "unknown" {
 			sb.WriteString(r.Language)
@@ -1015,6 +1021,20 @@ func formatSearchResults(sb *strings.Builder, results []search.Result) {
 		sb.WriteString("\n")
 		sb.WriteString(r.Content)
 		sb.WriteString("\n```\n\n")
+	}
+
+	// Footer affordances: concrete next moves keyed to result quality.
+	top := results[0]
+	sb.WriteString("---\n")
+	if top.Score < 0.35 {
+		sb.WriteString("Top score is low — these may be weak matches. Try mode:\"keyword\" for exact identifiers, or rephrase the query closer to how the code names things.\n")
+	}
+	if top.SymbolName != "" {
+		fmt.Fprintf(sb, "Next steps: codemap_context symbol:%q for callers/callees/tests of the top hit; vecgrep_similar file_location:\"%s:%d\" for related code.\n",
+			top.SymbolName, top.RelativePath, top.StartLine)
+	} else {
+		fmt.Fprintf(sb, "Next steps: vecgrep_similar file_location:\"%s:%d\" for related code; codemap_symbol_at to resolve the enclosing symbol.\n",
+			top.RelativePath, top.StartLine)
 	}
 }
 
@@ -1624,8 +1644,9 @@ func (s *SDKServer) rerankWithCodemap(ctx context.Context, results []search.Resu
 
 	reranked := s.codemap.Rerank(ctx, s.projRoot(), rerankInput, structuralWeight)
 
-	// Reorder the original results slice to match reranked order.
-	// We find each reranked item's original index by matching path+line.
+	// Reorder the original results slice to match reranked order, carrying
+	// the structural scores onto the results so downstream formatting can
+	// explain WHY a hit ranked where it did.
 	used := make([]bool, len(results))
 	reordered := make([]search.Result, 0, len(results))
 	for _, rr := range reranked {
@@ -1634,6 +1655,8 @@ func (s *SDKServer) rerankWithCodemap(ctx context.Context, results []search.Resu
 				continue
 			}
 			if orig.RelativePath == rr.Result.RelativePath && orig.StartLine == rr.Result.StartLine {
+				orig.StructuralScore = rr.StructuralScore
+				orig.Reranked = rr.StructuralScore > 0
 				reordered = append(reordered, orig)
 				used[j] = true
 				break

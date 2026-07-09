@@ -48,3 +48,4 @@ The default setup is local-first:
 | Use the terminal workspace | [Studio](/studio) |
 | Connect an AI assistant | [MCP Integration](/mcp) |
 | Understand VecLite storage | [VecLite Integration](/veclite-integration) |
+| Understand codemap intelligence sharing | [codemap Integration](/codemap-integration) |

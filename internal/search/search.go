@@ -41,6 +41,14 @@ type Result struct {
 	Language     string  `json:"language"`
 	Distance     float32 `json:"distance"`
 	Score        float32 `json:"score"` // 1 - distance (higher is better)
+
+	// StructuralScore is codemap's normalized fan-in hub score (0..1) when
+	// structural reranking ran; 0 when codemap was unavailable. Exposed so
+	// consumers can show WHY a result ranked where it did.
+	StructuralScore float32 `json:"structural_score,omitempty"`
+	// Reranked marks that this result's position was influenced by
+	// codemap structural blending, not pure semantic similarity.
+	Reranked bool `json:"reranked,omitempty"`
 }
 
 // SearchOptions configures search behavior.

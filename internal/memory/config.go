@@ -30,7 +30,21 @@ type Config struct {
 	EmbeddingModel string
 	// EmbeddingDimensions is the embedding vector dimensions.
 	EmbeddingDimensions int
+	// DecayHalfLifeHours controls temporal decay of recall ranking:
+	// a memory's score halves every this-many hours. 0 disables decay.
+	DecayHalfLifeHours int
+	// ImportanceBoost scales how strongly a memory's importance (0..1)
+	// lifts its recall rank. 0 disables the boost.
+	ImportanceBoost float64
 }
+
+// DefaultDecayHalfLifeHours halves a memory's recall score every 30 days —
+// old memories fade but never vanish (unlike TTL expiry).
+const DefaultDecayHalfLifeHours = 24 * 30
+
+// DefaultImportanceBoost gives importance a moderate say in ranking:
+// boosted = score * (1 + factor*importance).
+const DefaultImportanceBoost = 0.25
 
 // DefaultConfig returns the default memory configuration.
 // It reads from environment variables with fallback to defaults.
@@ -45,6 +59,8 @@ func DefaultConfig() *Config {
 		OllamaURL:           DefaultOllamaURL,
 		EmbeddingModel:      DefaultEmbeddingModel,
 		EmbeddingDimensions: DefaultEmbeddingDimensions,
+		DecayHalfLifeHours:  DefaultDecayHalfLifeHours,
+		ImportanceBoost:     DefaultImportanceBoost,
 	}
 
 	// Override from environment variables
