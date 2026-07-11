@@ -21,6 +21,37 @@ import (
 // of an idle MCP server pinning the shared lock for its whole lifetime.
 const defaultIdleEvictThreshold = 30 * time.Second
 
+// fileGeneration identifies one persisted database generation. SameFile
+// detects atomic replacement even when size and timestamps happen to match;
+// size and modification time detect ordinary in-place updates.
+type fileGeneration struct {
+	info   os.FileInfo
+	exists bool
+}
+
+func statFileGeneration(path string) (fileGeneration, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fileGeneration{}, nil
+		}
+		return fileGeneration{}, err
+	}
+	return fileGeneration{info: info, exists: true}, nil
+}
+
+func (g fileGeneration) differs(next fileGeneration) bool {
+	if g.exists != next.exists {
+		return true
+	}
+	if !g.exists {
+		return false
+	}
+	return !os.SameFile(g.info, next.info) ||
+		g.info.Size() != next.info.Size() ||
+		!g.info.ModTime().Equal(next.info.ModTime())
+}
+
 // mcpSession manages lazy dual-handle database access for the MCP server.
 // Read tools borrow a cached read-only handle (shared flock, multiple readers
 // OK) via a lease; write tools wait for outstanding leases to drain, then close
@@ -45,11 +76,16 @@ type mcpSession struct {
 	ro       *db.DB     // cached read-only handle (shared lock), nil when not open
 	roLeases int        // in-flight borrowers of ro; ro must not be closed while > 0
 
-	reloadThreshold time.Duration
-	idleThreshold   time.Duration // evict idle ro after this; 0 disables
-	daemonJSONPath  string        // for mtime-based reload signal
-	lastReload      time.Time
-	lastAccess      time.Time
+	freshnessCheckInterval time.Duration
+	idleThreshold          time.Duration // evict idle ro after this; 0 disables
+	databasePath           string
+	daemonJSONPath         string
+	lastFreshnessCheck     time.Time
+	databaseGeneration     fileGeneration
+	daemonGeneration       fileGeneration
+	lastAccess             time.Time
+
+	reloadObserver func() // tests only; called after a successful reload
 }
 
 // newMCPSession creates a new MCP session. No database is opened until
@@ -63,21 +99,22 @@ func newMCPSession(cfg *config.Config, projectRoot string, provider embed.Provid
 		HNSWEfSearch:       cfg.Vector.VecLite.EfSearch,
 	}
 
-	reloadThreshold := 5 * time.Second
+	freshnessCheckInterval := 5 * time.Second
 	if cfg.Server.MCPReloadInterval != "" {
 		if d, err := time.ParseDuration(cfg.Server.MCPReloadInterval); err == nil {
-			reloadThreshold = d
+			freshnessCheckInterval = d
 		}
 	}
 
 	s := &mcpSession{
-		cfg:             cfg,
-		projectRoot:     projectRoot,
-		provider:        provider,
-		dbOpts:          dbOpts,
-		reloadThreshold: reloadThreshold,
-		idleThreshold:   defaultIdleEvictThreshold,
-		daemonJSONPath:  filepath.Join(cfg.DataDir, "daemon.json"),
+		cfg:                    cfg,
+		projectRoot:            projectRoot,
+		provider:               provider,
+		dbOpts:                 dbOpts,
+		freshnessCheckInterval: freshnessCheckInterval,
+		idleThreshold:          defaultIdleEvictThreshold,
+		databasePath:           db.VecLitePath(cfg.DataDir),
+		daemonJSONPath:         filepath.Join(cfg.DataDir, "daemon.json"),
 	}
 	s.cond = sync.NewCond(&s.mu)
 	return s
@@ -104,7 +141,7 @@ func (s *mcpSession) acquireRO() (*db.DB, func(), error) {
 			return nil, nil, err
 		}
 		s.ro = database
-		s.lastReload = time.Now()
+		s.observeLoadedGeneration(time.Now())
 	}
 
 	s.roLeases++
@@ -162,7 +199,7 @@ func (s *mcpSession) readWriteDB() (*db.DB, error) {
 		roOpts.SharedRead = true
 		if roDB, roErr := db.OpenWithOptions(roOpts); roErr == nil {
 			s.ro = roDB
-			s.lastReload = time.Now()
+			s.observeLoadedGeneration(time.Now())
 		}
 		if errors.Is(err, vlsession.ErrFileLocked) {
 			return nil, fmt.Errorf("%w (%s)", vlsession.ErrFileLocked, lockAgeDescription(s.dbOpts.DataDir))
@@ -191,38 +228,80 @@ func (s *mcpSession) releaseIfIdle() bool {
 	return true
 }
 
-// reloadIfStale reloads the cached read-only handle from disk if the reload
-// threshold has elapsed or if the daemon.json file was modified since the
-// last reload. This lets the RO MCP server pick up writes from the daemon or
-// CLI index without closing and reopening.
+// reloadIfStale checks for a newer persisted database generation and reloads
+// the cached read-only handle only when disk actually changed. The configured
+// interval is a minimum between database metadata checks, not an elapsed-time
+// staleness signal. daemon.json remains an immediate, independent signal.
 func (s *mcpSession) reloadIfStale() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.ro == nil {
-		return nil // no RO handle to reload
-	}
-
-	stale := s.reloadThreshold > 0 && time.Since(s.lastReload) > s.reloadThreshold
-
-	// Check daemon.json mtime as a cheaper "data changed" signal.
-	if !stale && s.daemonJSONPath != "" {
-		if info, err := os.Stat(s.daemonJSONPath); err == nil {
-			if info.ModTime().After(s.lastReload) {
-				stale = true
-			}
-		}
-	}
-
-	if !stale {
 		return nil
 	}
 
+	now := time.Now()
+	daemonGeneration, daemonErr := statFileGeneration(s.daemonJSONPath)
+	daemonChanged := daemonErr == nil &&
+		daemonGeneration.exists &&
+		s.daemonGeneration.differs(daemonGeneration)
+	if daemonErr == nil && !daemonChanged {
+		// A deletion is not a reload signal, but remembering it lets a later
+		// recreation signal exactly once.
+		s.daemonGeneration = daemonGeneration
+	}
+
+	checkDatabase := s.freshnessCheckInterval > 0 &&
+		now.Sub(s.lastFreshnessCheck) >= s.freshnessCheckInterval
+	var databaseGeneration fileGeneration
+	databaseObserved := false
+	databaseChanged := false
+	if checkDatabase {
+		s.lastFreshnessCheck = now
+		if generation, err := statFileGeneration(s.databasePath); err == nil {
+			databaseGeneration = generation
+			databaseObserved = true
+			databaseChanged = s.databaseGeneration.differs(generation)
+		}
+	} else if daemonChanged {
+		// Capture the database generation before Reload. Recording a post-reload
+		// stat could incorrectly mark a concurrent commit as already loaded.
+		if generation, err := statFileGeneration(s.databasePath); err == nil {
+			databaseGeneration = generation
+			databaseObserved = true
+		}
+	}
+
+	if !daemonChanged && !databaseChanged {
+		return nil
+	}
 	if err := s.ro.Reload(); err != nil {
 		return err
 	}
-	s.lastReload = time.Now()
+
+	if databaseObserved {
+		s.databaseGeneration = databaseGeneration
+	}
+	if daemonErr == nil {
+		s.daemonGeneration = daemonGeneration
+	}
+	s.lastFreshnessCheck = now
+	if s.reloadObserver != nil {
+		s.reloadObserver()
+	}
 	return nil
+}
+
+// observeLoadedGeneration records the filesystem state represented by a newly
+// opened read-only handle. The caller must hold s.mu.
+func (s *mcpSession) observeLoadedGeneration(now time.Time) {
+	if generation, err := statFileGeneration(s.databasePath); err == nil {
+		s.databaseGeneration = generation
+	}
+	if generation, err := statFileGeneration(s.daemonJSONPath); err == nil {
+		s.daemonGeneration = generation
+	}
+	s.lastFreshnessCheck = now
 }
 
 // close closes any cached handles and releases locks. It waits for in-flight

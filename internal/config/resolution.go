@@ -350,6 +350,18 @@ func mergeEmbeddingConfig(dst, src *EmbeddingConfig) {
 	if src.Dimensions != 0 {
 		dst.Dimensions = src.Dimensions
 	}
+	if src.OllamaContext != 0 {
+		dst.OllamaContext = src.OllamaContext
+	}
+	if len(src.OllamaOptions) > 0 {
+		dst.OllamaOptions = src.OllamaOptions
+	}
+	if src.QueryTemplate != "" {
+		dst.QueryTemplate = src.QueryTemplate
+	}
+	if src.DocumentTemplate != "" {
+		dst.DocumentTemplate = src.DocumentTemplate
+	}
 	if src.OpenAIAPIKey != "" {
 		dst.OpenAIAPIKey = src.OpenAIAPIKey
 	}
@@ -405,6 +417,15 @@ func mergeIndexingConfig(dst, src *IndexingConfig) {
 	}
 	if src.MaxFileSize != 0 {
 		dst.MaxFileSize = src.MaxFileSize
+	}
+	if src.SourceBufferBytes != 0 {
+		dst.SourceBufferBytes = src.SourceBufferBytes
+	}
+	if src.SyncInterval != 0 {
+		dst.SyncInterval = src.SyncInterval
+	}
+	if src.SyncIntervalDuration != 0 {
+		dst.SyncIntervalDuration = src.SyncIntervalDuration
 	}
 }
 
@@ -527,6 +548,39 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 	if val := os.Getenv("VECGREP_EMBEDDING_DIMENSIONS"); val != "" {
 		if dim, err := strconv.Atoi(val); err == nil {
 			cfg.Embedding.Dimensions = dim
+		}
+	}
+	if val := os.Getenv("VECGREP_OLLAMA_CONTEXT"); val != "" {
+		if contextSize, err := strconv.Atoi(val); err == nil && contextSize >= 0 {
+			cfg.Embedding.OllamaContext = contextSize
+		}
+	}
+	if val := os.Getenv("VECGREP_OLLAMA_OPTIONS"); val != "" {
+		var options map[string]any
+		if yaml.Unmarshal([]byte(val), &options) == nil {
+			cfg.Embedding.OllamaOptions = options
+		}
+	}
+	if val := os.Getenv("VECGREP_EMBEDDING_QUERY_TEMPLATE"); val != "" {
+		cfg.Embedding.QueryTemplate = val
+	}
+	if val := os.Getenv("VECGREP_EMBEDDING_DOCUMENT_TEMPLATE"); val != "" {
+		cfg.Embedding.DocumentTemplate = val
+	}
+
+	if val := os.Getenv("VECGREP_INDEXING_SOURCE_BUFFER_BYTES"); val != "" {
+		if size, err := strconv.ParseInt(val, 10, 64); err == nil && size > 0 {
+			cfg.Indexing.SourceBufferBytes = size
+		}
+	}
+	if val := os.Getenv("VECGREP_INDEXING_SYNC_INTERVAL"); val != "" {
+		if interval, err := strconv.Atoi(val); err == nil && interval >= 0 {
+			cfg.Indexing.SyncInterval = interval
+		}
+	}
+	if val := os.Getenv("VECGREP_INDEXING_SYNC_INTERVAL_DURATION"); val != "" {
+		if interval, err := time.ParseDuration(val); err == nil && interval >= 0 {
+			cfg.Indexing.SyncIntervalDuration = interval
 		}
 	}
 

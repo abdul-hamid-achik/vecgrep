@@ -2,6 +2,8 @@ package embed
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -200,6 +202,69 @@ func TestThrottledProviderClose(t *testing.T) {
 
 	// Close should not panic
 	p.Close()
+}
+
+func TestThrottledProviderFlushKeepsProviderReusable(t *testing.T) {
+	mock := &mockProvider{}
+	cfg := DefaultThrottleConfig()
+	cfg.CachePath = filepath.Join(t.TempDir(), "cache.db")
+	p := NewThrottledProvider(mock, cfg)
+	defer p.Close()
+
+	want, err := p.Embed(context.Background(), "persist on flush")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
+	p.diskCache.Clear()
+	got, err := p.Embed(context.Background(), "persist on flush")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mock.embedCalls.Load() != 1 {
+		t.Fatalf("provider calls after disk hit = %d, want 1", mock.embedCalls.Load())
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("persisted vector[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestThrottledProviderCloseFlushesDiskCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	mock := &mockProvider{}
+	cfg := DefaultThrottleConfig()
+	cfg.CachePath = path
+	p := NewThrottledProvider(mock, cfg)
+
+	want, err := p.Embed(context.Background(), "persist on close")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+
+	cache, err := NewPersistentCache(4, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	cache.SetModel(mock.Model())
+	got, ok := cache.Get("persist on close")
+	if !ok {
+		t.Fatal("throttled provider Close did not persist queued cache write")
+	}
+	if len(got) != len(want) {
+		t.Fatalf("persisted vector length = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("persisted vector[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
 }
 
 func TestThrottledProviderEmbedContextCanceled(t *testing.T) {
@@ -411,4 +476,106 @@ func (m *noDocsProvider) Ping(ctx context.Context) error { return nil }
 // Warmup implements the Provider interface for the test mock.
 func (m *noDocsProvider) Warmup(ctx context.Context) (time.Duration, error) {
 	return 0, nil
+}
+
+func TestThrottledProviderCloseCancelsActiveRateLimitedAndQueuedRequests(t *testing.T) {
+	started := make(chan struct{}, 1)
+	mock := &mockProvider{
+		embedFunc: func(ctx context.Context, _ string) ([]float32, error) {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	p := NewThrottledProvider(mock, ThrottleConfig{
+		Workers:     2,
+		RPS:         0.001,
+		MaxInFlight: 2,
+	})
+
+	results := make(chan error, 3)
+	go func() {
+		_, err := p.Embed(context.Background(), "active")
+		results <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not reach the blocking provider")
+	}
+
+	go func() {
+		_, err := p.Embed(context.Background(), "rate limited")
+		results <- err
+	}()
+	waitForThrottleCondition(t, func() bool {
+		return len(p.inFlight) == 2
+	}, "second request did not block in the rate limiter")
+
+	go func() {
+		_, err := p.Embed(context.Background(), "queued")
+		results <- err
+	}()
+	waitForThrottleCondition(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.bgQueue) == 1
+	}, "third request was not queued")
+
+	closeDone := make(chan struct{})
+	go func() {
+		p.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked with active and queued requests")
+	}
+
+	for range 3 {
+		select {
+		case err := <-results:
+			if !errors.Is(err, ErrContextCanceled) {
+				t.Fatalf("Embed error = %v, want ErrContextCanceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Embed caller did not return after Close")
+		}
+	}
+
+	postClose := make(chan error, 1)
+	go func() {
+		_, err := p.Embed(context.Background(), "after close")
+		postClose <- err
+	}()
+	select {
+	case err := <-postClose:
+		if !errors.Is(err, ErrContextCanceled) {
+			t.Fatalf("post-close Embed error = %v, want ErrContextCanceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("post-close Embed blocked")
+	}
+
+	if got := mock.embedCalls.Load(); got != 1 {
+		t.Fatalf("inner Embed calls = %d, want 1; rate-limited and queued work must not start", got)
+	}
+	if got := len(p.inFlight); got != 0 {
+		t.Fatalf("in-flight semaphore has %d leaked slots", got)
+	}
+}
+
+func waitForThrottleCondition(t *testing.T, condition func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal(message)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

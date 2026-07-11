@@ -82,11 +82,15 @@ func newInnerProvider(cfg *config.Config) (embed.Provider, error) {
 		}), nil
 	case "ollama", "":
 		return embed.NewOllamaProvider(embed.OllamaConfig{
-			URL:          cfg.Embedding.OllamaURL,
-			Model:        cfg.Embedding.Model,
-			Dimensions:   cfg.Embedding.Dimensions,
-			MaxBatchSize: cfg.Embedding.MaxBatchSize,
-			KeepAlive:    cfg.Embedding.KeepAlive,
+			URL:              cfg.Embedding.OllamaURL,
+			Model:            cfg.Embedding.Model,
+			Dimensions:       cfg.Embedding.Dimensions,
+			MaxBatchSize:     cfg.Embedding.MaxBatchSize,
+			KeepAlive:        cfg.Embedding.KeepAlive,
+			Context:          cfg.Embedding.OllamaContext,
+			Options:          cfg.Embedding.OllamaOptions,
+			QueryTemplate:    cfg.Embedding.QueryTemplate,
+			DocumentTemplate: cfg.Embedding.DocumentTemplate,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unknown embedding provider: %s", cfg.Embedding.Provider)

@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/abdul-hamid-achik/vecgrep/internal/config"
+	"github.com/spf13/cobra"
 )
 
 func TestFormatETA(t *testing.T) {
@@ -67,5 +73,68 @@ func TestStudioCommandAcceptsOptionalPath(t *testing.T) {
 	}
 	if err := studioCmd.Args(studioCmd, []string{"one", "two"}); err == nil {
 		t.Fatal("studio command accepted more than one path argument")
+	}
+}
+
+func TestRunConfigPresetListsSupportedProfiles(t *testing.T) {
+	var output bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&output)
+
+	if err := runConfigPreset(cmd, nil); err != nil {
+		t.Fatalf("runConfigPreset() error = %v", err)
+	}
+	got := output.String()
+	for _, want := range []string{"fast-local", "nomic-embed-text", "quality-code", "qwen3-embedding:0.6b"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("runConfigPreset() output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRunConfigPresetAppliesGlobalProfileAndPrintsRebuildSteps(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var output bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&output)
+	cmd.Flags().Bool("global", false, "")
+	if err := cmd.Flags().Set("global", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runConfigPreset(cmd, []string{"quality-code"}); err != nil {
+		t.Fatalf("runConfigPreset() error = %v", err)
+	}
+	globalConfig, err := config.LoadGlobalConfig()
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig() error = %v", err)
+	}
+	if got, want := globalConfig.Defaults.Embedding.Model, "qwen3-embedding:0.6b"; got != want {
+		t.Errorf("global model = %q, want %q", got, want)
+	}
+	if got, want := globalConfig.Defaults.Embedding.OllamaContext, 1024; got != want {
+		t.Errorf("global Ollama context = %d, want %d", got, want)
+	}
+	for _, want := range []string{"ollama pull qwen3-embedding:0.6b", "vecgrep index --full"} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("runConfigPreset() output missing %q:\n%s", want, output.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".vecgrep", "config.yaml")); err != nil {
+		t.Errorf("global config was not written: %v", err)
+	}
+}
+
+func TestRunBenchmarkEmbeddingsRejectsUnknownPresetBeforeProviderUse(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("root", "../..", "")
+	cmd.Flags().String("dataset", "", "")
+	cmd.Flags().StringSlice("profiles", []string{"unknown"}, "")
+	cmd.Flags().Int("batch-size", 32, "")
+	cmd.Flags().Bool("json", false, "")
+
+	err := runBenchmarkEmbeddings(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), `unknown embedding preset "unknown"`) {
+		t.Fatalf("runBenchmarkEmbeddings() error = %v, want unknown preset", err)
 	}
 }

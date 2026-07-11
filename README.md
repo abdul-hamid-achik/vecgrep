@@ -373,12 +373,33 @@ Project configuration is usually stored in `vecgrep.yaml` at the project root. G
 
 > **Note:** Legacy projects may still keep configuration at `.vecgrep/config.yaml`, and `vecgrep init --local` can intentionally create repo-local state. Add `.vecgrep/` to `.gitignore` only for those opt-in local setups.
 
+Use a named local profile when you do not want to coordinate model-specific
+dimensions, context, and query templates manually:
+
+```bash
+vecgrep config preset
+vecgrep config preset quality-code
+ollama pull qwen3-embedding:0.6b
+vecgrep index --full
+
+# Compare fast-local and quality-code without changing config or index data:
+task bench:embeddings
+```
+
+`fast-local` keeps the default `nomic-embed-text` profile. `quality-code` uses
+the explicit `qwen3-embedding:0.6b` tag with 1,024 dimensions and a 1,024-token
+context. Use `vecgrep config preset --global <name>` for global defaults.
+
 ```yaml
 embedding:
   provider: ollama              # ollama, openai, cohere, or voyage
-  model: nomic-embed-text       # provider-specific embedding model
-  dimensions: 768               # 1536 for OpenAI/Cohere defaults, 1024 for voyage-code-3
+  model: nomic-embed-text       # Or qwen3-embedding:0.6b with dimensions: 1024
+  dimensions: 768               # Must match the selected model's output
   ollama_url: http://localhost:11434
+  ollama_context: 0             # Optional num_ctx; 0 uses the Ollama/model default
+  ollama_options: {}            # Optional values passed to /api/embed
+  query_template: ""            # Optional template containing {{text}}
+  document_template: ""         # Optional template containing {{text}}
   openai_api_key: ""            # Set via env var OPENAI_API_KEY or VECGREP_OPENAI_API_KEY
   openai_base_url: ""           # Optional: for Azure OpenAI or custom endpoints
   cohere_api_key: ""            # Set via COHERE_API_KEY or VECGREP_COHERE_API_KEY
@@ -390,6 +411,9 @@ indexing:
   chunk_size: 512
   chunk_overlap: 64
   max_file_size: 1048576
+  source_buffer_bytes: 8388608  # Bound queued source memory before chunking
+  sync_interval: 50             # Files between periodic database syncs
+  sync_interval_duration: 30s   # Maximum time between periodic syncs
   ignore_patterns:
     - ".git/**"
     - "node_modules/**"
@@ -412,7 +436,7 @@ vector:
 
 ### Vector Backend
 
-vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.22.1 as its vector storage backend with:
+vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.23.0 as its vector storage backend with:
 - **Cosine similarity** - Returns scores from 0.0 (orthogonal) to 1.0 (identical)
 - **HNSW indexing** - Fast approximate nearest neighbor search
 - **Native filtering** - Glob patterns, prefix matching, range queries

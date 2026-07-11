@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/app"
+	embeddingbench "github.com/abdul-hamid-achik/vecgrep/internal/benchmark"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/daemon"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
+	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
 	"github.com/abdul-hamid-achik/vecgrep/internal/git"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 	"github.com/abdul-hamid-achik/vecgrep/internal/mcp"
@@ -170,7 +172,8 @@ var configCmd = &cobra.Command{
 
 Subcommands:
   show    Show the resolved configuration
-  set     Set a configuration value`,
+  set     Set a configuration value
+  preset  List or apply an embedding preset`,
 }
 
 var configShowCmd = &cobra.Command{
@@ -201,6 +204,32 @@ Examples:
   vecgrep config set --global embedding.provider openai`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConfigSet,
+}
+
+var configPresetCmd = &cobra.Command{
+	Use:   "preset [name]",
+	Short: "List or apply an embedding preset",
+	Long: `List the supported embedding presets or apply one to project/global configuration.
+
+Applying a preset changes the semantic embedding profile. Pull the selected
+Ollama model if needed, then rebuild the index with 'vecgrep index --full'.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runConfigPreset,
+}
+
+var benchmarkCmd = &cobra.Command{
+	Use:   "benchmark",
+	Short: "Run reproducible vecgrep benchmarks",
+}
+
+var benchmarkEmbeddingsCmd = &cobra.Command{
+	Use:   "embeddings",
+	Short: "Compare embedding presets on a labeled code-retrieval corpus",
+	Long: `Embed a deterministic labeled corpus without reading or writing the vecgrep index.
+
+The default corpus combines anchored vecgrep source symbols with inline Go,
+TypeScript, Python, Rust, YAML, Markdown, and shell examples.`,
+	RunE: runBenchmarkEmbeddings,
 }
 
 var projectsCmd = &cobra.Command{
@@ -438,6 +467,18 @@ func init() {
 	// Config set command flags
 	configSetCmd.Flags().Bool("global", false, "set value in global config")
 
+	// Config preset command flags
+	configPresetCmd.Flags().Bool("global", false, "apply to global defaults")
+	configCmd.AddCommand(configPresetCmd)
+
+	// Embedding benchmark flags
+	benchmarkEmbeddingsCmd.Flags().String("root", ".", "project root used to resolve source-backed documents")
+	benchmarkEmbeddingsCmd.Flags().String("dataset", "", "path to a custom benchmark dataset JSON")
+	benchmarkEmbeddingsCmd.Flags().StringSlice("profiles", []string{"fast-local", "quality-code"}, "embedding presets to compare")
+	benchmarkEmbeddingsCmd.Flags().Int("batch-size", 32, "documents per embedding request")
+	benchmarkEmbeddingsCmd.Flags().Bool("json", false, "emit the complete benchmark report as JSON")
+	benchmarkCmd.AddCommand(benchmarkEmbeddingsCmd)
+
 	// Add config subcommands
 	configCmd.AddCommand(configShowCmd)
 	configCmd.AddCommand(configSetCmd)
@@ -482,6 +523,7 @@ func init() {
 	rootCmd.AddCommand(branchCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(memoryCmd)
+	rootCmd.AddCommand(benchmarkCmd)
 
 	// Daemon subcommands
 	daemonCmd.AddCommand(daemonStartCmd)
@@ -1677,6 +1719,158 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Set %s = %s in %s\n", key, value, configPath)
+	return nil
+}
+
+func runConfigPreset(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+	if len(args) == 0 {
+		fmt.Fprintln(out, "Embedding presets:")
+		for _, preset := range config.ListEmbeddingPresets() {
+			fmt.Fprintf(out, "  %-12s %s (%s, %d dimensions, context %d)\n",
+				preset.Name,
+				preset.Description,
+				preset.Embedding.Model,
+				preset.Embedding.Dimensions,
+				preset.Embedding.OllamaContext,
+			)
+		}
+		return nil
+	}
+
+	name := args[0]
+	preset, ok := config.LookupEmbeddingPreset(name)
+	if !ok {
+		return fmt.Errorf("unknown embedding preset %q", name)
+	}
+	isGlobal, _ := cmd.Flags().GetBool("global")
+
+	var configPath string
+	if isGlobal {
+		var err error
+		configPath, err = config.GetGlobalConfigPath()
+		if err != nil {
+			return err
+		}
+	} else {
+		projectRoot, err := config.GetProjectRoot()
+		if err != nil {
+			return fmt.Errorf("not in a vecgrep project: run 'vecgrep init' first")
+		}
+		configPath = projectConfigPath(projectRoot)
+	}
+	if err := config.ApplyEmbeddingPresetToFile(configPath, name, isGlobal); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "Applied embedding preset %q to %s\n", name, configPath)
+	fmt.Fprintf(out, "Model: %s (%d dimensions, context %d)\n",
+		preset.Embedding.Model,
+		preset.Embedding.Dimensions,
+		preset.Embedding.OllamaContext,
+	)
+	fmt.Fprintf(out, "Next: ollama pull %s\n", preset.Embedding.Model)
+	fmt.Fprintln(out, "Then: vecgrep index --full")
+	return nil
+}
+
+func runBenchmarkEmbeddings(cmd *cobra.Command, _ []string) error {
+	projectRoot, _ := cmd.Flags().GetString("root")
+	absRoot, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return fmt.Errorf("resolve benchmark root: %w", err)
+	}
+
+	datasetPath, _ := cmd.Flags().GetString("dataset")
+	var dataset embeddingbench.Dataset
+	if datasetPath == "" {
+		dataset, err = embeddingbench.LoadDefaultDataset(absRoot)
+	} else {
+		file, openErr := os.Open(datasetPath)
+		if openErr != nil {
+			return fmt.Errorf("open benchmark dataset: %w", openErr)
+		}
+		dataset, err = embeddingbench.LoadDataset(file, absRoot)
+		closeErr := file.Close()
+		if err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	names, _ := cmd.Flags().GetStringSlice("profiles")
+	if len(names) == 0 {
+		return errors.New("at least one embedding profile is required")
+	}
+	profiles := make([]embeddingbench.EmbeddingProfile, 0, len(names))
+	for _, name := range names {
+		preset, ok := config.LookupEmbeddingPreset(name)
+		if !ok {
+			return fmt.Errorf("unknown embedding preset %q", name)
+		}
+		profiles = append(profiles, embeddingbench.EmbeddingProfile{
+			Name:             preset.Name,
+			Provider:         preset.Embedding.Provider,
+			Model:            preset.Embedding.Model,
+			Dimensions:       preset.Embedding.Dimensions,
+			OllamaContext:    preset.Embedding.OllamaContext,
+			OllamaOptions:    preset.Embedding.OllamaOptions,
+			QueryTemplate:    preset.Embedding.QueryTemplate,
+			DocumentTemplate: preset.Embedding.DocumentTemplate,
+		})
+	}
+
+	resolvedConfig, err := config.Load(absRoot)
+	if err != nil {
+		return fmt.Errorf("load benchmark configuration: %w", err)
+	}
+	factory := func(_ context.Context, profile embeddingbench.EmbeddingProfile) (embed.Provider, error) {
+		if profile.Provider != "ollama" {
+			return nil, fmt.Errorf("benchmark profile %q uses unsupported provider %q", profile.Name, profile.Provider)
+		}
+		return embed.NewOllamaProvider(embed.OllamaConfig{
+			URL:        resolvedConfig.Embedding.OllamaURL,
+			Model:      profile.Model,
+			Dimensions: profile.Dimensions,
+			Context:    profile.OllamaContext,
+			Options:    profile.OllamaOptions,
+		}), nil
+	}
+
+	batchSize, _ := cmd.Flags().GetInt("batch-size")
+	report, err := (embeddingbench.Runner{
+		Dataset:   dataset,
+		BatchSize: batchSize,
+	}).Run(cmd.Context(), profiles, factory)
+	if err != nil {
+		return err
+	}
+
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+	if jsonOutput {
+		encoder := json.NewEncoder(cmd.OutOrStdout())
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(report)
+	}
+
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Embedding benchmark: %d documents, %d queries\n\n", len(dataset.Documents), len(dataset.Queries))
+	fmt.Fprintln(out, "PROFILE       TOP-1   RECALL@5  RECALL@10  MRR     DOCS/S  QUERIES/S  CORPUS     QUERIES")
+	for _, result := range report {
+		fmt.Fprintf(out, "%-13s %6.1f%% %8.1f%% %9.1f%% %6.3f %7.1f %10.1f %10s %10s\n",
+			result.Profile.Name,
+			result.Metrics.Top1*100,
+			result.Metrics.RecallAt5*100,
+			result.Metrics.RecallAt10*100,
+			result.Metrics.MRR,
+			result.DocumentsPerSecond,
+			result.QueriesPerSecond,
+			result.CorpusLatency.Round(time.Millisecond),
+			result.QueryLatency.Round(time.Millisecond),
+		)
+	}
 	return nil
 }
 

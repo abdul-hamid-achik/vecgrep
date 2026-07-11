@@ -45,11 +45,19 @@ embedding:
   model: nomic-embed-text
   dimensions: 768
   ollama_url: http://localhost:11434
+  # Optional Ollama request controls:
+  ollama_context: 0
+  ollama_options: {}
+  query_template: ""
+  document_template: ""
 
 indexing:
   chunk_size: 512
   chunk_overlap: 64
   max_file_size: 1048576
+  source_buffer_bytes: 8388608
+  sync_interval: 50
+  sync_interval_duration: 30s
   ignore_patterns:
     - ".git/**"
     - "node_modules/**"
@@ -84,6 +92,19 @@ Set global defaults:
 vecgrep config set --global embedding.provider ollama
 ```
 
+Apply a complete local embedding profile atomically:
+
+```bash
+vecgrep config preset                   # List presets
+vecgrep config preset fast-local        # Project config
+vecgrep config preset --global quality-code
+```
+
+Preset changes require the model pull and full rebuild printed by the command.
+They leave provider endpoints, credentials, throttling, caching, and unrelated
+configuration unchanged.
+
+
 Inspect resolved config:
 
 ```bash
@@ -99,6 +120,13 @@ vecgrep config show --global
 | `VECGREP_EMBEDDING_MODEL` | Embedding model name |
 | `VECGREP_EMBEDDING_DIMENSIONS` | Embedding vector dimensions |
 | `VECGREP_OLLAMA_URL` | Ollama API URL |
+| `VECGREP_OLLAMA_CONTEXT` | Ollama `num_ctx`; `0` uses the model/server default |
+| `VECGREP_OLLAMA_OPTIONS` | YAML/JSON map passed to Ollama's `options` object |
+| `VECGREP_EMBEDDING_QUERY_TEMPLATE` | Query template containing `{{text}}` |
+| `VECGREP_EMBEDDING_DOCUMENT_TEMPLATE` | Document template containing `{{text}}` |
+| `VECGREP_INDEXING_SOURCE_BUFFER_BYTES` | Maximum queued source bytes before chunking |
+| `VECGREP_INDEXING_SYNC_INTERVAL` | Files processed between periodic full-store syncs |
+| `VECGREP_INDEXING_SYNC_INTERVAL_DURATION` | Maximum duration between periodic syncs |
 | `VECGREP_OPENAI_API_KEY` | OpenAI API key |
 | `VECGREP_OPENAI_BASE_URL` | OpenAI-compatible base URL |
 | `VECGREP_COHERE_API_KEY` | Cohere API key |

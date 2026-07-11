@@ -103,11 +103,16 @@ type ThrottledProvider struct {
 	inFlight chan struct{}
 
 	// Request queue with two priority lanes.
-	mu      sync.Mutex
-	bgQueue []throttleRequest
-	fgQueue []throttleRequest
-	notify  chan struct{}
-	closed  bool
+	mu          sync.Mutex
+	bgQueue     []throttleRequest
+	fgQueue     []throttleRequest
+	notify      chan struct{}
+	closed      bool
+	workerCtx   context.Context
+	cancel      context.CancelFunc
+	workerWG    sync.WaitGroup
+	operationWG sync.WaitGroup
+	closeOnce   sync.Once
 
 	// singleflight-style dedup: in-flight request keyed by cache key.
 	dedupMu sync.Mutex
@@ -124,6 +129,7 @@ type dedupEntry struct {
 
 type throttleRequest struct {
 	text     string
+	ctx      context.Context
 	priority Priority
 	result   chan<- throttleResult
 }
@@ -142,12 +148,15 @@ func NewThrottledProvider(inner Provider, cfg ThrottleConfig) *ThrottledProvider
 		cfg.MaxInFlight = 8
 	}
 
+	workerCtx, cancel := context.WithCancel(context.Background())
 	p := &ThrottledProvider{
-		inner:    inner,
-		cfg:      cfg,
-		inFlight: make(chan struct{}, cfg.MaxInFlight),
-		notify:   make(chan struct{}, 1),
-		dedup:    make(map[string]*dedupEntry),
+		inner:     inner,
+		cfg:       cfg,
+		inFlight:  make(chan struct{}, cfg.MaxInFlight),
+		notify:    make(chan struct{}, 1),
+		workerCtx: workerCtx,
+		cancel:    cancel,
+		dedup:     make(map[string]*dedupEntry),
 	}
 
 	if cfg.CacheSize > 0 {
@@ -170,8 +179,9 @@ func NewThrottledProvider(inner Provider, cfg ThrottleConfig) *ThrottledProvider
 		p.limiter = rate.NewLimiter(rate.Limit(cfg.RPS), 1)
 	}
 
-	// Start worker goroutines
-	for i := 0; i < cfg.Workers; i++ {
+	// Start worker goroutines.
+	p.workerWG.Add(cfg.Workers)
+	for range cfg.Workers {
 		go p.worker()
 	}
 
@@ -180,6 +190,11 @@ func NewThrottledProvider(inner Provider, cfg ThrottleConfig) *ThrottledProvider
 
 // Embed generates an embedding for the given text with throttling.
 func (p *ThrottledProvider) Embed(ctx context.Context, text string) (vec []float32, err error) {
+	if !p.beginOperation() {
+		return nil, ErrContextCanceled
+	}
+	defer p.operationWG.Done()
+
 	if text == "" {
 		return nil, ErrEmptyText
 	}
@@ -212,12 +227,15 @@ func (p *ThrottledProvider) Embed(ctx context.Context, text string) (vec []float
 
 	resultCh := make(chan throttleResult, 1)
 	req := throttleRequest{
+		ctx:      ctx,
 		text:     text,
 		priority: priority,
 		result:   resultCh,
 	}
 
-	p.enqueue(req)
+	if !p.enqueue(req) {
+		return nil, ErrContextCanceled
+	}
 
 	select {
 	case res := <-resultCh:
@@ -298,6 +316,11 @@ func (p *ThrottledProvider) EmbedDocuments(ctx context.Context, texts []string) 
 // have. This bypasses the per-text worker queue — the batch endpoint
 // handles concurrency internally.
 func (p *ThrottledProvider) embedBatchDelegated(ctx context.Context, docProvider DocumentProvider, texts []string) ([][]float32, error) {
+	if !p.beginOperation() {
+		return nil, ErrContextCanceled
+	}
+	defer p.operationWG.Done()
+
 	results := make([][]float32, len(texts))
 
 	// Phase 1: serve everything we can from cache, collect misses.
@@ -323,14 +346,22 @@ func (p *ThrottledProvider) embedBatchDelegated(ctx context.Context, docProvider
 
 	// Phase 2: acquire a single in-flight slot and delegate the entire
 	// batch to the inner provider's native batch endpoint.
-	p.inFlight <- struct{}{}
-	defer func() { <-p.inFlight }()
-
-	if p.limiter != nil {
-		_ = p.limiter.Wait(ctx)
+	opCtx, cancel := p.operationContext(ctx)
+	defer cancel()
+	select {
+	case p.inFlight <- struct{}{}:
+		defer func() { <-p.inFlight }()
+	case <-opCtx.Done():
+		return nil, NewProviderError("throttle", "embedDocuments", ErrContextCanceled)
 	}
 
-	missed, err := docProvider.EmbedDocuments(ctx, missTexts)
+	if p.limiter != nil {
+		if err := p.limiter.Wait(opCtx); err != nil {
+			return nil, NewProviderError("throttle", "embedDocuments", ErrContextCanceled)
+		}
+	}
+
+	missed, err := docProvider.EmbedDocuments(opCtx, missTexts)
 	if err != nil {
 		return nil, NewProviderError("throttle", "embedDocuments", err)
 	}
@@ -378,21 +409,57 @@ func (p *ThrottledProvider) Cache() embeddingCache {
 	return p.cache
 }
 
-// Close shuts down the worker pool. After Close, Embed calls will block
-// until the context is canceled.
-func (p *ThrottledProvider) Close() {
-	p.mu.Lock()
-	p.closed = true
-	p.mu.Unlock()
-	p.notify <- struct{}{}
-	if p.diskCache != nil {
-		_ = p.diskCache.Close()
+// Flush persists every disk-cache write queued before this call without
+// shutting down the provider. In-memory caches require no flush.
+func (p *ThrottledProvider) Flush() error {
+	if p.diskCache == nil {
+		return nil
 	}
+	return p.diskCache.Flush()
 }
 
-// enqueue adds a request to the appropriate priority lane.
-func (p *ThrottledProvider) enqueue(req throttleRequest) {
+// Close cancels active work, rejects new requests, resolves queued callers,
+// waits for all provider operations to finish, and then closes the disk cache.
+func (p *ThrottledProvider) Close() {
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		queued := append(p.fgQueue, p.bgQueue...)
+		p.fgQueue = nil
+		p.bgQueue = nil
+		p.cancel()
+		p.mu.Unlock()
+
+		for _, req := range queued {
+			req.result <- throttleResult{err: ErrContextCanceled}
+		}
+
+		p.workerWG.Wait()
+		p.operationWG.Wait()
+		if p.diskCache != nil {
+			_ = p.diskCache.Close()
+		}
+	})
+}
+
+// beginOperation prevents Close from racing with a new operationWG.Add.
+func (p *ThrottledProvider) beginOperation() bool {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.operationWG.Add(1)
+	return true
+}
+
+// enqueue adds a request to the appropriate priority lane unless shutdown has begun.
+func (p *ThrottledProvider) enqueue(req throttleRequest) bool {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return false
+	}
 	if req.priority == PriorityInteractive {
 		p.fgQueue = append(p.fgQueue, req)
 	} else {
@@ -400,11 +467,11 @@ func (p *ThrottledProvider) enqueue(req throttleRequest) {
 	}
 	p.mu.Unlock()
 
-	// Notify a worker that there's work available
 	select {
 	case p.notify <- struct{}{}:
 	default:
 	}
+	return true
 }
 
 // dequeue removes the next request, preferring interactive over background.
@@ -427,49 +494,57 @@ func (p *ThrottledProvider) dequeue() (throttleRequest, bool) {
 
 // worker processes requests from the queue.
 func (p *ThrottledProvider) worker() {
+	defer p.workerWG.Done()
 	for {
-		// Wait for work notification. The notify channel has a buffer of 1
-		// and enqueue uses a non-blocking send, so notifications can be
-		// dropped when multiple requests arrive before a worker drains.
-		// The timeout case ensures a worker re-checks the queue even
-		// without an explicit notification, so no request stays queued
-		// for more than 100ms.
 		select {
+		case <-p.workerCtx.Done():
+			return
 		case <-p.notify:
 		case <-time.After(100 * time.Millisecond):
-			// Re-check queue even without explicit notification.
 		}
 
 		for {
-			p.mu.Lock()
-			closed := p.closed
-			p.mu.Unlock()
-			if closed {
-				return
-			}
-
 			req, ok := p.dequeue()
 			if !ok {
 				break
 			}
 
-			// Acquire in-flight semaphore
-			p.inFlight <- struct{}{}
-
-			// Rate limit
-			if p.limiter != nil {
-				_ = p.limiter.Wait(context.Background())
+			opCtx, cancel := p.operationContext(req.ctx)
+			select {
+			case p.inFlight <- struct{}{}:
+			case <-opCtx.Done():
+				cancel()
+				req.result <- throttleResult{err: ErrContextCanceled}
+				continue
 			}
 
-			// Generate embedding
-			vec, err := p.inner.Embed(context.Background(), req.text)
+			if p.limiter != nil {
+				if err := p.limiter.Wait(opCtx); err != nil {
+					<-p.inFlight
+					cancel()
+					req.result <- throttleResult{err: ErrContextCanceled}
+					continue
+				}
+			}
 
-			// Release in-flight slot
+			vec, err := p.inner.Embed(opCtx, req.text)
+			if opCtx.Err() != nil {
+				vec = nil
+				err = ErrContextCanceled
+			}
 			<-p.inFlight
-
-			// Send result
+			cancel()
 			req.result <- throttleResult{vector: vec, err: err}
 		}
+	}
+}
+
+func (p *ThrottledProvider) operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	opCtx, cancel := context.WithCancel(ctx)
+	stopCancel := context.AfterFunc(p.workerCtx, cancel)
+	return opCtx, func() {
+		stopCancel()
+		cancel()
 	}
 }
 

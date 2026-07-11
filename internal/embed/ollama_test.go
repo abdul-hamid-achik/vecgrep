@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -17,7 +16,7 @@ func TestOllamaProvider_EmbedDocuments(t *testing.T) {
 			t.Errorf("expected /api/embed, got %s", r.URL.Path)
 		}
 
-		var req ollamaBatchEmbedRequest
+		var req ollamaEmbedRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
@@ -27,12 +26,12 @@ func TestOllamaProvider_EmbedDocuments(t *testing.T) {
 		}
 
 		// Return one 3-dimensional embedding per input.
-		embeddings := make([][]float64, len(req.Input))
+		embeddings := make([][]float32, len(req.Input))
 		for i := range req.Input {
-			embeddings[i] = []float64{float64(i), float64(i + 1), float64(i + 2)}
+			embeddings[i] = []float32{float32(i), float32(i + 1), float32(i + 2)}
 		}
 
-		resp := ollamaBatchEmbedResponse{
+		resp := ollamaEmbedResponse{
 			Model:      "nomic-embed-text",
 			Embeddings: embeddings,
 		}
@@ -94,7 +93,7 @@ func TestOllamaProvider_EmbedDocumentsCountMismatch(t *testing.T) {
 	// guard must surface an error rather than silently dropping/zero-filling
 	// the trailing chunks (which would otherwise be recorded as embedded).
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req ollamaBatchEmbedRequest
+		var req ollamaEmbedRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
@@ -103,11 +102,11 @@ func TestOllamaProvider_EmbedDocumentsCountMismatch(t *testing.T) {
 		if n > 0 {
 			n--
 		}
-		embeddings := make([][]float64, n)
+		embeddings := make([][]float32, n)
 		for i := range embeddings {
-			embeddings[i] = []float64{float64(i), float64(i + 1), float64(i + 2)}
+			embeddings[i] = []float32{float32(i), float32(i + 1), float32(i + 2)}
 		}
-		resp := ollamaBatchEmbedResponse{Model: "nomic-embed-text", Embeddings: embeddings}
+		resp := ollamaEmbedResponse{Model: "nomic-embed-text", Embeddings: embeddings}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
@@ -134,19 +133,19 @@ func TestOllamaProvider_EmbedDocumentsSubBatching(t *testing.T) {
 	callCount := 0
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req ollamaBatchEmbedRequest
+		var req ollamaEmbedRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("failed to decode: %v", err)
 		}
 
 		callCount++
 
-		embeddings := make([][]float64, len(req.Input))
+		embeddings := make([][]float32, len(req.Input))
 		for i := range req.Input {
-			embeddings[i] = []float64{0.1, 0.2, 0.3}
+			embeddings[i] = []float32{0.1, 0.2, 0.3}
 		}
 
-		resp := ollamaBatchEmbedResponse{
+		resp := ollamaEmbedResponse{
 			Model:      "nomic-embed-text",
 			Embeddings: embeddings,
 		}
@@ -187,15 +186,15 @@ func TestOllamaProvider_EmbedBatchDelegatesToDocuments(t *testing.T) {
 			t.Errorf("expected /api/embed, got %s", r.URL.Path)
 		}
 
-		var req ollamaBatchEmbedRequest
+		var req ollamaEmbedRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		embeddings := make([][]float64, len(req.Input))
+		embeddings := make([][]float32, len(req.Input))
 		for i := range req.Input {
-			embeddings[i] = []float64{1.0, 2.0, 3.0}
+			embeddings[i] = []float32{1.0, 2.0, 3.0}
 		}
 
-		resp := ollamaBatchEmbedResponse{
+		resp := ollamaEmbedResponse{
 			Model:      "nomic-embed-text",
 			Embeddings: embeddings,
 		}
@@ -219,68 +218,92 @@ func TestOllamaProvider_EmbedBatchDelegatesToDocuments(t *testing.T) {
 	}
 }
 
-func TestOllamaProvider_EmbedBatchFallsBackOn404(t *testing.T) {
-	// Simulate an old Ollama that doesn't have /api/embed (returns 404).
-	// EmbedBatch should fall back to concurrent single requests.
-	var mu sync.Mutex
-	requestPaths := []string{}
+func TestOllamaProvider_EmbedUsesCurrentEndpointAndOptions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		requestPaths = append(requestPaths, r.URL.Path)
-		mu.Unlock()
-
-		if r.URL.Path == "/api/embed" {
-			// Simulate old Ollama: /api/embed doesn't exist.
-			w.WriteHeader(http.StatusNotFound)
-			return
+		if r.URL.Path != "/api/embed" {
+			t.Fatalf("request path = %q, want /api/embed", r.URL.Path)
 		}
-
-		// Legacy /api/embeddings endpoint.
-		if r.URL.Path == "/api/embeddings" {
-			var req ollamaEmbeddingRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
-
-			resp := ollamaEmbeddingResponse{
-				Embedding: []float64{1.0, 2.0, 3.0},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-			return
+		var req ollamaEmbedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
 		}
+		if req.Model != "qwen3-embedding:0.6b" {
+			t.Errorf("model = %q, want exact configured tag", req.Model)
+		}
+		if req.Dimensions != 1024 {
+			t.Errorf("dimensions = %d, want 1024", req.Dimensions)
+		}
+		if got := req.Options["num_ctx"]; got != float64(4096) {
+			t.Errorf("options.num_ctx = %#v, want 4096", got)
+		}
+		if got := req.Options["num_batch"]; got != float64(128) {
+			t.Errorf("options.num_batch = %#v, want 128", got)
+		}
+		if len(req.Input) != 1 || req.Input[0] != "query: needle" {
+			t.Errorf("input = %#v, want templated query", req.Input)
+		}
+		embedding := make([]float32, 1024)
+		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{Embeddings: [][]float32{embedding}})
 	}))
 	defer server.Close()
 
 	provider := NewOllamaProvider(OllamaConfig{
 		URL:           server.URL,
-		Model:         "nomic-embed-text",
-		Dimensions:    3,
-		MaxRetries:    1,
-		RetryInterval: 1, // fast retry for tests
+		Model:         "qwen3-embedding:0.6b",
+		Dimensions:    1024,
+		Context:       4096,
+		Options:       map[string]any{"num_ctx": 2048, "num_batch": 128},
+		QueryTemplate: "query: {{text}}",
 	})
-
-	results, err := provider.EmbedBatch(context.Background(), []string{"a", "b"})
+	embedding, err := provider.Embed(context.Background(), "needle")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Embed() error = %v", err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
+	if len(embedding) != 1024 {
+		t.Fatalf("embedding dimensions = %d, want 1024", len(embedding))
 	}
+}
 
-	// Should have tried /api/embed once, then fell back to /api/embeddings.
-	foundEmbed := false
-	foundEmbeddings := false
-	for _, p := range requestPaths {
-		if p == "/api/embed" {
-			foundEmbed = true
+func TestOllamaProvider_EmbedDocumentsAppliesDocumentTemplate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollamaEmbedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
 		}
-		if p == "/api/embeddings" {
-			foundEmbeddings = true
+		if len(req.Input) != 2 || req.Input[0] != "document: alpha" || req.Input[1] != "document: beta" {
+			t.Errorf("input = %#v, want document templates", req.Input)
 		}
+		if req.Dimensions != 3 || req.Options["num_batch"] != float64(64) {
+			t.Errorf("dimensions/options = %d/%#v, want 3/64", req.Dimensions, req.Options)
+		}
+		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			Embeddings: [][]float32{{1, 2, 3}, {4, 5, 6}},
+		})
+	}))
+	defer server.Close()
+
+	provider := NewOllamaProvider(OllamaConfig{
+		URL:              server.URL,
+		Dimensions:       3,
+		Options:          map[string]any{"num_batch": 64},
+		DocumentTemplate: "document: {{text}}",
+	})
+	if _, err := provider.EmbedDocuments(context.Background(), []string{"alpha", "beta"}); err != nil {
+		t.Fatalf("EmbedDocuments() error = %v", err)
 	}
-	if !foundEmbed {
-		t.Error("expected /api/embed to be tried first")
-	}
-	if !foundEmbeddings {
-		t.Error("expected fallback to /api/embeddings")
+}
+
+func TestOllamaProvider_EmbedValidatesResponseDimensions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			Embeddings: [][]float32{{1, 2}},
+		})
+	}))
+	defer server.Close()
+
+	provider := NewOllamaProvider(OllamaConfig{URL: server.URL, Dimensions: 3, MaxRetries: 1})
+	_, err := provider.Embed(context.Background(), "query")
+	if err == nil || !strings.Contains(err.Error(), ErrDimensionMismatch.Error()) {
+		t.Fatalf("Embed() error = %v, want dimension mismatch", err)
 	}
 }

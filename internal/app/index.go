@@ -63,8 +63,19 @@ func (s *Service) Index(ctx context.Context, req IndexRequest, progress func(ind
 	} else {
 		result, indexErr = indexer.Index(ctx, s.session.ProjectRoot, req.Paths...)
 	}
+
+	// A persistent embedding cache may buffer writes behind its async writer.
+	// Flush before saving/stashing cache metadata while keeping the provider
+	// reusable by this session.
+	var flushErr error
+	if flusher, ok := s.session.Provider.(interface{ Flush() error }); ok {
+		flushErr = flusher.Flush()
+	}
 	if indexErr != nil {
 		return nil, indexErr
+	}
+	if flushErr != nil {
+		return nil, fmt.Errorf("flush embedding provider: %w", flushErr)
 	}
 	if err := s.saveCurrentEmbeddingProfile(); err != nil {
 		return nil, err
@@ -161,6 +172,9 @@ func (s *Service) indexerConfig(additionalIgnores []string) index.IndexerConfig 
 	// Approximate conversion: ~4 chars per token for typical code.
 	cfg.ChunkOverlap = s.session.Config.Indexing.ChunkOverlap * 4
 	cfg.MaxFileSize = s.session.Config.Indexing.MaxFileSize
+	cfg.SourceBufferBytes = s.session.Config.Indexing.SourceBufferBytes
+	cfg.SyncInterval = s.session.Config.Indexing.SyncInterval
+	cfg.SyncIntervalDuration = s.session.Config.Indexing.SyncIntervalDuration
 	cfg.IgnorePatterns = append(cfg.IgnorePatterns, s.session.Config.Indexing.IgnorePatterns...)
 	cfg.IgnorePatterns = append(cfg.IgnorePatterns, additionalIgnores...)
 	return cfg

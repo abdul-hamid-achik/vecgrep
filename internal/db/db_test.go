@@ -512,3 +512,148 @@ func TestNewChunkRecord(t *testing.T) {
 		t.Errorf("IndexedAt should be between test start and end")
 	}
 }
+
+func TestFileHashesRemainCorrectAfterDeleteAndReopen(t *testing.T) {
+	tmpDir := t.TempDir()
+	const dimensions = 32
+	const projectRoot = "/tmp/hash-project"
+	embedding := make([]float32, dimensions)
+
+	database, err := Open("", dimensions, tmpDir)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	for _, file := range []struct {
+		path string
+		hash string
+	}{
+		{path: "main.go", hash: "hash-main"},
+		{path: "pkg/helper.go", hash: "hash-helper"},
+	} {
+		chunk := NewChunkRecord(
+			projectRoot+"/"+file.path,
+			file.path,
+			file.hash,
+			100,
+			"go",
+			"content",
+			1, 1, 0, 7,
+			"generic",
+			"",
+			projectRoot,
+		)
+		if _, err := database.InsertChunk(chunk, embedding); err != nil {
+			t.Fatalf("InsertChunk(%s) failed: %v", file.path, err)
+		}
+	}
+
+	hashes, err := database.GetFileHashes(projectRoot)
+	if err != nil {
+		t.Fatalf("GetFileHashes before delete failed: %v", err)
+	}
+	if len(hashes) != 2 || hashes["main.go"] != "hash-main" || hashes["pkg/helper.go"] != "hash-helper" {
+		t.Fatalf("unexpected hashes before delete: %#v", hashes)
+	}
+
+	records := database.backend.fileHashCollection().All()
+	if len(records) != 2 {
+		t.Fatalf("expected two vectorless file records, got %d", len(records))
+	}
+	for _, record := range records {
+		if len(record.Vector) != 0 {
+			t.Fatalf("file metadata record %d unexpectedly cloned/stored a vector of length %d", record.ID, len(record.Vector))
+		}
+	}
+
+	if deleted, err := database.DeleteFile(t.Context(), "main.go"); err != nil {
+		t.Fatalf("DeleteFile failed: %v", err)
+	} else if deleted != 1 {
+		t.Fatalf("DeleteFile deleted %d chunks, want 1", deleted)
+	}
+	hashes, err = database.GetFileHashes(projectRoot)
+	if err != nil {
+		t.Fatalf("GetFileHashes after delete failed: %v", err)
+	}
+	if len(hashes) != 1 || hashes["pkg/helper.go"] != "hash-helper" {
+		t.Fatalf("unexpected hashes after delete: %#v", hashes)
+	}
+
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	database, err = Open("", dimensions, tmpDir)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer database.Close()
+
+	hashes, err = database.GetFileHashes(projectRoot)
+	if err != nil {
+		t.Fatalf("GetFileHashes after reopen failed: %v", err)
+	}
+	if len(hashes) != 1 || hashes["pkg/helper.go"] != "hash-helper" {
+		t.Fatalf("unexpected hashes after reopen: %#v", hashes)
+	}
+}
+
+func TestDeleteFileUsesCanonicalPathBeforeLegacyFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	const dimensions = 16
+	const projectRoot = "/tmp/delete-project"
+	embedding := make([]float32, dimensions)
+
+	database, err := Open("", dimensions, tmpDir)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer database.Close()
+
+	for _, path := range []string{"main.go", "pkg/main.go"} {
+		chunk := NewChunkRecord(
+			projectRoot+"/"+path,
+			path,
+			"hash-"+path,
+			100,
+			"go",
+			"content",
+			1, 1, 0, 7,
+			"generic",
+			"",
+			projectRoot,
+		)
+		if _, err := database.InsertChunk(chunk, embedding); err != nil {
+			t.Fatalf("InsertChunk(%s) failed: %v", path, err)
+		}
+	}
+
+	const legacyPath = "/legacy/project/legacy.go"
+	if _, err := database.backend.collection().Insert(embedding, map[string]any{
+		"file_path":    legacyPath,
+		"file_hash":    "legacy-hash",
+		"project_root": "/legacy/project",
+	}); err != nil {
+		t.Fatalf("insert legacy record failed: %v", err)
+	}
+
+	if deleted, err := database.DeleteFile(t.Context(), "main.go"); err != nil {
+		t.Fatalf("canonical DeleteFile failed: %v", err)
+	} else if deleted != 1 {
+		t.Fatalf("canonical DeleteFile deleted %d chunks, want 1", deleted)
+	}
+	if chunks, err := database.GetChunksByFile("pkg/main.go"); err != nil {
+		t.Fatalf("GetChunksByFile(pkg/main.go) failed: %v", err)
+	} else if len(chunks) != 1 {
+		t.Fatalf("canonical deletion removed sibling path: got %d chunks", len(chunks))
+	}
+
+	if deleted, err := database.DeleteFile(t.Context(), legacyPath); err != nil {
+		t.Fatalf("legacy DeleteFile failed: %v", err)
+	} else if deleted != 1 {
+		t.Fatalf("legacy DeleteFile deleted %d chunks, want 1", deleted)
+	}
+	if chunks, err := database.GetChunksByFile(legacyPath); err != nil {
+		t.Fatalf("GetChunksByFile(legacy) failed: %v", err)
+	} else if len(chunks) != 0 {
+		t.Fatalf("legacy record remains after fallback deletion: got %d chunks", len(chunks))
+	}
+}

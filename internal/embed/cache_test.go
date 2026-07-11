@@ -1,9 +1,15 @@
 package embed
 
 import (
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestNewEmbeddingCache(t *testing.T) {
@@ -234,5 +240,158 @@ func TestEmbeddingCache_Concurrent(t *testing.T) {
 	size := cache.Size()
 	if size < 0 || size > 100 {
 		t.Errorf("invalid cache size after concurrent ops: %d", size)
+	}
+}
+
+func TestDiskCacheWriterQueueIsBounded(t *testing.T) {
+	cache, err := NewPersistentCache(16, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+
+	if capacity := cap(cache.writes); capacity != diskCacheWriteQueueSize {
+		t.Fatalf("writer queue capacity = %d, want %d", capacity, diskCacheWriteQueueSize)
+	}
+	if diskCacheWriteBatchSize > diskCacheWriteQueueSize {
+		t.Fatalf("writer batch size %d exceeds queue capacity %d", diskCacheWriteBatchSize, diskCacheWriteQueueSize)
+	}
+}
+
+func TestDiskCacheFlushPersistsPendingWrites(t *testing.T) {
+	cache, err := NewPersistentCache(2, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	cache.SetModel("test-model")
+
+	want := []float32{1.25, -2.5, 3.75}
+	cache.Set("pending", want)
+	if err := cache.Flush(); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	cache.Clear()
+
+	got, ok := cache.Get("pending")
+	if !ok {
+		t.Fatal("entry was not persisted by FlushToDisk")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Get() = %v, want %v", got, want)
+	}
+}
+
+func TestDiskCacheClosePersistsQueuedWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	cache, err := NewPersistentCache(4, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.SetModel("test-model")
+
+	const entries = diskCacheWriteQueueSize + diskCacheWriteBatchSize
+	for i := range entries {
+		cache.Set(fmt.Sprintf("text-%d", i), []float32{float32(i), float32(-i)})
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := NewPersistentCache(4, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reopened.SetModel("test-model")
+	for _, i := range []int{0, entries / 2, entries - 1} {
+		got, ok := reopened.Get(fmt.Sprintf("text-%d", i))
+		want := []float32{float32(i), float32(-i)}
+		if !ok || !reflect.DeepEqual(got, want) {
+			t.Fatalf("reopened Get(%d) = %v, %v, want %v, true", i, got, ok, want)
+		}
+	}
+}
+
+func TestDiskCacheReadsLegacyJSONEntries(t *testing.T) {
+	cache, err := NewPersistentCache(4, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	cache.SetModel("legacy-model")
+
+	want := []float32{0.125, -4.5, 99}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(embedCacheBucket)).Put([]byte(cache.diskKey("legacy")), data)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := cache.Get("legacy")
+	if !ok {
+		t.Fatal("legacy JSON entry was not readable")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Get() = %v, want %v", got, want)
+	}
+}
+
+func TestDiskCacheWritesBinaryEntries(t *testing.T) {
+	cache, err := NewPersistentCache(4, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	cache.SetModel("binary-model")
+	cache.Set("binary", []float32{1, 2, 3})
+	if err := cache.FlushToDisk(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cache.db.View(func(tx *bolt.Tx) error {
+		data := tx.Bucket([]byte(embedCacheBucket)).Get([]byte(cache.diskKey("binary")))
+		if len(data) < len(diskCacheBinaryHeader) ||
+			string(data[:len(diskCacheBinaryHeader)]) != diskCacheBinaryHeader {
+			t.Fatalf("persisted entry does not have binary header: %q", data)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDiskCacheConcurrentGetSetAndFlush(t *testing.T) {
+	cache, err := newPersistentCache(64, time.Minute, filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	cache.SetModel("concurrent-model")
+
+	var wg sync.WaitGroup
+	for worker := range 8 {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := range 100 {
+				text := fmt.Sprintf("%d-%d", worker, i%20)
+				cache.Set(text, []float32{float32(worker), float32(i)})
+				cache.Get(text)
+				if i%25 == 0 {
+					if err := cache.FlushToDisk(); err != nil {
+						t.Errorf("FlushToDisk() error = %v", err)
+					}
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+	if err := cache.FlushToDisk(); err != nil {
+		t.Fatal(err)
 	}
 }

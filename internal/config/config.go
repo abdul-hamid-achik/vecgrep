@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -170,6 +171,14 @@ type EmbeddingConfig struct {
 	// memory after a request. Only used by Ollama. If empty, sensible defaults
 	// are applied: "5m" for single embeds, "30m" for batch indexing.
 	KeepAlive string `mapstructure:"keep_alive" yaml:"keep_alive,omitempty"`
+	// OllamaContext sets Ollama's num_ctx option when positive.
+	OllamaContext int `mapstructure:"ollama_context" yaml:"ollama_context,omitempty"`
+	// OllamaOptions are passed through to Ollama's /api/embed options object.
+	OllamaOptions map[string]any `mapstructure:"ollama_options" yaml:"ollama_options,omitempty"`
+	// QueryTemplate and DocumentTemplate explicitly preprocess inputs for
+	// retrieval models. "{{text}}" is replaced with the input.
+	QueryTemplate    string `mapstructure:"query_template" yaml:"query_template,omitempty"`
+	DocumentTemplate string `mapstructure:"document_template" yaml:"document_template,omitempty"`
 	// Throttle holds optional throttling/caching settings for the CLI
 	// provider path. When left empty, NewProvider wraps the inner provider
 	// with a default ThrottledProvider. Set Throttle.Enabled to false to
@@ -191,16 +200,22 @@ type IndexingConfig struct {
 	IgnorePatterns []string `mapstructure:"ignore_patterns" yaml:"ignore_patterns,omitempty"`
 	// MaxFileSize is the maximum file size to index in bytes
 	MaxFileSize int64 `mapstructure:"max_file_size" yaml:"max_file_size,omitempty"`
+	// SourceBufferBytes bounds queued source bytes before chunking.
+	SourceBufferBytes int64 `mapstructure:"source_buffer_bytes" yaml:"source_buffer_bytes,omitempty"`
+	// SyncInterval syncs storage after this many indexed files.
+	SyncInterval int `mapstructure:"sync_interval" yaml:"sync_interval,omitempty"`
+	// SyncIntervalDuration syncs storage after this much elapsed time.
+	SyncIntervalDuration time.Duration `mapstructure:"sync_interval_duration" yaml:"sync_interval_duration,omitempty"`
 }
 
 // ServerConfig holds MCP server settings.
 type ServerConfig struct {
 	// MCPEnabled enables the MCP server
 	MCPEnabled bool `mapstructure:"mcp_enabled" yaml:"mcp_enabled,omitempty"`
-	// MCPReloadInterval is the maximum age of a read-only snapshot before
-	// it is reloaded from disk to pick up writes from other processes
-	// (the daemon, CLI index, etc.). Zero means reload on every read
-	// call. Default: 5s. Set via vecgrep.yaml:
+	// MCPReloadInterval is the minimum interval between read-only database
+	// metadata checks. A check reloads the snapshot only when the persisted
+	// database generation changed. Zero checks on every read. Default: 5s.
+	// Set via vecgrep.yaml:
 	//   server:
 	//     mcp_reload_interval: "10s"
 	MCPReloadInterval string `mapstructure:"mcp_reload_interval" yaml:"mcp_reload_interval,omitempty"`
@@ -269,7 +284,13 @@ type DaemonConfig struct {
 	LogOffloadTTL string `mapstructure:"log_offload_ttl" yaml:"log_offload_ttl,omitempty"`
 }
 
-// Default daemon constants.
+// Default indexing flow-control values.
+const (
+	DefaultIndexSourceBufferBytes    = 8 * 1024 * 1024
+	DefaultIndexSyncInterval         = 50
+	DefaultIndexSyncIntervalDuration = 30 * time.Second
+)
+
 const (
 	DefaultDaemonIdleTimeout      = 30 // minutes
 	DefaultDaemonEmbedWorkers     = 4
@@ -305,7 +326,10 @@ func DefaultConfig() *Config {
 				"package-lock.json",
 				"yarn.lock",
 			},
-			MaxFileSize: 1024 * 1024, // 1MB
+			MaxFileSize:          1024 * 1024, // 1MB
+			SourceBufferBytes:    DefaultIndexSourceBufferBytes,
+			SyncInterval:         DefaultIndexSyncInterval,
+			SyncIntervalDuration: DefaultIndexSyncIntervalDuration,
 		},
 		Search: SearchConfig{
 			DefaultMode:  "hybrid", // Default to hybrid search

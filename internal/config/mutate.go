@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +21,7 @@ func ParseConfigValue(key, value string) (any, error) {
 	switch key {
 	case "data_dir", "db_path",
 		"embedding.model", "embedding.ollama_url",
+		"embedding.query_template", "embedding.document_template",
 		"embedding.openai_api_key", "embedding.openai_base_url",
 		"embedding.cohere_api_key", "embedding.cohere_base_url",
 		"embedding.voyage_api_key", "embedding.voyage_base_url":
@@ -32,10 +35,24 @@ func ParseConfigValue(key, value string) (any, error) {
 		}
 	case "embedding.dimensions":
 		return parsePositiveInt(key, value)
-	case "indexing.chunk_size", "indexing.chunk_overlap":
+	case "embedding.ollama_context":
 		return parseNonNegativeInt(key, value)
-	case "indexing.max_file_size":
+	case "embedding.ollama_options":
+		options := make(map[string]any)
+		if err := yaml.Unmarshal([]byte(value), &options); err != nil {
+			return nil, fmt.Errorf("invalid embedding.ollama_options value %q: %w", value, err)
+		}
+		return options, nil
+	case "indexing.chunk_size", "indexing.chunk_overlap", "indexing.sync_interval":
+		return parseNonNegativeInt(key, value)
+	case "indexing.max_file_size", "indexing.source_buffer_bytes":
 		return parsePositiveInt64(key, value)
+	case "indexing.sync_interval_duration":
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration < 0 {
+			return nil, fmt.Errorf("invalid indexing.sync_interval_duration value %q", value)
+		}
+		return duration, nil
 	case "indexing.ignore_patterns":
 		return parseStringList(value)
 	case "search.default_mode":
@@ -155,6 +172,14 @@ func ApplyConfigValue(cfg *Config, key, value string) error {
 		cfg.Embedding.VoyageBaseURL = parsed.(string)
 	case "embedding.dimensions":
 		cfg.Embedding.Dimensions = parsed.(int)
+	case "embedding.ollama_context":
+		cfg.Embedding.OllamaContext = parsed.(int)
+	case "embedding.ollama_options":
+		cfg.Embedding.OllamaOptions = parsed.(map[string]any)
+	case "embedding.query_template":
+		cfg.Embedding.QueryTemplate = parsed.(string)
+	case "embedding.document_template":
+		cfg.Embedding.DocumentTemplate = parsed.(string)
 	case "embedding.throttle.enabled":
 		b := parsed.(bool)
 		cfg.Embedding.Throttle.Enabled = &b
@@ -168,6 +193,12 @@ func ApplyConfigValue(cfg *Config, key, value string) error {
 		cfg.Indexing.ChunkOverlap = parsed.(int)
 	case "indexing.max_file_size":
 		cfg.Indexing.MaxFileSize = parsed.(int64)
+	case "indexing.source_buffer_bytes":
+		cfg.Indexing.SourceBufferBytes = parsed.(int64)
+	case "indexing.sync_interval":
+		cfg.Indexing.SyncInterval = parsed.(int)
+	case "indexing.sync_interval_duration":
+		cfg.Indexing.SyncIntervalDuration = parsed.(time.Duration)
 	case "indexing.ignore_patterns":
 		cfg.Indexing.IgnorePatterns = parsed.([]string)
 	case "search.default_mode":
@@ -230,14 +261,27 @@ func SetConfigValueInFile(path, key, value string) error {
 	if err != nil {
 		return err
 	}
+	return SetConfigValuesInFile(path, map[string]any{key: parsed})
+}
 
+// SetConfigValuesInFile updates multiple YAML paths as one file mutation.
+// The document is loaded and encoded once, so an invalid existing document or
+// path leaves the original file untouched.
+func SetConfigValuesInFile(path string, values map[string]any) error {
 	doc, err := readYAMLDocument(path)
 	if err != nil {
 		return err
 	}
 
-	if err := setYAMLPath(doc, strings.Split(key, "."), yamlNodeForValue(parsed)); err != nil {
-		return err
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := setYAMLPath(doc, strings.Split(key, "."), yamlNodeForValue(values[key])); err != nil {
+			return err
+		}
 	}
 
 	var out bytes.Buffer
@@ -447,6 +491,10 @@ func yamlNodeForValue(value any) *yaml.Node {
 		}
 		return node
 	default:
+		var node yaml.Node
+		if err := node.Encode(value); err == nil {
+			return &node
+		}
 		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: fmt.Sprint(value)}
 	}
 }

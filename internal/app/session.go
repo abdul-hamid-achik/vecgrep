@@ -206,10 +206,21 @@ func fileExists(path string) bool {
 }
 
 func (s *Session) Close() error {
-	if s == nil || s.DB == nil {
+	if s == nil {
 		return nil
 	}
-	return s.DB.Close()
+	var providerErr error
+	switch closer := s.Provider.(type) {
+	case interface{ Close() error }:
+		providerErr = closer.Close()
+	case interface{ Close() }:
+		closer.Close()
+	}
+	var dbErr error
+	if s.DB != nil {
+		dbErr = s.DB.Close()
+	}
+	return errors.Join(providerErr, dbErr)
 }
 
 func NewService(session *Session) *Service {

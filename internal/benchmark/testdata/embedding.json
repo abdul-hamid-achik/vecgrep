@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "documents": [
+    {"id":"go-provider-interface","language":"go","source":{"path":"internal/embed/provider.go","anchor":"type Provider interface {","lines_before":1,"lines_after":23}},
+    {"id":"go-chunk-metadata","language":"go","source":{"path":"internal/index/chunker.go","anchor":"type Chunk struct {","lines_before":1,"lines_after":10}},
+    {"id":"go-indexer-structure","language":"go","source":{"path":"internal/index/indexer.go","anchor":"type Indexer struct {","lines_before":1,"lines_after":12}},
+    {"id":"go-index-project","language":"go","source":{"path":"internal/index/indexer.go","anchor":"func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...string) (*IndexResult, error) {","lines_before":2,"lines_after":8}},
+    {"id":"go-semantic-search","language":"go","source":{"path":"internal/search/search.go","anchor":"func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {","lines_before":2,"lines_after":18}},
+    {"id":"go-provider-factory","language":"go","source":{"path":"internal/app/provider.go","anchor":"func NewProvider(cfg *config.Config) (embed.Provider, error) {","lines_before":1,"lines_after":16}},
+    {"id":"go-service-search","language":"go","source":{"path":"internal/app/search.go","anchor":"func (s *Service) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {","lines_before":2,"lines_after":20}},
+    {"id":"go-config-load","language":"go","source":{"path":"internal/config/config.go","anchor":"func Load(projectDir string) (*Config, error) {","lines_before":2,"lines_after":12}},
+    {"id":"go-batch-insert","language":"go","source":{"path":"internal/db/db.go","anchor":"func (db *DB) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]float32) ([]uint64, error) {","lines_before":2,"lines_after":8}},
+    {"id":"go-backend-reload","language":"go","source":{"path":"internal/db/veclite_backend.go","anchor":"func (b *VecLiteBackend) Reload() error {","lines_before":2,"lines_after":28}},
+
+    {"id":"ts-react-hook","language":"typescript","text":"import { useEffect, useState } from 'react';\nexport function useProjectSearch(query: string) {\n  const [results, setResults] = useState<Result[]>([]);\n  useEffect(() => {\n    const controller = new AbortController();\n    fetch(`/api/search?q=${encodeURIComponent(query)}`, { signal: controller.signal })\n      .then(r => r.json()).then(setResults);\n    return () => controller.abort();\n  }, [query]);\n  return results;\n}"},
+    {"id":"ts-api-client","language":"typescript","text":"export async function fetchWithRetry(url: string, attempts = 3): Promise<Response> {\n  for (let n = 0; n < attempts; n++) {\n    const response = await fetch(url);\n    if (response.ok) return response;\n    if (response.status < 500) throw new Error(`request failed: ${response.status}`);\n    await new Promise(resolve => setTimeout(resolve, 2 ** n * 100));\n  }\n  throw new Error('retry budget exhausted');\n}"},
+    {"id":"ts-distractor-sort","language":"typescript","text":"export const sortUsers = (users: User[]) => [...users].sort((a, b) => a.lastName.localeCompare(b.lastName));"},
+    {"id":"ts-lru-cache","language":"typescript","text":"export class LruCache<V> {\n  private values = new Map<string, V>();\n  get(key: string): V | undefined { const value = this.values.get(key); if (value !== undefined) { this.values.delete(key); this.values.set(key, value); } return value; }\n  set(key: string, value: V) { this.values.delete(key); this.values.set(key, value); if (this.values.size > 100) this.values.delete(this.values.keys().next().value!); }\n}"},
+
+    {"id":"py-async-retry","language":"python","text":"import asyncio\nasync def request_with_backoff(client, url, attempts=4):\n    for attempt in range(attempts):\n        try:\n            return await client.get(url)\n        except TimeoutError:\n            if attempt + 1 == attempts:\n                raise\n            await asyncio.sleep(0.1 * (2 ** attempt))"},
+    {"id":"py-vector-cosine","language":"python","text":"from math import sqrt\ndef cosine_similarity(left, right):\n    dot = sum(a * b for a, b in zip(left, right))\n    left_norm = sqrt(sum(a * a for a in left))\n    right_norm = sqrt(sum(b * b for b in right))\n    if not left_norm or not right_norm:\n        raise ValueError('zero vector')\n    return dot / (left_norm * right_norm)"},
+    {"id":"py-distractor-csv","language":"python","text":"import csv\ndef export_rows(path, rows):\n    with open(path, 'w', newline='') as output:\n        writer = csv.DictWriter(output, fieldnames=['name', 'email'])\n        writer.writeheader()\n        writer.writerows(rows)"},
+    {"id":"py-anchor-extract","language":"python","text":"def extract_unique_span(source, anchor, before, after):\n    if source.count(anchor) != 1:\n        raise ValueError('anchor must occur exactly once')\n    lines = source.splitlines()\n    line = next(i for i, value in enumerate(lines) if anchor in value)\n    return '\\n'.join(lines[max(0, line-before):line+after+1])"},
+
+    {"id":"rust-batch-worker","language":"rust","text":"pub fn batches<T>(items: &[T], size: usize) -> impl Iterator<Item = &[T]> {\n    assert!(size > 0);\n    items.chunks(size)\n}\nasync fn embed_all(provider: &Provider, texts: &[String]) -> Result<Vec<Vector>> {\n    let mut output = Vec::with_capacity(texts.len());\n    for batch in batches(texts, 32) { output.extend(provider.embed(batch).await?); }\n    Ok(output)\n}"},
+    {"id":"rust-error-context","language":"rust","text":"use anyhow::{Context, Result};\nfn load_dataset(path: &Path) -> Result<Dataset> {\n    let bytes = std::fs::read(path).with_context(|| format!(\"read {}\", path.display()))?;\n    serde_json::from_slice(&bytes).context(\"decode benchmark dataset\")\n}"},
+    {"id":"rust-distractor-parser","language":"rust","text":"fn parse_color(input: &str) -> Option<(u8, u8, u8)> {\n    let value = input.strip_prefix('#')?;\n    Some((u8::from_str_radix(&value[0..2], 16).ok()?, u8::from_str_radix(&value[2..4], 16).ok()?, u8::from_str_radix(&value[4..6], 16).ok()?))\n}"},
+
+    {"id":"yaml-ci-go","language":"yaml","text":"name: focused-tests\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-go@v5\n        with: { go-version: '1.25' }\n      - run: go test ./internal/benchmark\n"},
+    {"id":"yaml-k8s-health","language":"yaml","text":"apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: search-api }\nspec:\n  template:\n    spec:\n      containers:\n        - name: api\n          image: example/search:latest\n          readinessProbe:\n            httpGet: { path: /ready, port: 8080 }\n"},
+    {"id":"yaml-distractor-theme","language":"yaml","text":"theme:\n  palette:\n    background: '#101418'\n    foreground: '#e8edf2'\n  typography:\n    family: Inter\n    scale: 1.125\n"},
+
+    {"id":"md-config-guide","language":"markdown","text":"# Embedding configuration\nSet the provider, model, vector dimensions, and context window in the project configuration. Query and document templates can wrap `{{text}}` for retrieval-specific models. Keep credentials in environment variables rather than source control."},
+    {"id":"md-search-guide","language":"markdown","text":"# Semantic search\nThe search command embeds the query, compares it with indexed code chunks, applies path and language filters, and returns the closest matches. Increase the result limit when exploring several implementations of the same behavior."},
+    {"id":"md-distractor-release","language":"markdown","text":"# Release checklist\nUpdate the version, summarize user-facing changes, create the signed tag, publish artifacts, and verify package checksums before announcing the release."},
+
+    {"id":"sh-backup","language":"shell","text":"#!/bin/sh\nset -eu\nstamp=$(date +%Y%m%d-%H%M%S)\ntar -czf \"backup-$stamp.tar.gz\" -- data/\nfind . -name 'backup-*.tar.gz' -mtime +7 -delete\n"},
+    {"id":"sh-healthcheck","language":"shell","text":"#!/bin/sh\nset -eu\nfor attempt in 1 2 3 4 5; do\n  if curl --fail --silent http://localhost:8080/ready >/dev/null; then exit 0; fi\n  sleep \"$attempt\"\ndone\nexit 1\n"},
+    {"id":"sh-distractor-format","language":"shell","text":"#!/bin/sh\nset -eu\ngofmt -w ./cmd ./internal\nprettier --write 'web/**/*.{ts,tsx,css}'\n"}
+  ],
+  "queries": [
+    {"id":"q-provider-contract","text":"interface for generating single and batch embeddings and reporting model dimensions","relevant":["go-provider-interface"]},
+    {"id":"q-chunk-lines","text":"code chunk metadata including content and start and end line numbers","relevant":["go-chunk-metadata"]},
+    {"id":"q-indexer-components","text":"object coordinating database embedding provider chunker and indexing configuration","relevant":["go-indexer-structure"]},
+    {"id":"q-index-project","text":"index a project directory with optional paths and context cancellation","relevant":["go-index-project","go-indexer-structure"]},
+    {"id":"q-semantic-query","text":"perform semantic search for a query with search options and validate empty input","relevant":["go-semantic-search","go-service-search"]},
+    {"id":"q-provider-construction","text":"construct embedding backend from application configuration and add cache throttling","relevant":["go-provider-factory","go-provider-interface"]},
+    {"id":"q-service-search","text":"application service search request response and initialized session guard","relevant":["go-service-search"]},
+    {"id":"q-load-config","text":"resolve hierarchical project configuration from a directory","relevant":["go-config-load","md-config-guide"]},
+    {"id":"q-batch-storage","text":"insert many chunk records and embedding vectors into database in one call","relevant":["go-batch-insert"]},
+    {"id":"q-reload-storage","text":"reload vector database storage so readers observe external writes safely","relevant":["go-backend-reload"]},
+
+    {"id":"q-react-fetch","text":"React hook fetches search results and aborts request when effect is cleaned up","relevant":["ts-react-hook"]},
+    {"id":"q-http-backoff","text":"retry transient HTTP failures with exponential backoff","relevant":["ts-api-client","py-async-retry"]},
+    {"id":"q-sort-users","text":"sort users alphabetically by last name without mutating original array","relevant":["ts-distractor-sort"]},
+    {"id":"q-lru","text":"least recently used in-memory cache refreshes keys and evicts oldest entry","relevant":["ts-lru-cache"]},
+    {"id":"q-python-async","text":"Python async request retry after timeout using asyncio sleep","relevant":["py-async-retry"]},
+    {"id":"q-cosine","text":"compute cosine similarity from dot product and vector norms","relevant":["py-vector-cosine"]},
+    {"id":"q-export-csv","text":"write dictionaries to a CSV file with header fields","relevant":["py-distractor-csv"]},
+    {"id":"q-anchor-span","text":"extract bounded lines around an anchor that must occur exactly once","relevant":["py-anchor-extract"]},
+
+    {"id":"q-rust-batches","text":"Rust split items into fixed size chunks and asynchronously embed every batch","relevant":["rust-batch-worker"]},
+    {"id":"q-rust-errors","text":"add file path context to read and JSON decoding errors in Rust","relevant":["rust-error-context"]},
+    {"id":"q-hex-color","text":"parse hexadecimal RGB color channels","relevant":["rust-distractor-parser"]},
+    {"id":"q-focused-ci","text":"GitHub Actions workflow running focused Go benchmark package tests","relevant":["yaml-ci-go"]},
+    {"id":"q-readiness","text":"Kubernetes deployment readiness probe calls HTTP ready endpoint","relevant":["yaml-k8s-health","sh-healthcheck"]},
+    {"id":"q-theme","text":"YAML color palette typography family and scale","relevant":["yaml-distractor-theme"]},
+
+    {"id":"q-template-config","text":"configure retrieval query and document templates using text placeholder","relevant":["md-config-guide"]},
+    {"id":"q-search-overview","text":"embed a query compare indexed chunks filter results by path and language","relevant":["md-search-guide","go-semantic-search"]},
+    {"id":"q-release","text":"release checklist version tag artifacts and checksums","relevant":["md-distractor-release"]},
+    {"id":"q-backup-retention","text":"shell archive data with timestamp and delete backups older than seven days","relevant":["sh-backup"]},
+    {"id":"q-shell-health","text":"poll readiness URL with curl retries then fail after attempts","relevant":["sh-healthcheck"]},
+    {"id":"q-format-code","text":"format Go and web TypeScript CSS source files from shell","relevant":["sh-distractor-format"]}
+  ]
+}

@@ -88,14 +88,27 @@ type HNSWConfig struct {
 // and search goroutines. collMu guards the pointer itself; veclite's
 // *Collection is internally synchronized, so callers only need the lock long
 // enough to read the current pointer (see collection()).
+type vecLiteBackendTestHooks struct {
+	afterChunkInsert func()
+	syncLocked       func()
+}
+
 type VecLiteBackend struct {
 	collMu     sync.RWMutex
+	storageMu  sync.Mutex
 	db         *veclite.DB
 	coll       *veclite.Collection
+	fileHashes *veclite.Collection
 	dbPath     string
 	dimensions int
 	hnsw       HNSWConfig
+	readOnly   bool
+	testHooks  *vecLiteBackendTestHooks
 }
+
+// Lock order is storageMu, then collMu, then any VecLite DB/Collection lock.
+// collection and fileHashCollection release collMu before returning, so readers
+// never hold collMu while entering VecLite or waiting for storageMu.
 
 // collection returns the active collection pointer under the read lock. The
 // lock only guards against Reload/DeleteAll swapping the pointer; veclite's
@@ -107,10 +120,20 @@ func (b *VecLiteBackend) collection() *veclite.Collection {
 	return b.coll
 }
 
-// setCollection swaps the active collection pointer under the write lock.
-func (b *VecLiteBackend) setCollection(coll *veclite.Collection) {
+// fileHashCollection returns the collection that stores vectorless per-file
+// metadata. Legacy databases opened read-only may not have this collection.
+func (b *VecLiteBackend) fileHashCollection() *veclite.Collection {
+	b.collMu.RLock()
+	defer b.collMu.RUnlock()
+	return b.fileHashes
+}
+
+// setCollections publishes collection pointers together so Reload and
+// DeleteAll cannot expose a mismatched pair.
+func (b *VecLiteBackend) setCollections(coll, fileHashes *veclite.Collection) {
 	b.collMu.Lock()
 	b.coll = coll
+	b.fileHashes = fileHashes
 	b.collMu.Unlock()
 }
 
@@ -139,7 +162,10 @@ func (b *VecLiteBackend) Init(dimensions int, hnsw HNSWConfig) error {
 // multiple processes to open the same file for read-only access (requires
 // readOnly).
 func (b *VecLiteBackend) InitWithOptions(dimensions int, hnsw HNSWConfig, readOnly, sharedRead bool) error {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	b.dimensions = dimensions
+	b.readOnly = readOnly
 	if hnsw.M <= 0 {
 		hnsw.M = DefaultHNSWM
 	}
@@ -185,7 +211,24 @@ func (b *VecLiteBackend) InitWithOptions(dimensions int, hnsw HNSWConfig, readOn
 			return fmt.Errorf("failed to create/get collection: %w", err)
 		}
 	}
-	b.setCollection(coll)
+	var fileHashes *veclite.Collection
+	fileHashes, err = db.CreateCollection("file_hashes")
+	createdFileHashes := err == nil
+	if err != nil {
+		fileHashes, err = db.GetCollection("file_hashes")
+		if err != nil && !readOnly {
+			return fmt.Errorf("failed to create/get file hashes collection: %w", err)
+		}
+		if err != nil {
+			fileHashes = nil
+		}
+	}
+	if createdFileHashes && coll.Count() == 0 {
+		if err := fileHashes.SetMetadataValue(fileHashCompleteMetadata, true); err != nil {
+			return fmt.Errorf("initialize file hashes collection: %w", err)
+		}
+	}
+	b.setCollections(coll, fileHashes)
 
 	return nil
 }
@@ -197,6 +240,8 @@ func (b *VecLiteBackend) HNSWConfig() HNSWConfig {
 
 // SetMetadataValue stores a single metadata value on the chunks collection.
 func (b *VecLiteBackend) SetMetadataValue(key string, value any) error {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	coll := b.collection()
 	if coll == nil {
 		return fmt.Errorf("backend not initialized")
@@ -217,6 +262,8 @@ func (b *VecLiteBackend) MetadataValue(key string) (any, bool) {
 
 // DeleteMetadataValue removes a single metadata value from the chunks collection.
 func (b *VecLiteBackend) DeleteMetadataValue(key string) error {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	coll := b.collection()
 	if coll == nil {
 		return fmt.Errorf("backend not initialized")
@@ -250,8 +297,86 @@ func (b *VecLiteBackend) searchOptions(limit int) []veclite.SearchOption {
 	return opts
 }
 
+const (
+	fileHashRecordType       = "file_hash"
+	fileHashReadyType        = "project_ready"
+	fileHashKeyField         = "_file_hash_key"
+	fileHashRecordField      = "_record_type"
+	fileHashCompleteMetadata = "_file_hash_index_complete"
+)
+
+func fileHashKey(projectRoot, relativePath string) string {
+	return "file:" + projectRoot + "\x00" + relativePath
+}
+
+func fileHashReadyKey(projectRoot string) string {
+	return "project:" + projectRoot
+}
+
+func (b *VecLiteBackend) upsertFileHash(chunk ChunkRecord) error {
+	coll := b.fileHashCollection()
+	if coll == nil {
+		return nil
+	}
+	key := fileHashKey(chunk.ProjectRoot, chunk.RelativePath)
+	_, _, err := coll.UpsertRecordByKey(fileHashKeyField, key, veclite.RecordInput{
+		Payload: map[string]any{
+			fileHashKeyField:    key,
+			fileHashRecordField: fileHashRecordType,
+			"file_path":         chunk.FilePath,
+			"relative_path":     chunk.RelativePath,
+			"file_hash":         chunk.FileHash,
+			"project_root":      chunk.ProjectRoot,
+		},
+	})
+	return err
+}
+
+func (b *VecLiteBackend) markFileHashesReady(projectRoot string) error {
+	coll := b.fileHashCollection()
+	if coll == nil {
+		return nil
+	}
+	key := fileHashReadyKey(projectRoot)
+	_, _, err := coll.UpsertRecordByKey(fileHashKeyField, key, veclite.RecordInput{
+		Payload: map[string]any{
+			fileHashKeyField:    key,
+			fileHashRecordField: fileHashReadyType,
+			"project_root":      projectRoot,
+		},
+	})
+	return err
+}
+
+func (b *VecLiteBackend) fileHashesReady(projectRoot string) bool {
+	coll := b.fileHashCollection()
+	if coll == nil {
+		return false
+	}
+	if complete, _ := coll.Metadata()[fileHashCompleteMetadata].(bool); complete {
+		return true
+	}
+	record, err := coll.FindOne(
+		veclite.Equal(fileHashKeyField, fileHashReadyKey(projectRoot)),
+		veclite.Equal(fileHashRecordField, fileHashReadyType),
+	)
+	return err == nil && record != nil
+}
+
+func (b *VecLiteBackend) invalidateFileHashes(projectRoot string) {
+	if coll := b.fileHashCollection(); coll != nil {
+		_ = coll.DeleteMetadataValue(fileHashCompleteMetadata)
+		_, _ = coll.DeleteWhere(
+			veclite.Equal(fileHashKeyField, fileHashReadyKey(projectRoot)),
+			veclite.Equal(fileHashRecordField, fileHashReadyType),
+		)
+	}
+}
+
 // InsertChunk inserts a chunk with all its metadata and embedding.
 func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (uint64, error) {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	if len(embedding) != b.dimensions {
 		return 0, fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), b.dimensions)
 	}
@@ -288,6 +413,14 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 	if err != nil {
 		return 0, err
 	}
+	if b.testHooks != nil && b.testHooks.afterChunkInsert != nil {
+		b.testHooks.afterChunkInsert()
+	}
+	if err := b.upsertFileHash(chunk); err != nil {
+		_ = b.collection().Delete(id)
+		b.invalidateFileHashes(chunk.ProjectRoot)
+		return 0, fmt.Errorf("store file hash: %w", err)
+	}
 
 	return id, nil
 }
@@ -295,6 +428,8 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 // InsertChunkBatch inserts multiple chunks in a single batch operation.
 // Returns the IDs of the inserted chunks.
 func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]float32) ([]uint64, error) {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	if len(chunks) != len(embeddings) {
 		return nil, fmt.Errorf("chunks and embeddings length mismatch: %d vs %d", len(chunks), len(embeddings))
 	}
@@ -305,6 +440,7 @@ func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]f
 
 	vectors := make([][]float32, len(chunks))
 	payloads := make([]map[string]any, len(chunks))
+	fileChunks := make(map[string]ChunkRecord)
 
 	for i, chunk := range chunks {
 		if len(embeddings[i]) != b.dimensions {
@@ -331,12 +467,22 @@ func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]f
 			"project_root":  chunk.ProjectRoot,
 			"indexed_at":    chunk.IndexedAt.Format(time.RFC3339),
 		}
+		fileChunks[fileHashKey(chunk.ProjectRoot, chunk.RelativePath)] = chunk
 	}
 
 	// Use InsertBatch for batch insert
 	ids, err := b.collection().InsertBatch(vectors, payloads)
 	if err != nil {
 		return nil, fmt.Errorf("batch insert failed: %w", err)
+	}
+	for _, chunk := range fileChunks {
+		if err := b.upsertFileHash(chunk); err != nil {
+			for _, id := range ids {
+				_ = b.collection().Delete(id)
+			}
+			b.invalidateFileHashes(chunk.ProjectRoot)
+			return nil, fmt.Errorf("store file hash: %w", err)
+		}
 	}
 
 	return ids, nil
@@ -346,6 +492,8 @@ func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]f
 // The key is based on relative_path:start_line for chunk identification.
 // Returns the ID and whether it was a new insert (true) or update (false).
 func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (uint64, bool, error) {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	if len(embedding) != b.dimensions {
 		return 0, false, fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), b.dimensions)
 	}
@@ -374,6 +522,10 @@ func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (ui
 	if err != nil {
 		return 0, false, fmt.Errorf("upsert failed: %w", err)
 	}
+	if err := b.upsertFileHash(chunk); err != nil {
+		b.invalidateFileHashes(chunk.ProjectRoot)
+		return 0, false, fmt.Errorf("store file hash: %w", err)
+	}
 
 	return id, isNew, nil
 }
@@ -381,6 +533,8 @@ func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (ui
 // InsertEmbedding inserts an embedding for a chunk (legacy compatibility).
 // Deprecated: Use InsertChunk instead for full metadata storage.
 func (b *VecLiteBackend) InsertEmbedding(chunkID int64, embedding []float32) error {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	if len(embedding) != b.dimensions {
 		return fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), b.dimensions)
 	}
@@ -392,42 +546,66 @@ func (b *VecLiteBackend) InsertEmbedding(chunkID int64, embedding []float32) err
 
 // DeleteEmbedding removes an embedding for a chunk (legacy compatibility).
 func (b *VecLiteBackend) DeleteEmbedding(chunkID int64) error {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	_, err := b.collection().DeleteWhere(veclite.Equal("chunk_id", chunkID))
 	return err
 }
 
 // DeleteByFilePath removes all chunks for a given file path.
 func (b *VecLiteBackend) DeleteByFilePath(filePath string) (int64, error) {
-	// Try both relative and absolute path matching
-	deleted1, err := b.collection().DeleteWhere(veclite.Equal("file_path", filePath))
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
+
+	// Modern records are keyed by canonical project-relative paths. Only scan
+	// the legacy absolute-path field when no canonical record matched.
+	deleted, err := b.collection().DeleteWhere(veclite.Equal("relative_path", filePath))
 	if err != nil {
-		return 0, err
+		return int64(deleted), err
+	}
+	if deleted > 0 {
+		if coll := b.fileHashCollection(); coll != nil {
+			if _, err := coll.DeleteWhere(veclite.Equal("relative_path", filePath)); err != nil {
+				return int64(deleted), err
+			}
+		}
+		return int64(deleted), nil
 	}
 
-	deleted2, err := b.collection().DeleteWhere(veclite.Equal("relative_path", filePath))
+	deleted, err = b.collection().DeleteWhere(veclite.Equal("file_path", filePath))
 	if err != nil {
-		return int64(deleted1), err
+		return int64(deleted), err
 	}
-
-	return int64(deleted1 + deleted2), nil
+	if deleted > 0 {
+		if coll := b.fileHashCollection(); coll != nil {
+			if _, err := coll.DeleteWhere(veclite.Equal("file_path", filePath)); err != nil {
+				return int64(deleted), err
+			}
+		}
+	}
+	return int64(deleted), nil
 }
 
 // DeleteByProjectRoot removes all chunks for a project.
 // If all records are deleted, the collection is recreated to reset the HNSW index.
 func (b *VecLiteBackend) DeleteByProjectRoot(projectRoot string) (int64, error) {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
+
 	deleted, err := b.collection().DeleteWhere(veclite.Equal("project_root", projectRoot))
 	if err != nil {
 		return int64(deleted), err
 	}
+	if coll := b.fileHashCollection(); coll != nil {
+		if _, err := coll.DeleteWhere(veclite.Equal("project_root", projectRoot)); err != nil {
+			return int64(deleted), err
+		}
+	}
 
 	// If the collection is now empty, recreate it to reset the HNSW index.
-	// This works around a bug in veclite (still present in v0.16.0) where the
-	// HNSW index's entry point becomes invalid after deleting all records,
-	// causing a panic ("index out of range [0] with length 0") on the next
-	// Insert. v0.16.0 fixed per-space index leaks on delete, but not this
-	// empty-collection entry-point corruption path. Re-tested 2026-06-21.
+	// This works around VecLite's empty-collection entry-point corruption path.
 	if b.collection().Count() == 0 {
-		if err := b.DeleteAll(); err != nil {
+		if err := b.recreateCollections(); err != nil {
 			return int64(deleted), err
 		}
 	}
@@ -438,25 +616,81 @@ func (b *VecLiteBackend) DeleteByProjectRoot(projectRoot string) (int64, error) 
 // GetFileHashes returns a map of relative_path -> file_hash for a project.
 // Used for incremental indexing to detect changed files.
 func (b *VecLiteBackend) GetFileHashes(projectRoot string) (map[string]string, error) {
-	fileHashes := make(map[string]string)
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 
-	// Use the native project_root filter instead of scanning every record.
-	// This runs on every incremental index, so pushing the filter down matters.
+	if b.fileHashesReady(projectRoot) {
+		records, err := b.fileHashCollection().Find(
+			veclite.Equal(fileHashRecordField, fileHashRecordType),
+			veclite.Equal("project_root", projectRoot),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("find file hash records: %w", err)
+		}
+		return fileHashesFromRecords(records), nil
+	}
+
+	// Legacy databases have no vectorless file metadata. Scan their chunk
+	// records once, then backfill the lightweight collection for future calls.
 	records, err := b.collection().Find(veclite.Equal("project_root", projectRoot))
 	if err != nil {
 		return nil, fmt.Errorf("find project records: %w", err)
 	}
+	fileMetadata := fileMetadataFromRecords(records)
+	fileHashes := make(map[string]string, len(fileMetadata))
+	for relPath, chunk := range fileMetadata {
+		fileHashes[relPath] = chunk.FileHash
+	}
 
+	hashColl := b.fileHashCollection()
+	if b.readOnly || hashColl == nil {
+		return fileHashes, nil
+	}
+	if _, err := hashColl.DeleteWhere(
+		veclite.Equal(fileHashRecordField, fileHashRecordType),
+		veclite.Equal("project_root", projectRoot),
+	); err != nil {
+		return nil, fmt.Errorf("clear file hash records: %w", err)
+	}
+	for _, chunk := range fileMetadata {
+		if err := b.upsertFileHash(chunk); err != nil {
+			return nil, fmt.Errorf("backfill file hash: %w", err)
+		}
+	}
+	if err := b.markFileHashesReady(projectRoot); err != nil {
+		return nil, fmt.Errorf("mark file hashes ready: %w", err)
+	}
+	return fileHashes, nil
+}
+
+func fileHashesFromRecords(records []*veclite.Record) map[string]string {
+	fileHashes := make(map[string]string)
 	for _, r := range records {
 		relPath := getStringPayload(r.Payload, "relative_path")
 		hash := getStringPayload(r.Payload, "file_hash")
-
 		if relPath != "" && hash != "" {
 			fileHashes[relPath] = hash
 		}
 	}
+	return fileHashes
+}
 
-	return fileHashes, nil
+func fileMetadataFromRecords(records []*veclite.Record) map[string]ChunkRecord {
+	files := make(map[string]ChunkRecord)
+	for _, r := range records {
+		relPath := getStringPayload(r.Payload, "relative_path")
+		hash := getStringPayload(r.Payload, "file_hash")
+		if relPath == "" || hash == "" {
+			continue
+		}
+		files[relPath] = ChunkRecord{
+			FilePath:     getStringPayload(r.Payload, "file_path"),
+			RelativePath: relPath,
+			FileHash:     hash,
+			ProjectRoot:  getStringPayload(r.Payload, "project_root"),
+		}
+	}
+	return files
 }
 
 // GetChunksByFile returns all chunks for a specific file.
@@ -648,9 +882,16 @@ func (b *VecLiteBackend) GetStats(projectRoot string) (*Stats, error) {
 // DeleteAll removes all embeddings by recreating the collection.
 // This ensures the HNSW index is properly reset.
 func (b *VecLiteBackend) DeleteAll() error {
-	// Drop and recreate the collection to ensure HNSW index is properly reset
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
+	return b.recreateCollections()
+}
+
+func (b *VecLiteBackend) recreateCollections() error {
 	if err := b.db.DropCollection("chunks"); err != nil {
-		// Collection might not exist, ignore error
+		_ = err
+	}
+	if err := b.db.DropCollection("file_hashes"); err != nil {
 		_ = err
 	}
 
@@ -658,14 +899,22 @@ func (b *VecLiteBackend) DeleteAll() error {
 	if err != nil {
 		return fmt.Errorf("failed to recreate collection: %w", err)
 	}
-	b.setCollection(coll)
-
+	fileHashes, err := b.db.CreateCollection("file_hashes")
+	if err != nil {
+		return fmt.Errorf("failed to recreate file hashes collection: %w", err)
+	}
+	if err := fileHashes.SetMetadataValue(fileHashCompleteMetadata, true); err != nil {
+		return fmt.Errorf("initialize file hashes collection: %w", err)
+	}
+	b.setCollections(coll, fileHashes)
 	return nil
 }
 
 // DeleteOrphaned removes embeddings that don't have corresponding chunks.
 // With veclite-only storage, this cleans up any legacy chunk_id references.
 func (b *VecLiteBackend) DeleteOrphaned(validChunkIDs []int64) (int64, error) {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	// Build map of valid IDs
 	validMap := make(map[int64]bool, len(validChunkIDs))
 	for _, id := range validChunkIDs {
@@ -698,11 +947,18 @@ func (b *VecLiteBackend) DeleteOrphaned(validChunkIDs []int64) (int64, error) {
 
 // Sync persists any pending changes.
 func (b *VecLiteBackend) Sync() error {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
+	if b.testHooks != nil && b.testHooks.syncLocked != nil {
+		b.testHooks.syncLocked()
+	}
 	return b.db.Sync()
 }
 
 // Close closes the VecLite database.
 func (b *VecLiteBackend) Close() error {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	if b.db != nil {
 		return b.db.Close()
 	}
@@ -722,6 +978,8 @@ func (b *VecLiteBackend) Close() error {
 // for the caller). The re-fetch is published under the write lock so concurrent
 // readers never observe a torn pointer.
 func (b *VecLiteBackend) Reload() error {
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
 	if b.db == nil {
 		return fmt.Errorf("backend not initialized")
 	}
@@ -732,7 +990,11 @@ func (b *VecLiteBackend) Reload() error {
 	if err != nil {
 		return fmt.Errorf("reload: re-fetch collection: %w", err)
 	}
-	b.setCollection(coll)
+	fileHashes, err := b.db.GetCollection("file_hashes")
+	if err != nil {
+		fileHashes = nil
+	}
+	b.setCollections(coll, fileHashes)
 	return nil
 }
 

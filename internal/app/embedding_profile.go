@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,14 +23,18 @@ const (
 )
 
 type EmbeddingProfile struct {
-	SchemaVersion int    `json:"schema_version"`
-	ProfileID     string `json:"profile_id"`
-	Provider      string `json:"provider"`
-	Model         string `json:"model"`
-	Dimensions    int    `json:"dimensions"`
-	Distance      string `json:"distance"`
-	Modality      string `json:"modality"`
-	Preprocessor  string `json:"preprocessor"`
+	SchemaVersion    int    `json:"schema_version"`
+	ProfileID        string `json:"profile_id"`
+	Provider         string `json:"provider"`
+	Model            string `json:"model"`
+	Dimensions       int    `json:"dimensions"`
+	Distance         string `json:"distance"`
+	Modality         string `json:"modality"`
+	Preprocessor     string `json:"preprocessor"`
+	QueryTemplate    string `json:"query_template,omitempty"`
+	DocumentTemplate string `json:"document_template,omitempty"`
+	OllamaContext    int    `json:"ollama_context,omitempty"`
+	OllamaOptions    string `json:"ollama_options,omitempty"`
 }
 
 type EmbeddingProfileMismatchError struct {
@@ -63,13 +68,15 @@ func EmbeddingProfilePath(dataDir string) string {
 
 func CurrentEmbeddingProfile(cfg *config.Config) EmbeddingProfile {
 	profile := EmbeddingProfile{
-		SchemaVersion: embeddingProfileSchemaVersion,
-		Provider:      cfg.Embedding.Provider,
-		Model:         cfg.Embedding.Model,
-		Dimensions:    cfg.Embedding.Dimensions,
-		Distance:      embeddingProfileDistance,
-		Modality:      embeddingProfileModality,
-		Preprocessor:  embeddingProfilePreprocessor,
+		SchemaVersion:    embeddingProfileSchemaVersion,
+		Provider:         cfg.Embedding.Provider,
+		Model:            cfg.Embedding.Model,
+		Dimensions:       cfg.Embedding.Dimensions,
+		Distance:         embeddingProfileDistance,
+		Modality:         embeddingProfileModality,
+		Preprocessor:     embeddingProfilePreprocessor,
+		QueryTemplate:    cfg.Embedding.QueryTemplate,
+		DocumentTemplate: cfg.Embedding.DocumentTemplate,
 	}
 	profile.ProfileID = fmt.Sprintf("%s:%s:%d:%s:%s",
 		profile.Provider,
@@ -78,6 +85,24 @@ func CurrentEmbeddingProfile(cfg *config.Config) EmbeddingProfile {
 		profile.Distance,
 		profile.Preprocessor,
 	)
+	if profile.QueryTemplate != "" || profile.DocumentTemplate != "" {
+		templateHash := sha256.Sum256([]byte(profile.QueryTemplate + "\x00" + profile.DocumentTemplate))
+		profile.ProfileID += fmt.Sprintf(":templates:%x", templateHash)
+	}
+	if profile.Provider == "ollama" {
+		profile.OllamaContext = cfg.Embedding.OllamaContext
+		if len(cfg.Embedding.OllamaOptions) > 0 {
+			options, err := json.Marshal(cfg.Embedding.OllamaOptions)
+			if err != nil {
+				panic(fmt.Sprintf("canonicalize Ollama embedding options: %v", err))
+			}
+			profile.OllamaOptions = string(options)
+		}
+		if profile.OllamaContext != 0 || profile.OllamaOptions != "" {
+			requestHash := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", profile.OllamaContext, profile.OllamaOptions)))
+			profile.ProfileID += fmt.Sprintf(":ollama:%x", requestHash)
+		}
+	}
 	return profile
 }
 
@@ -173,7 +198,11 @@ func (p EmbeddingProfile) Matches(other EmbeddingProfile) bool {
 		p.Dimensions == other.Dimensions &&
 		p.Distance == other.Distance &&
 		p.Modality == other.Modality &&
-		p.Preprocessor == other.Preprocessor
+		p.Preprocessor == other.Preprocessor &&
+		p.QueryTemplate == other.QueryTemplate &&
+		p.DocumentTemplate == other.DocumentTemplate &&
+		p.OllamaContext == other.OllamaContext &&
+		p.OllamaOptions == other.OllamaOptions
 }
 
 func (s *Service) ensureEmbeddingProfileMatches() error {

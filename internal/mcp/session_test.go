@@ -334,26 +334,83 @@ func TestMCPSessionReloadIfStaleNoROHandle(t *testing.T) {
 	}
 }
 
-func TestMCPSessionReloadIfStaleAfterThreshold(t *testing.T) {
+func TestMCPSessionFreshnessCheckDoesNotReloadWithoutWrite(t *testing.T) {
 	sess, _ := newTestMCPSession(t, true)
-	// Set a very short reload threshold for testing.
-	sess.reloadThreshold = 50 * time.Millisecond
 	defer func() { _ = sess.close() }()
+	sess.freshnessCheckInterval = time.Hour
 
-	// Open RO.
 	openRO(t, sess)
+	reloads := 0
+	sess.reloadObserver = func() { reloads++ }
 
-	// Immediately reload — should be no-op (not stale yet).
+	// Make the next read eligible for a metadata check without sleeping.
+	sess.lastFreshnessCheck = time.Now().Add(-2 * sess.freshnessCheckInterval)
 	if err := sess.reloadIfStale(); err != nil {
-		t.Fatalf("reloadIfStale (not stale): %v", err)
+		t.Fatalf("reloadIfStale after interval: %v", err)
+	}
+	if reloads != 0 {
+		t.Fatalf("elapsed interval caused %d reloads without a persisted write", reloads)
+	}
+}
+
+func TestMCPSessionFreshnessCheckReloadsCommittedExternalWriteOnce(t *testing.T) {
+	sess, _ := newTestMCPSession(t, true)
+	defer func() { _ = sess.close() }()
+	sess.freshnessCheckInterval = time.Hour
+
+	reader := openRO(t, sess)
+	if stats, err := reader.Stats(); err != nil || stats["embeddings"] != 0 {
+		t.Fatalf("initial embeddings = %d, err = %v", stats["embeddings"], err)
 	}
 
-	// Wait for stale threshold.
-	time.Sleep(60 * time.Millisecond)
+	writer, err := db.OpenWithOptions(sess.dbOpts)
+	if err != nil {
+		t.Fatalf("open external writer: %v", err)
+	}
+	embedding := make([]float32, sess.dbOpts.Dimensions)
+	if _, err := writer.InsertChunk(db.ChunkRecord{
+		RelativePath: "external.go",
+		StartLine:    1,
+		IndexedAt:    time.Now(),
+	}, embedding); err != nil {
+		_ = writer.Close()
+		t.Fatalf("external insert: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close external writer: %v", err)
+	}
 
-	// Now reload should happen.
+	reloads := 0
+	sess.reloadObserver = func() { reloads++ }
 	if err := sess.reloadIfStale(); err != nil {
-		t.Fatalf("reloadIfStale (stale): %v", err)
+		t.Fatalf("reloadIfStale before interval: %v", err)
+	}
+	if reloads != 0 {
+		t.Fatalf("external write reloaded before freshness interval elapsed")
+	}
+	if stats, err := reader.Stats(); err != nil || stats["embeddings"] != 0 {
+		t.Fatalf("embeddings before eligible reload = %d, err = %v", stats["embeddings"], err)
+	}
+
+	sess.lastFreshnessCheck = time.Now().Add(-2 * sess.freshnessCheckInterval)
+	if err := sess.reloadIfStale(); err != nil {
+		t.Fatalf("reloadIfStale after external write: %v", err)
+	}
+	if reloads != 1 {
+		t.Fatalf("reloads after committed external write = %d, want 1", reloads)
+	}
+	if stats, err := reader.Stats(); err != nil || stats["embeddings"] != 1 {
+		t.Fatalf("embeddings after reload = %d, err = %v", stats["embeddings"], err)
+	}
+
+	// The same persisted generation must not trigger another reload on the
+	// next eligible check.
+	sess.lastFreshnessCheck = time.Now().Add(-2 * sess.freshnessCheckInterval)
+	if err := sess.reloadIfStale(); err != nil {
+		t.Fatalf("second reloadIfStale: %v", err)
+	}
+	if reloads != 1 {
+		t.Fatalf("same generation reloaded %d times, want exactly 1", reloads)
 	}
 }
 
@@ -365,33 +422,36 @@ func TestMCPSessionReloadIfStaleOnDaemonJSONChange(t *testing.T) {
 			Provider:   "ollama",
 			Dimensions: 768,
 		},
-		Server: config.ServerConfig{MCPReloadInterval: "1h"}, // long threshold
+		Server: config.ServerConfig{MCPReloadInterval: "1h"},
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	sess := newMCPSession(cfg, dir, nil)
+	defer func() { _ = sess.close() }()
 
-	// Initialize the DB with a RW open first.
 	rwDB, err := sess.readWriteDB()
 	if err != nil {
 		t.Fatalf("init readWriteDB: %v", err)
 	}
 	_ = rwDB.Close()
-
-	// Open RO.
 	openRO(t, sess)
 
-	// Simulate daemon writing daemon.json after the last reload.
-	time.Sleep(10 * time.Millisecond)
+	reloads := 0
+	sess.reloadObserver = func() { reloads++ }
 	daemonJSON := filepath.Join(dir, "daemon.json")
 	if err := os.WriteFile(daemonJSON, []byte(`{"pid":12345}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Reload should trigger because daemon.json was modified after lastReload.
 	if err := sess.reloadIfStale(); err != nil {
 		t.Fatalf("reloadIfStale on daemon.json change: %v", err)
+	}
+	if err := sess.reloadIfStale(); err != nil {
+		t.Fatalf("second reloadIfStale on daemon.json change: %v", err)
+	}
+	if reloads != 1 {
+		t.Fatalf("daemon signal caused %d reloads, want exactly 1", reloads)
 	}
 }
 

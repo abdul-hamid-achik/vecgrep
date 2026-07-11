@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 )
 
@@ -180,6 +182,15 @@ func TestDefaultIndexerConfig(t *testing.T) {
 	}
 	if len(cfg.IgnorePatterns) == 0 {
 		t.Error("Expected non-empty IgnorePatterns")
+	}
+	if cfg.SourceBufferBytes == 0 {
+		t.Error("Expected non-zero SourceBufferBytes")
+	}
+	if cfg.SyncInterval == 0 {
+		t.Error("Expected non-zero SyncInterval")
+	}
+	if cfg.SyncIntervalDuration == 0 {
+		t.Error("Expected non-zero SyncIntervalDuration")
 	}
 }
 
@@ -800,5 +811,350 @@ func TestHashFile(t *testing.T) {
 
 	if hash1 == hash3 {
 		t.Error("Expected different hash for different content")
+	}
+}
+
+type gatedSourceBudget struct {
+	started  chan struct{}
+	grant    chan struct{}
+	acquired chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	held     int64
+}
+
+func newGatedSourceBudget() *gatedSourceBudget {
+	return &gatedSourceBudget{
+		started:  make(chan struct{}),
+		grant:    make(chan struct{}),
+		acquired: make(chan struct{}),
+	}
+}
+
+func (b *gatedSourceBudget) Acquire(ctx context.Context, n int64) error {
+	b.once.Do(func() { close(b.started) })
+	select {
+	case <-b.grant:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	b.mu.Lock()
+	b.held += n
+	b.mu.Unlock()
+	select {
+	case <-b.acquired:
+	default:
+		close(b.acquired)
+	}
+	return nil
+}
+
+func (b *gatedSourceBudget) Release(n int64) {
+	b.mu.Lock()
+	b.held -= n
+	b.mu.Unlock()
+}
+
+func (b *gatedSourceBudget) heldBytes() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.held
+}
+
+func TestWalkAndFilter_ReservesBeforeReadingSource(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "source.txt")
+	oldContent := []byte("aaaaaaaa")
+	newContent := []byte("bbbbbbbbbbbb")
+	if err := os.WriteFile(path, oldContent, 0o644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+
+	cfg := DefaultIndexerConfig()
+	idx := NewIndexer(nil, nil, cfg)
+	ignore, err := idx.buildIgnoreMatcher(root)
+	if err != nil {
+		t.Fatalf("build ignore matcher: %v", err)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("abs root: %v", err)
+	}
+
+	budget := newGatedSourceBudget()
+	files := make(chan fileInfo, 1)
+	var discovered, skipped int64
+	done := make(chan error, 1)
+	go func() {
+		done <- idx.walkAndFilter(context.Background(), root, absRoot, nil, ignore, nil, budget, cfg.SourceBufferBytes, files, &discovered, &skipped)
+	}()
+
+	select {
+	case <-budget.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("walker never requested source bytes")
+	}
+	if err := os.WriteFile(path, newContent, 0o644); err != nil {
+		t.Fatalf("replace source while reservation blocked: %v", err)
+	}
+	close(budget.grant)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("walk: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walker did not finish after reservation was granted")
+	}
+	file := <-files
+	if got := string(file.content); got != string(newContent) {
+		t.Fatalf("retained content = %q, want post-reservation content %q", got, newContent)
+	}
+	if file.queueBytes != int64(len(newContent)) {
+		t.Fatalf("queued charge = %d, want actual bytes %d", file.queueBytes, len(newContent))
+	}
+	if file.size != int64(len(newContent)) {
+		t.Fatalf("file size = %d, want actual bytes %d", file.size, len(newContent))
+	}
+	if held := budget.heldBytes(); held != file.queueBytes {
+		t.Fatalf("held source bytes = %d, want queued charge %d", held, file.queueBytes)
+	}
+	budget.Release(file.queueBytes)
+}
+
+func TestWalkAndFilter_CancellationReleasesReadReservation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "source.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	cfg := DefaultIndexerConfig()
+	idx := NewIndexer(nil, nil, cfg)
+	ignore, err := idx.buildIgnoreMatcher(root)
+	if err != nil {
+		t.Fatalf("build ignore matcher: %v", err)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("abs root: %v", err)
+	}
+
+	budget := newGatedSourceBudget()
+	close(budget.grant)
+	files := make(chan fileInfo)
+	var discovered, skipped int64
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- idx.walkAndFilter(ctx, root, absRoot, nil, ignore, nil, budget, cfg.SourceBufferBytes, files, &discovered, &skipped)
+	}()
+
+	select {
+	case <-budget.acquired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("walker never acquired source bytes")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("walk error = %v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walker did not cancel while enqueue was blocked")
+	}
+	if held := budget.heldBytes(); held != 0 {
+		t.Fatalf("held source bytes after cancellation = %d, want 0", held)
+	}
+}
+
+func TestWalkAndFilter_SourceBufferBudgetCancelsWhileFull(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(strings.Repeat("x", 80)), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	cfg := DefaultIndexerConfig()
+	cfg.SourceBufferBytes = 100
+	idx := NewIndexer(nil, nil, cfg)
+	ignore, err := idx.buildIgnoreMatcher(root)
+	if err != nil {
+		t.Fatalf("build ignore matcher: %v", err)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("abs root: %v", err)
+	}
+
+	budget := semaphore.NewWeighted(cfg.SourceBufferBytes)
+	files := make(chan fileInfo, 10)
+	var discovered, skipped int64
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- idx.walkAndFilter(ctx, root, absRoot, nil, ignore, nil, budget, cfg.SourceBufferBytes, files, &discovered, &skipped)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for len(files) != 1 {
+		select {
+		case err := <-done:
+			t.Fatalf("walk returned before filling budget: %v", err)
+		case <-deadline:
+			t.Fatal("walk did not enqueue the first source file")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	first := <-files
+	if first.queueBytes != first.size {
+		t.Fatalf("queued charge = %d, want file size %d", first.queueBytes, first.size)
+	}
+	// Do not release the first file's charge: the second acquire must remain
+	// blocked even though the file channel has spare count capacity.
+	time.Sleep(20 * time.Millisecond)
+	if got := len(files); got != 0 {
+		t.Fatalf("queued files after byte budget filled = %d, want 0", got)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("walk error = %v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walk did not cancel while waiting for source-buffer bytes")
+	}
+}
+
+func TestWalkAndFilter_LargeFileConsumesWholeSourceBudget(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte(strings.Repeat("x", 200)), 0o644); err != nil {
+		t.Fatalf("write large file: %v", err)
+	}
+
+	cfg := DefaultIndexerConfig()
+	cfg.SourceBufferBytes = 64
+	idx := NewIndexer(nil, nil, cfg)
+	ignore, err := idx.buildIgnoreMatcher(root)
+	if err != nil {
+		t.Fatalf("build ignore matcher: %v", err)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("abs root: %v", err)
+	}
+
+	budget := semaphore.NewWeighted(cfg.SourceBufferBytes)
+	files := make(chan fileInfo, 1)
+	var discovered, skipped int64
+	if err := idx.walkAndFilter(context.Background(), root, absRoot, nil, ignore, nil, budget, cfg.SourceBufferBytes, files, &discovered, &skipped); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	file := <-files
+	if file.queueBytes != cfg.SourceBufferBytes {
+		t.Fatalf("large-file charge = %d, want full budget %d", file.queueBytes, cfg.SourceBufferBytes)
+	}
+	if file.size <= cfg.SourceBufferBytes {
+		t.Fatalf("test file size = %d, want larger than budget %d", file.size, cfg.SourceBufferBytes)
+	}
+	budget.Release(file.queueBytes)
+}
+
+func TestReindexAll_SkipsPerFileDeleteAfterReset(t *testing.T) {
+	database := openTestDB(t, 8)
+	cfg := DefaultIndexerConfig()
+	cfg.Workers = 1
+	idx := NewIndexer(database, newMockEmbedProvider(8), cfg)
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "a.go"), []byte("package p\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	deleteCalls := 0
+	idx.deleteFileFn = func(context.Context, string) (int64, error) {
+		deleteCalls++
+		return 0, nil
+	}
+	result, err := idx.ReindexAll(context.Background(), projectDir)
+	if err != nil {
+		t.Fatalf("reindex all: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("reindex errors: %v", result.Errors)
+	}
+	if deleteCalls != 0 {
+		t.Fatalf("per-file delete calls after reset = %d, want 0", deleteCalls)
+	}
+}
+
+func TestIndex_FinalSyncRunsForEmptyProject(t *testing.T) {
+	database := openTestDB(t, 8)
+	idx := NewIndexer(database, newMockEmbedProvider(8), DefaultIndexerConfig())
+	syncCalls := 0
+	idx.syncFn = func() error {
+		syncCalls++
+		return nil
+	}
+
+	result, err := idx.Index(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("index errors: %v", result.Errors)
+	}
+	if syncCalls != 1 {
+		t.Fatalf("sync calls = %d, want one final sync", syncCalls)
+	}
+}
+
+func TestIndex_PeriodicSyncPolicy(t *testing.T) {
+	database := openTestDB(t, 8)
+	cfg := DefaultIndexerConfig()
+	cfg.Workers = 1
+	cfg.BatchSize = 1
+	cfg.SyncInterval = 2
+	cfg.SyncIntervalDuration = time.Hour
+	idx := NewIndexer(database, newMockEmbedProvider(8), cfg)
+	syncCalls := 0
+	idx.syncFn = func() error {
+		syncCalls++
+		return nil
+	}
+
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for i := range 4 {
+		src := fmt.Sprintf("package p\nfunc F%d() int { return %d }\n", i, i)
+		if err := os.WriteFile(filepath.Join(projectDir, fmt.Sprintf("f%d.go", i)), []byte(src), 0o644); err != nil {
+			t.Fatalf("write source: %v", err)
+		}
+	}
+
+	result, err := idx.Index(context.Background(), projectDir)
+	if err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("index errors: %v", result.Errors)
+	}
+	if result.FilesProcessed != 4 {
+		t.Fatalf("files processed = %d, want 4", result.FilesProcessed)
+	}
+	// Incremental syncs at files 2 and 4. Because the latter already covers
+	// all writes, the final durability check must not rewrite the snapshot.
+	if syncCalls != 2 {
+		t.Fatalf("sync calls = %d, want 2", syncCalls)
 	}
 }

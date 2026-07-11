@@ -13,16 +13,20 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/semaphore"
+
 	gitignore "github.com/sabhiram/go-gitignore"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
 )
 
-// Default incremental-sync thresholds: flush the vector DB to disk after
-// processing this many files, or after this much elapsed time, whichever
-// comes first. A final sync always runs at the end.
+// Default source-buffer and incremental-sync thresholds. Source files queued
+// between the walker and chunk workers are bounded by bytes rather than count.
+// The vector DB is flushed after this many files or this much elapsed time,
+// whichever comes first. A final sync always runs at the end.
 const (
+	defaultSourceBufferBytes    = 8 * 1024 * 1024
 	defaultSyncInterval         = 50
 	defaultSyncIntervalDuration = 30 * time.Second
 )
@@ -35,6 +39,13 @@ type IndexerConfig struct {
 	MaxFileSize    int64
 	BatchSize      int
 	Workers        int
+	// SourceBufferBytes bounds source content retained by the walker and queue.
+	// Zero falls back to defaultSourceBufferBytes. A file larger than the budget
+	// consumes the whole budget while queued. Since workers release that charge
+	// when they receive a file, total retained source bytes are bounded by
+	// max(SourceBufferBytes, MaxFileSize) + Workers*MaxFileSize: at most one
+	// budget-sized queue (or one oversized file) plus one active file per worker.
+	SourceBufferBytes int64
 	// SyncInterval is the number of files to process between incremental
 	// db.Sync() calls during indexing. Zero falls back to defaultSyncInterval.
 	SyncInterval int
@@ -64,6 +75,7 @@ func DefaultIndexerConfig() IndexerConfig {
 		MaxFileSize:          1024 * 1024, // 1MB
 		BatchSize:            64,
 		Workers:              4,
+		SourceBufferBytes:    defaultSourceBufferBytes,
 		SyncInterval:         defaultSyncInterval,
 		SyncIntervalDuration: defaultSyncIntervalDuration,
 	}
@@ -90,17 +102,31 @@ type Indexer struct {
 	chunker  *Chunker
 	config   IndexerConfig
 	progress ProgressCallback
+
+	// Test seams for observing storage calls without widening the public DB
+	// contract. Production leaves these nil and uses db directly.
+	syncFn       func() error
+	deleteFileFn func(context.Context, string) (int64, error)
 }
 
 // NewIndexer creates a new Indexer.
 func NewIndexer(database *db.DB, provider embed.Provider, cfg IndexerConfig) *Indexer {
-	if cfg.BatchSize == 0 {
-		cfg.BatchSize = DefaultIndexerConfig().BatchSize
+	defaults := DefaultIndexerConfig()
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = defaults.BatchSize
 	}
-	if cfg.Workers == 0 {
-		cfg.Workers = DefaultIndexerConfig().Workers
+	if cfg.Workers <= 0 {
+		cfg.Workers = defaults.Workers
 	}
-
+	if cfg.SourceBufferBytes <= 0 {
+		cfg.SourceBufferBytes = defaults.SourceBufferBytes
+	}
+	if cfg.SyncInterval <= 0 {
+		cfg.SyncInterval = defaults.SyncInterval
+	}
+	if cfg.SyncIntervalDuration <= 0 {
+		cfg.SyncIntervalDuration = defaults.SyncIntervalDuration
+	}
 	chunkerCfg := ChunkerConfig{
 		ChunkSize:    cfg.ChunkSize,
 		ChunkOverlap: cfg.ChunkOverlap,
@@ -117,6 +143,20 @@ func NewIndexer(database *db.DB, provider embed.Provider, cfg IndexerConfig) *In
 // SetProgressCallback sets a callback for progress updates.
 func (idx *Indexer) SetProgressCallback(cb ProgressCallback) {
 	idx.progress = cb
+}
+
+func (idx *Indexer) sync() error {
+	if idx.syncFn != nil {
+		return idx.syncFn()
+	}
+	return idx.db.Sync()
+}
+
+func (idx *Indexer) deleteFile(ctx context.Context, path string) (int64, error) {
+	if idx.deleteFileFn != nil {
+		return idx.deleteFileFn(ctx, path)
+	}
+	return idx.db.DeleteFile(ctx, path)
 }
 
 // IndexResult contains the results of an indexing operation.
@@ -148,6 +188,12 @@ type IndexResult struct {
 // incremental db.Sync() calls flush the vector store periodically so a long run
 // stays crash-resilient.
 func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...string) (*IndexResult, error) {
+	return idx.index(ctx, projectRoot, true, paths...)
+}
+
+// index runs the streaming pipeline. deleteExisting is false only after a
+// project Reset, when per-file deletion would redundantly scan an empty store.
+func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExisting bool, paths ...string) (*IndexResult, error) {
 	startTime := time.Now()
 
 	absRoot, err := filepath.Abs(projectRoot)
@@ -173,10 +219,13 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 		batchSize = DefaultIndexerConfig().BatchSize
 	}
 
-	// Pipeline channels. itemChan/batchChan are sized so the stages stay busy
-	// without unbounded buffering: backpressure from a slow embedder propagates
-	// up through the batcher to the chunk workers and the walker.
-	fileChan := make(chan fileInfo, 100)
+	// Pipeline channels. Source files are charged against sourceBudget before
+	// the walker reads and retains their content, then released when a chunk
+	// worker receives them. Chunk items and embedding batches retain their own
+	// independent backpressure.
+	sourceBudgetBytes := idx.config.SourceBufferBytes
+	sourceBudget := semaphore.NewWeighted(sourceBudgetBytes)
+	fileChan := make(chan fileInfo, idx.config.Workers)
 	itemChan := make(chan embedItem, batchSize*2)
 	batchChan := make(chan []embedItem, idx.config.Workers)
 	resultsChan := make(chan fileResult, idx.config.Workers)
@@ -193,7 +242,7 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 		chunkWG.Add(1)
 		go func() {
 			defer chunkWG.Done()
-			idx.chunkWorker(ctx, absRoot, fileChan, itemChan, resultsChan)
+			idx.chunkWorker(ctx, absRoot, deleteExisting, sourceBudget, fileChan, itemChan, resultsChan)
 		}()
 	}
 	go func() {
@@ -233,7 +282,7 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 	// error/cancel) so the pipeline drains and exits.
 	walkErrCh := make(chan error, 1)
 	go func() {
-		err := idx.walkAndFilter(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, fileChan, &totalDiscovered, &skippedCount)
+		err := idx.walkAndFilter(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, sourceBudget, sourceBudgetBytes, fileChan, &totalDiscovered, &skippedCount)
 		close(fileChan)
 		walkErrCh <- err
 	}()
@@ -252,6 +301,7 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 	}
 	lastSyncCount := 0
 	lastSyncTime := time.Now()
+	synced := false
 
 	for r := range resultsChan {
 		result.FilesProcessed++
@@ -275,11 +325,12 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 		// Incremental DB sync: flush periodically so a long indexing
 		// run is crash-resilient and search can see partial progress.
 		if result.FilesProcessed-lastSyncCount >= syncInterval || time.Since(lastSyncTime) > syncDuration {
-			if err := idx.db.Sync(); err != nil {
+			if err := idx.sync(); err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("incremental sync: %w", err))
 			} else {
 				lastSyncCount = result.FilesProcessed
 				lastSyncTime = time.Now()
+				synced = true
 			}
 		}
 	}
@@ -291,9 +342,13 @@ func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...stri
 
 	result.FilesSkipped = int(atomic.LoadInt64(&skippedCount))
 
-	// Final sync to persist everything.
-	if err := idx.db.Sync(); err != nil {
-		result.Errors = append(result.Errors, fmt.Errorf("sync: %w", err))
+	// Final sync persists any work not already covered by an incremental sync.
+	// An empty/no-op run still syncs once, while a periodic sync on the final
+	// result is not immediately duplicated.
+	if !synced || lastSyncCount != result.FilesProcessed {
+		if err := idx.sync(); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("sync: %w", err))
+		}
 	}
 
 	result.Duration = time.Since(startTime)
@@ -310,6 +365,7 @@ type fileInfo struct {
 	hash         string
 	size         int64
 	content      []byte
+	queueBytes   int64
 }
 
 // fileResult holds the result of indexing a single file.
@@ -365,17 +421,25 @@ func (t *fileTask) skip(n int) bool {
 	return t.remaining == 0
 }
 
+type sourceByteBudget interface {
+	Acquire(context.Context, int64) error
+	Release(int64)
+}
+
 // chunkWorker reads and chunks files from fileChan, emitting one embedItem per
-// chunk. Files that need no embedding report completion directly.
-func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, files <-chan fileInfo, items chan<- embedItem, results chan<- fileResult) {
+// chunk. It releases each file's source-buffer charge as soon as the file
+// becomes active, keeping queued bytes separate from active-worker memory.
+// Files that need no embedding report completion directly.
+func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, deleteExisting bool, sourceBudget sourceByteBudget, files <-chan fileInfo, items chan<- embedItem, results chan<- fileResult) {
 	for file := range files {
+		sourceBudget.Release(file.queueBytes)
 		select {
 		case <-ctx.Done():
 			results <- fileResult{path: file.path, err: ctx.Err()}
 			return
 		default:
 		}
-		idx.chunkFile(ctx, projectRoot, file, items, results)
+		idx.chunkFile(ctx, projectRoot, deleteExisting, file, items, results)
 	}
 }
 
@@ -383,7 +447,7 @@ func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, files <
 // stale chunks, splits it, and hands each chunk to the embed pipeline. Binary
 // and empty files report immediately; everything else completes asynchronously
 // once its chunks are embedded and inserted.
-func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, file fileInfo, items chan<- embedItem, results chan<- fileResult) {
+func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExisting bool, file fileInfo, items chan<- embedItem, results chan<- fileResult) {
 	// Use cached content from the hash phase. If for some reason content is
 	// nil (e.g. fileInfo was constructed directly), fall back to reading.
 	content := file.content
@@ -403,8 +467,11 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, file file
 
 	lang := DetectLanguage(file.path)
 
-	// Drop existing chunks for this file before re-inserting (re-index).
-	_, _ = idx.db.DeleteFile(ctx, file.relativePath)
+	// Drop stale chunks during incremental re-indexing. ReindexAll has already
+	// reset the project, so deleting every file again would be redundant.
+	if deleteExisting {
+		_, _ = idx.deleteFile(ctx, file.relativePath)
+	}
 
 	chunks := idx.chunker.ChunkFile(string(content), file.path)
 	// Release the content reference so it can be GC'd while chunks are embedded.
@@ -656,17 +723,20 @@ func (idx *Indexer) collectFiles(ctx context.Context, rootPath string, paths []s
 }
 
 // walkAndFilter walks the file tree and streams fileInfo structs that need
-// indexing to fileChan. The incremental hash filter is applied inline (per
-// file) so unchanged files are skipped without being sent to the worker
-// pool. totalDiscovered and skippedCount are updated atomically for
-// progress reporting. The caller is responsible for closing fileChan after
-// this returns.
+// indexing to fileChan. It reserves source bytes from the file's stat size
+// before reading, then reconciles the reservation with the actual read size.
+// The incremental hash filter is applied inline (per file) so unchanged files
+// are skipped without being sent to the worker pool. totalDiscovered and
+// skippedCount are updated atomically for progress reporting. The caller is
+// responsible for closing fileChan after this returns.
 func (idx *Indexer) walkAndFilter(
 	ctx context.Context,
 	rootPath, absRoot string,
 	paths []string,
 	ignore *gitignore.GitIgnore,
 	existingHashes map[string]string,
+	sourceBudget sourceByteBudget,
+	sourceBufferBytes int64,
 	fileChan chan<- fileInfo,
 	totalDiscovered *int64,
 	skippedCount *int64,
@@ -718,14 +788,41 @@ func (idx *Indexer) walkAndFilter(
 				return nil
 			}
 
+			// Reserve before reading so a walker blocked behind the queue cannot
+			// retain an uncharged file. The stat is only an estimate: a file can
+			// change between Info and ReadFile, so reconcile against actual bytes.
+			reservedBytes := min(info.Size(), sourceBufferBytes)
+			if err := sourceBudget.Acquire(ctx, reservedBytes); err != nil {
+				return err
+			}
+
 			hash, content, err := hashFile(p)
 			if err != nil {
+				sourceBudget.Release(reservedBytes)
 				return nil
 			}
+
+			actualSize := int64(len(content))
+			if actualSize > idx.config.MaxFileSize {
+				sourceBudget.Release(reservedBytes)
+				return nil
+			}
+			actualBytes := min(actualSize, sourceBufferBytes)
+			switch {
+			case actualBytes > reservedBytes:
+				if err := sourceBudget.Acquire(ctx, actualBytes-reservedBytes); err != nil {
+					sourceBudget.Release(reservedBytes)
+					return err
+				}
+			case actualBytes < reservedBytes:
+				sourceBudget.Release(reservedBytes - actualBytes)
+			}
+			reservedBytes = actualBytes
 
 			// Incremental filter: skip unchanged files inline so the
 			// worker pool never sees them.
 			if existingHash, exists := existingHashes[relPath]; exists && existingHash == hash {
+				sourceBudget.Release(reservedBytes)
 				atomic.AddInt64(skippedCount, 1)
 				return nil
 			}
@@ -734,15 +831,16 @@ func (idx *Indexer) walkAndFilter(
 				path:         p,
 				relativePath: relPath,
 				hash:         hash,
-				size:         info.Size(),
+				size:         actualSize,
 				content:      content,
+				queueBytes:   reservedBytes,
 			}
-
-			atomic.AddInt64(totalDiscovered, 1)
 
 			select {
 			case fileChan <- fi:
+				atomic.AddInt64(totalDiscovered, 1)
 			case <-ctx.Done():
+				sourceBudget.Release(reservedBytes)
 				return ctx.Err()
 			}
 
@@ -926,6 +1024,6 @@ func (idx *Indexer) ReindexAll(ctx context.Context, projectRoot string) (*IndexR
 		return nil, fmt.Errorf("reset project: %w", err)
 	}
 
-	// Perform full index
-	return idx.Index(ctx, projectRoot)
+	// Perform full index without redundant per-file deletion after Reset.
+	return idx.index(ctx, projectRoot, false)
 }

@@ -3,9 +3,12 @@ package embed
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -93,24 +96,25 @@ func (c *EmbeddingCache) Get(text string) ([]float32, bool) {
 
 	c.mu.RLock()
 	entry, exists := c.entries[key]
-	c.mu.RUnlock()
-
 	if !exists {
+		c.mu.RUnlock()
 		return nil, false
 	}
-
-	// Check TTL expiration
 	if c.ttl > 0 && time.Since(entry.createdAt) > c.ttl {
-		// Entry expired, remove it
+		c.mu.RUnlock()
 		c.mu.Lock()
-		delete(c.entries, key)
+		current, stillExists := c.entries[key]
+		if stillExists && current.createdAt.Equal(entry.createdAt) &&
+			time.Since(current.createdAt) > c.ttl {
+			delete(c.entries, key)
+		}
 		c.mu.Unlock()
 		return nil, false
 	}
 
-	// Return a copy to prevent external modification
-	result := make([]float32, len(entry.vector))
-	copy(result, entry.vector)
+	// Return a copy to prevent external modification.
+	result := slices.Clone(entry.vector)
+	c.mu.RUnlock()
 	return result, true
 }
 
@@ -119,9 +123,7 @@ func (c *EmbeddingCache) Get(text string) ([]float32, bool) {
 func (c *EmbeddingCache) Set(text string, vector []float32) {
 	key := c.Key(text)
 
-	// Make a copy of the vector
-	vectorCopy := make([]float32, len(vector))
-	copy(vectorCopy, vector)
+	vectorCopy := slices.Clone(vector)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -203,20 +205,44 @@ func (c *EmbeddingCache) Cleanup() int {
 // embedCacheBucket is the BoltDB bucket name used by DiskCache.
 const embedCacheBucket = "embeddings"
 
+const (
+	diskCacheWriteQueueSize = 256
+	diskCacheWriteBatchSize = 64
+	diskCacheBinaryHeader   = "VGF1"
+)
+
+type diskCacheWrite struct {
+	key   string
+	data  []byte
+	flush chan error
+}
+
 // DiskCache wraps an EmbeddingCache with BoltDB persistence. Embedding
 // vectors are keyed by "sha256(text):model" so that different models do not
 // collide. Reads check the in-memory cache first, then BoltDB, promoting
-// disk hits back into memory. Writes go to both memory and (asynchronously)
-// BoltDB.
+// disk hits back into memory. A single bounded writer batches disk updates.
 type DiskCache struct {
-	mem   *EmbeddingCache
-	db    *bolt.DB
-	model string
+	mem *EmbeddingCache
+	db  *bolt.DB
+
+	modelMu sync.RWMutex
+	model   string
+
+	lifecycleMu sync.RWMutex
+	closed      bool
+	writes      chan diskCacheWrite
+	writerDone  chan error
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 // NewPersistentCache creates a DiskCache backed by the BoltDB file at
 // dbPath. The in-memory layer holds up to memSize entries.
 func NewPersistentCache(memSize int, dbPath string) (*DiskCache, error) {
+	return newPersistentCache(memSize, 0, dbPath)
+}
+
+func newPersistentCache(memSize int, ttl time.Duration, dbPath string) (*DiskCache, error) {
 	if memSize <= 0 {
 		memSize = 1000
 	}
@@ -242,21 +268,30 @@ func NewPersistentCache(memSize int, dbPath string) (*DiskCache, error) {
 		return nil, fmt.Errorf("create embed cache bucket: %w", err)
 	}
 
-	return &DiskCache{
-		mem: NewEmbeddingCache(memSize, 0),
-		db:  bdb,
-	}, nil
+	cache := &DiskCache{
+		mem:        NewEmbeddingCache(memSize, ttl),
+		db:         bdb,
+		writes:     make(chan diskCacheWrite, diskCacheWriteQueueSize),
+		writerDone: make(chan error, 1),
+	}
+	go cache.runWriter()
+	return cache, nil
 }
 
 // SetModel records the embedding model name used to namespace disk keys.
 // This must be set before Get/Set are called so the key includes the model.
 func (d *DiskCache) SetModel(model string) {
+	d.modelMu.Lock()
 	d.model = model
+	d.modelMu.Unlock()
 }
 
 // diskKey returns the BoltDB key for the given text and current model.
 func (d *DiskCache) diskKey(text string) string {
-	return d.mem.Key(text) + ":" + d.model
+	d.modelMu.RLock()
+	model := d.model
+	d.modelMu.RUnlock()
+	return d.mem.Key(text) + ":" + model
 }
 
 // Get retrieves an embedding, checking memory first then BoltDB. Disk hits
@@ -267,21 +302,21 @@ func (d *DiskCache) Get(text string) ([]float32, bool) {
 	}
 
 	key := d.diskKey(text)
-	var raw []byte
+	var vec []float32
 	err := d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(embedCacheBucket))
 		if b == nil {
 			return nil
 		}
-		raw = b.Get([]byte(key))
-		return nil
+		raw := b.Get([]byte(key))
+		if len(raw) == 0 {
+			return nil
+		}
+		var err error
+		vec, err = decodeDiskVector(raw)
+		return err
 	})
-	if err != nil || len(raw) == 0 {
-		return nil, false
-	}
-
-	var vec []float32
-	if err := json.Unmarshal(raw, &vec); err != nil {
+	if err != nil || vec == nil {
 		return nil, false
 	}
 
@@ -290,28 +325,22 @@ func (d *DiskCache) Get(text string) ([]float32, bool) {
 	return vec, true
 }
 
-// Set stores an embedding in both memory and BoltDB. The BoltDB write is
-// performed asynchronously so the embedding hot path is not blocked on disk.
+// Set stores an embedding in memory and queues it for the bounded disk writer.
+// Backpressure is applied when the queue is full, preventing unbounded memory
+// and goroutine growth during sustained cache misses.
 func (d *DiskCache) Set(text string, vector []float32) {
 	d.mem.Set(text, vector)
 
-	key := d.diskKey(text)
-	vecCopy := make([]float32, len(vector))
-	copy(vecCopy, vector)
+	write := diskCacheWrite{
+		key:  d.diskKey(text),
+		data: encodeDiskVector(vector),
+	}
 
-	go func() {
-		data, err := json.Marshal(vecCopy)
-		if err != nil {
-			return
-		}
-		_ = d.db.Update(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte(embedCacheBucket))
-			if b == nil {
-				return nil
-			}
-			return b.Put([]byte(key), data)
-		})
-	}()
+	d.lifecycleMu.RLock()
+	defer d.lifecycleMu.RUnlock()
+	if !d.closed {
+		d.writes <- write
+	}
 }
 
 // Key returns the content-hash key (without model suffix) for the given text.
@@ -329,13 +358,23 @@ func (d *DiskCache) Clear() {
 	d.mem.Clear()
 }
 
-// FlushToDisk waits for any pending async writes to complete by performing
-// a no-op read transaction (bbolt serializes writes via a single write
-// transaction at a time, so a synchronous Update acts as a barrier).
+// FlushToDisk waits until every write queued before the call has committed.
 func (d *DiskCache) FlushToDisk() error {
-	return d.db.Update(func(tx *bolt.Tx) error {
-		return nil
-	})
+	d.lifecycleMu.RLock()
+	defer d.lifecycleMu.RUnlock()
+	if d.closed {
+		return errors.New("embedding cache is closed")
+	}
+
+	done := make(chan error, 1)
+	d.writes <- diskCacheWrite{flush: done}
+	return <-done
+}
+
+// Flush commits every disk write queued before this call. The cache remains
+// open and reusable after the barrier completes.
+func (d *DiskCache) Flush() error {
+	return d.FlushToDisk()
 }
 
 // LoadFromDisk is a no-op at the API level: reads already lazy-load from
@@ -432,8 +471,131 @@ func (d *DiskCache) CachePath() string {
 // Close closes the underlying BoltDB handle. After Close, further Get/Set
 // calls will fail on the disk side (memory layer keeps working).
 func (d *DiskCache) Close() error {
-	if d.db != nil {
-		return d.db.Close()
+	if d == nil {
+		return nil
 	}
-	return nil
+	d.closeOnce.Do(func() {
+		d.closeErr = d.Flush()
+
+		d.lifecycleMu.Lock()
+		d.closed = true
+		close(d.writes)
+		d.lifecycleMu.Unlock()
+
+		if err := <-d.writerDone; d.closeErr == nil {
+			d.closeErr = err
+		}
+		if err := d.db.Close(); d.closeErr == nil {
+			d.closeErr = err
+		}
+	})
+	return d.closeErr
+}
+
+func (d *DiskCache) runWriter() {
+	batch := make([]diskCacheWrite, 0, diskCacheWriteBatchSize)
+	var pendingErr error
+	defer func() {
+		d.writerDone <- pendingErr
+		close(d.writerDone)
+	}()
+	for {
+		write, ok := <-d.writes
+		if !ok {
+			if err := d.commitWrites(batch); pendingErr == nil {
+				pendingErr = err
+			}
+			return
+		}
+		if write.flush != nil {
+			if err := d.commitWrites(batch); pendingErr == nil {
+				pendingErr = err
+			}
+			batch = batch[:0]
+			write.flush <- pendingErr
+			pendingErr = nil
+			continue
+		}
+
+		batch = append(batch, write)
+		for len(batch) < diskCacheWriteBatchSize {
+			select {
+			case next, open := <-d.writes:
+				if !open {
+					if err := d.commitWrites(batch); pendingErr == nil {
+						pendingErr = err
+					}
+					return
+				}
+				if next.flush != nil {
+					if err := d.commitWrites(batch); pendingErr == nil {
+						pendingErr = err
+					}
+					batch = batch[:0]
+					next.flush <- pendingErr
+					pendingErr = nil
+					continue
+				}
+				batch = append(batch, next)
+			default:
+				goto commit
+			}
+		}
+
+	commit:
+		if err := d.commitWrites(batch); pendingErr == nil {
+			pendingErr = err
+		}
+		batch = batch[:0]
+	}
+}
+
+func (d *DiskCache) commitWrites(batch []diskCacheWrite) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	return d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(embedCacheBucket))
+		if b == nil {
+			return errors.New("embedding cache bucket is missing")
+		}
+		for _, write := range batch {
+			if err := b.Put([]byte(write.key), write.data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func encodeDiskVector(vector []float32) []byte {
+	data := make([]byte, 8+len(vector)*4)
+	copy(data, diskCacheBinaryHeader)
+	binary.LittleEndian.PutUint32(data[4:8], uint32(len(vector)))
+	for i, value := range vector {
+		binary.LittleEndian.PutUint32(data[8+i*4:], math.Float32bits(value))
+	}
+	return data
+}
+
+func decodeDiskVector(data []byte) ([]float32, error) {
+	if len(data) < 4 || string(data[:4]) != diskCacheBinaryHeader {
+		var vector []float32
+		if err := json.Unmarshal(data, &vector); err != nil {
+			return nil, err
+		}
+		return vector, nil
+	}
+	if len(data) < 8 {
+		return nil, errors.New("invalid embedding cache entry")
+	}
+	count := int(binary.LittleEndian.Uint32(data[4:8]))
+	if count > (len(data)-8)/4 || len(data) != 8+count*4 {
+		return nil, errors.New("invalid embedding cache entry")
+	}
+	vector := make([]float32, count)
+	for i := range vector {
+		vector[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[8+i*4:]))
+	}
+	return vector, nil
 }

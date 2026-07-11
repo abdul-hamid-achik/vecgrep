@@ -300,6 +300,42 @@ func TestParseConfigValueRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
+func TestSetConfigValuesInFileAppliesBatchAndPreservesOtherValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vecgrep.yaml")
+	initial := []byte("embedding:\n  model: old\n  ollama_options:\n    stale: true\ncustom:\n  keep: true\n")
+	if err := os.WriteFile(path, initial, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := SetConfigValuesInFile(path, map[string]any{
+		"embedding.model":          "new",
+		"embedding.dimensions":     1024,
+		"embedding.ollama_options": map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("SetConfigValuesInFile: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	embedding := raw["embedding"].(map[string]any)
+	if embedding["model"] != "new" || embedding["dimensions"] != 1024 {
+		t.Fatalf("embedding = %#v", embedding)
+	}
+	if options := embedding["ollama_options"].(map[string]any); len(options) != 0 {
+		t.Fatalf("ollama_options = %#v, want empty", options)
+	}
+	if raw["custom"].(map[string]any)["keep"] != true {
+		t.Fatalf("custom config changed: %#v", raw)
+	}
+}
+
 func isolateConfigTestEnv(t *testing.T) string {
 	t.Helper()
 

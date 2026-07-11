@@ -173,6 +173,12 @@ tasks:
     cmds:
       - glyph run specs/flows/*.yml --format md --progress auto {{.CLI_ARGS}}
 
+  bench:embeddings:
+    desc: Compare embedding presets on the labeled retrieval corpus
+    deps: [build]
+    cmds:
+      - ./bin/{{.BINARY_NAME}} benchmark embeddings --root . {{.CLI_ARGS}}
+
   site:
     desc: Start the VitePress docs site
     deps: [site:deps]
