@@ -205,6 +205,14 @@ func (p *OllamaProvider) doEmbedBatch(ctx context.Context, texts []string, defau
 		KeepAlive:  p.config.KeepAlive,
 		Options:    p.requestOptions(),
 	}
+	if pressure := estimateContextPressure(texts, contextSizeFromOptions(reqBody.Options)); pressure.InputsAtRisk > 0 {
+		slog.Warn("embedding input may exceed configured context and be truncated",
+			"input_texts", len(texts),
+			"inputs_at_risk", pressure.InputsAtRisk,
+			"estimated_max_tokens", pressure.MaxEstimatedTokens,
+			"context_tokens", pressure.ContextTokens,
+		)
+	}
 	if reqBody.KeepAlive == "" {
 		reqBody.KeepAlive = defaultRequestKeepAlive
 	}
@@ -236,10 +244,7 @@ func (p *OllamaProvider) doEmbedBatch(ctx context.Context, texts []string, defau
 	return nil, lastErr
 }
 
-// doEmbedBatchRequest performs a single batch embedding HTTP request to /api/embed.
-// The input texts are passed alongside the pre-marshaled body so the response
-// can be checked for truncation: the expected token count is estimated from the
-// input texts and compared against prompt_eval_count reported by Ollama.
+// doEmbedRequest performs a single batch embedding HTTP request to /api/embed.
 func (p *OllamaProvider) doEmbedRequest(ctx context.Context, jsonBody []byte, texts []string) ([][]float32, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", p.config.URL+"/api/embed", bytes.NewReader(jsonBody))
 	if err != nil {
@@ -290,21 +295,55 @@ func (p *OllamaProvider) doEmbedRequest(ctx context.Context, jsonBody []byte, te
 		}
 	}
 
-	if embedResp.PromptEvalCount > 0 && len(texts) > 0 {
-		estimated := 0
-		for _, text := range texts {
-			estimated += len(text) / 4
+	return embedResp.Embeddings, nil
+}
+
+type contextPressure struct {
+	ContextTokens      int
+	InputsAtRisk       int
+	MaxEstimatedTokens int
+}
+
+// estimateContextPressure uses a deliberately labeled approximation because
+// Ollama reports only the number of tokens it evaluated, not the original token
+// count or whether truncation occurred. Aggregate batch size is irrelevant:
+// Ollama applies the context window to each input independently.
+func estimateContextPressure(texts []string, contextTokens int) contextPressure {
+	pressure := contextPressure{ContextTokens: contextTokens}
+	if contextTokens <= 0 {
+		return pressure
+	}
+	for _, text := range texts {
+		estimatedTokens := (len(text) + 3) / 4
+		if estimatedTokens > pressure.MaxEstimatedTokens {
+			pressure.MaxEstimatedTokens = estimatedTokens
 		}
-		actual := embedResp.PromptEvalCount
-		if actual < int(float64(estimated)*0.9) {
-			slog.Warn("embedding truncation detected",
-				"input_texts", len(texts),
-				"expected_tokens", estimated,
-				"actual_tokens", actual,
-			)
+		if estimatedTokens >= contextTokens {
+			pressure.InputsAtRisk++
 		}
 	}
-	return embedResp.Embeddings, nil
+	return pressure
+}
+
+func contextSizeFromOptions(options map[string]any) int {
+	value, ok := options["num_ctx"]
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		contextTokens, err := typed.Int64()
+		if err == nil {
+			return int(contextTokens)
+		}
+	}
+	return 0
 }
 
 func (p *OllamaProvider) applyTemplate(template, text string) string {

@@ -1,8 +1,10 @@
 package embed
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -306,4 +308,120 @@ func TestOllamaProvider_EmbedValidatesResponseDimensions(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), ErrDimensionMismatch.Error()) {
 		t.Fatalf("Embed() error = %v, want dimension mismatch", err)
 	}
+}
+
+func TestEstimateContextPressureChecksEachInputIndependently(t *testing.T) {
+	texts := make([]string, 30)
+	for i := range texts {
+		texts[i] = strings.Repeat("a", 100)
+	}
+
+	pressure := estimateContextPressure(texts, 128)
+	if pressure.InputsAtRisk != 0 {
+		t.Fatalf("InputsAtRisk = %d, want 0", pressure.InputsAtRisk)
+	}
+	if pressure.MaxEstimatedTokens != 25 {
+		t.Fatalf("MaxEstimatedTokens = %d, want 25", pressure.MaxEstimatedTokens)
+	}
+}
+
+func TestEstimateContextPressureReportsPossiblePerInputTruncation(t *testing.T) {
+	pressure := estimateContextPressure([]string{
+		strings.Repeat("a", 507),
+		strings.Repeat("b", 512),
+		strings.Repeat("c", 800),
+	}, 128)
+
+	if pressure.InputsAtRisk != 2 {
+		t.Fatalf("InputsAtRisk = %d, want 2", pressure.InputsAtRisk)
+	}
+	if pressure.MaxEstimatedTokens != 200 {
+		t.Fatalf("MaxEstimatedTokens = %d, want 200", pressure.MaxEstimatedTokens)
+	}
+	if pressure.ContextTokens != 128 {
+		t.Fatalf("ContextTokens = %d, want 128", pressure.ContextTokens)
+	}
+}
+
+func TestEstimateContextPressureSkipsUnknownContext(t *testing.T) {
+	pressure := estimateContextPressure([]string{strings.Repeat("a", 8000)}, 0)
+	if pressure.InputsAtRisk != 0 || pressure.MaxEstimatedTokens != 0 {
+		t.Fatalf("pressure = %#v, want zero pressure", pressure)
+	}
+}
+
+func TestContextSizeFromOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options map[string]any
+		want    int
+	}{
+		{name: "missing", options: nil, want: 0},
+		{name: "int", options: map[string]any{"num_ctx": 1024}, want: 1024},
+		{name: "int64", options: map[string]any{"num_ctx": int64(2048)}, want: 2048},
+		{name: "float64", options: map[string]any{"num_ctx": float64(4096)}, want: 4096},
+		{name: "json number", options: map[string]any{"num_ctx": json.Number("8192")}, want: 8192},
+		{name: "invalid", options: map[string]any{"num_ctx": "large"}, want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := contextSizeFromOptions(test.options); got != test.want {
+				t.Fatalf("contextSizeFromOptions() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOllamaProvider_DoesNotClaimTruncationFromTokenizerDifference(t *testing.T) {
+	logs := captureOllamaWarnings(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			Embeddings:      [][]float32{{1}},
+			PromptEvalCount: 1,
+		})
+	}))
+	defer server.Close()
+
+	provider := NewOllamaProvider(OllamaConfig{URL: server.URL, Dimensions: 1, Context: 128})
+	if _, err := provider.Embed(context.Background(), strings.Repeat("a", 100)); err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	if strings.Contains(logs.String(), "truncat") {
+		t.Fatalf("unexpected truncation claim for tokenizer disagreement: %s", logs.String())
+	}
+}
+
+func TestOllamaProvider_WarnsOnEstimatedContextPressure(t *testing.T) {
+	logs := captureOllamaWarnings(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{
+			Embeddings:      [][]float32{{1}},
+			PromptEvalCount: 8,
+		})
+	}))
+	defer server.Close()
+
+	provider := NewOllamaProvider(OllamaConfig{URL: server.URL, Dimensions: 1, Context: 8})
+	if _, err := provider.Embed(context.Background(), strings.Repeat("a", 32)); err != nil {
+		t.Fatalf("Embed() error = %v", err)
+	}
+	for _, want := range []string{
+		"embedding input may exceed configured context and be truncated",
+		"inputs_at_risk=1",
+		"estimated_max_tokens=8",
+		"context_tokens=8",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("warning missing %q: %s", want, logs.String())
+		}
+	}
+}
+
+func captureOllamaWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
 }
