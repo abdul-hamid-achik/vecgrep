@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -318,4 +319,88 @@ func FindProjectByPath(projectPath string) (string, *ProjectEntry, error) {
 	}
 
 	return "", nil, nil
+}
+
+// PrunedProject describes one stale registry entry found or removed by
+// PruneGlobalProjects.
+type PrunedProject struct {
+	Name       string
+	Path       string
+	DataDir    string
+	DataPurged bool
+	DataBytes  int64
+}
+
+// PruneGlobalProjects removes registry entries whose project path no longer
+// exists. Entries are kept when the path cannot be checked (e.g. permission
+// errors) — only a definite "does not exist" counts as stale. With dryRun the
+// stale entries are reported but nothing is modified. With purgeData each
+// pruned entry's data directory is also deleted, but only when it resolves to
+// a location inside ~/.vecgrep/projects — a hand-edited data_dir pointing
+// elsewhere is never touched.
+func PruneGlobalProjects(dryRun, purgeData bool) ([]PrunedProject, error) {
+	globalCfg, err := LoadGlobalConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	var pruned []PrunedProject
+	for name, entry := range globalCfg.Projects {
+		if _, err := os.Stat(ExpandPath(entry.Path)); !os.IsNotExist(err) {
+			continue
+		}
+		pp := PrunedProject{Name: name, Path: entry.Path, DataDir: entry.DataDir}
+		if entry.DataDir != "" {
+			if dataDir, ok := managedDataDir(entry.DataDir); ok {
+				pp.DataBytes = dirSize(dataDir)
+				if !dryRun && purgeData {
+					if err := os.RemoveAll(dataDir); err == nil {
+						pp.DataPurged = true
+					}
+				}
+			}
+		}
+		if !dryRun {
+			delete(globalCfg.Projects, name)
+		}
+		pruned = append(pruned, pp)
+	}
+
+	sort.Slice(pruned, func(i, j int) bool { return pruned[i].Name < pruned[j].Name })
+
+	if dryRun || len(pruned) == 0 {
+		return pruned, nil
+	}
+	return pruned, SaveGlobalConfig(globalCfg)
+}
+
+// managedDataDir reports whether dir resolves to a location strictly inside
+// ~/.vecgrep/projects and returns the expanded path if so.
+func managedDataDir(dir string) (string, bool) {
+	projectsDir, err := GetGlobalProjectsDir()
+	if err != nil {
+		return "", false
+	}
+	expanded := ExpandPath(dir)
+	rel, err := filepath.Rel(projectsDir, expanded)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return expanded, true
+}
+
+// dirSize returns the total size in bytes of regular files under dir.
+// Best-effort: unreadable entries count as zero.
+func dirSize(dir string) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }

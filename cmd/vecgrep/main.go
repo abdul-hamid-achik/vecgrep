@@ -266,6 +266,20 @@ var projectsRemoveCmd = &cobra.Command{
 	RunE:  runProjectsRemove,
 }
 
+var projectsPruneCmd = &cobra.Command{
+	Use:   "prune",
+	Short: "Remove registry entries whose project path no longer exists",
+	Long: `Remove stale entries from ~/.vecgrep/config.yaml.
+
+An entry is stale when its project path no longer exists on disk (deleted
+checkouts, temp directories from old runs). Entries whose path merely cannot
+be checked are kept. With --purge-data, each pruned entry's index data under
+~/.vecgrep/projects/ is deleted as well; data directories outside that
+location are never touched.`,
+	Args: cobra.NoArgs,
+	RunE: runProjectsPrune,
+}
+
 // --- branch commands ---
 
 var branchCmd = &cobra.Command{
@@ -487,6 +501,9 @@ func init() {
 	projectsCmd.AddCommand(projectsListCmd)
 	projectsCmd.AddCommand(projectsAddCmd)
 	projectsCmd.AddCommand(projectsRemoveCmd)
+	projectsCmd.AddCommand(projectsPruneCmd)
+	projectsPruneCmd.Flags().Bool("dry-run", false, "list stale entries without removing anything")
+	projectsPruneCmd.Flags().Bool("purge-data", false, "also delete pruned entries' data under ~/.vecgrep/projects/")
 
 	// Memory command flags
 	memoryRecallCmd.Flags().String("tags", "", "comma-separated tags; a memory must carry ALL of them (AND)")
@@ -1886,6 +1903,48 @@ func projectConfigPath(projectRoot string) string {
 	}
 
 	return yamlPath
+}
+
+func runProjectsPrune(cmd *cobra.Command, args []string) error {
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	purgeData, _ := cmd.Flags().GetBool("purge-data")
+
+	pruned, err := config.PruneGlobalProjects(dryRun, purgeData)
+	if err != nil {
+		return fmt.Errorf("failed to prune projects: %w", err)
+	}
+
+	if len(pruned) == 0 {
+		fmt.Println("No stale projects.")
+		return nil
+	}
+
+	verb := "Pruned"
+	if dryRun {
+		verb = "Would prune"
+	}
+	fmt.Printf("%s %d stale project(s):\n\n", verb, len(pruned))
+	var reclaimed int64
+	for _, p := range pruned {
+		fmt.Printf("  %s\n", p.Name)
+		fmt.Printf("    Path: %s (missing)\n", p.Path)
+		if p.DataDir != "" && p.DataBytes > 0 {
+			switch {
+			case p.DataPurged:
+				fmt.Printf("    Data: %s (%d bytes deleted)\n", p.DataDir, p.DataBytes)
+				reclaimed += p.DataBytes
+			case dryRun && purgeData:
+				fmt.Printf("    Data: %s (%d bytes would be deleted)\n", p.DataDir, p.DataBytes)
+			default:
+				fmt.Printf("    Data: %s (%d bytes, kept; use --purge-data)\n", p.DataDir, p.DataBytes)
+			}
+		}
+		fmt.Println()
+	}
+	if reclaimed > 0 {
+		fmt.Printf("Reclaimed %d bytes of index data.\n", reclaimed)
+	}
+	return nil
 }
 
 func runProjectsList(cmd *cobra.Command, args []string) error {
