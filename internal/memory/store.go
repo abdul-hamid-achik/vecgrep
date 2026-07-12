@@ -71,8 +71,10 @@ func NewMemoryStore(cfg *Config, provider embed.Provider) (*MemoryStore, error) 
 		return nil, fmt.Errorf("failed to create memory directory: %w", err)
 	}
 
-	// Open veclite database
-	db, err := veclite.Open(cfg.DBPath)
+	// Open veclite database. The memory store is a long-lived writer (MCP
+	// server / daemon), so keep a write-ahead log: remembered items survive a
+	// crash between snapshot saves.
+	db, err := veclite.Open(cfg.DBPath, veclite.WithWAL(true))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open memory database: %w", err)
 	}

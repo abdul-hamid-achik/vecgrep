@@ -184,6 +184,13 @@ func (b *VecLiteBackend) InitWithOptions(dimensions int, hnsw HNSWConfig, readOn
 		if sharedRead {
 			openOpts = append(openOpts, veclite.WithSharedRead(true))
 		}
+	} else {
+		// Writers keep a write-ahead log so chunks accepted mid-index or by a
+		// long-running daemon survive a crash between snapshot saves. Bulk
+		// indexing pays one fsync per InsertBatch, which is noise next to
+		// embedding latency; the log auto-folds into a snapshot at veclite's
+		// default checkpoint threshold.
+		openOpts = append(openOpts, veclite.WithWAL(true))
 	}
 	db, err := veclite.Open(b.dbPath, openOpts...)
 	if err != nil {
