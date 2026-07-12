@@ -123,17 +123,17 @@ func TestLoadDefaultDatasetCorpusAndRelevance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(dataset.Documents); got < 30 {
-		t.Fatalf("documents = %d, want at least 30", got)
+	if got := len(dataset.Documents); got < 70 {
+		t.Fatalf("documents = %d, want at least 70", got)
 	}
-	if got := len(dataset.Queries); got < 30 {
-		t.Fatalf("queries = %d, want at least 30", got)
+	if got := len(dataset.Queries); got < 60 {
+		t.Fatalf("queries = %d, want at least 60", got)
 	}
 	languages := map[string]bool{}
 	for _, document := range dataset.Documents {
 		languages[document.Language] = true
 	}
-	for _, language := range []string{"go", "typescript", "python", "rust", "yaml", "markdown", "shell"} {
+	for _, language := range []string{"go", "typescript", "python", "rust", "yaml", "markdown", "shell", "java", "sql", "json", "toml", "c", "dockerfile", "hcl"} {
 		if !languages[language] {
 			t.Errorf("default corpus has no %s document", language)
 		}
