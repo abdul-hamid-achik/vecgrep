@@ -145,6 +145,46 @@ func TestDaemonClientReindex(t *testing.T) {
 	}
 }
 
+func TestDaemonClientReindexSyncPreservesOptionsAndResult(t *testing.T) {
+	socketPath, shutdown := startTestDaemon(t, func(method string, params json.RawMessage) (any, error) {
+		if method != "daemon.reindex_sync" {
+			return nil, &testError{"unexpected method: " + method}
+		}
+		var got struct {
+			Project          string   `json:"project"`
+			Full             bool     `json:"full"`
+			StructuralChunks string   `json:"structural_chunks"`
+			Paths            []string `json:"paths"`
+		}
+		if err := json.Unmarshal(params, &got); err != nil {
+			return nil, err
+		}
+		if got.Project != "/project" || !got.Full || got.StructuralChunks != "required" || len(got.Paths) != 1 || got.Paths[0] != "internal/app" {
+			return nil, &testError{"unexpected params"}
+		}
+		return daemonReindexSyncResult{
+			FilesProcessed: 3,
+			FilesSkipped:   2,
+			ChunksCreated:  9,
+			Duration:       42 * time.Millisecond,
+			Errors:         []string{"warning"},
+		}, nil
+	})
+	defer shutdown()
+
+	c := &daemonClient{socketPath: socketPath, projectRoot: "/project"}
+	result, err := c.reindexSync(context.Background(), true, "required", []string{"internal/app"})
+	if err != nil {
+		t.Fatalf("reindexSync: %v", err)
+	}
+	if result.FilesProcessed != 3 || result.FilesSkipped != 2 || result.ChunksCreated != 9 || result.Duration != 42*time.Millisecond {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].Error() != "warning" {
+		t.Fatalf("result errors = %v", result.Errors)
+	}
+}
+
 func TestDaemonClientStats(t *testing.T) {
 	socketPath, shutdown := startTestDaemon(t, func(method string, params json.RawMessage) (any, error) {
 		if method != "daemon.stats" {
@@ -241,9 +281,27 @@ func TestFormatDaemonSearchResultWithScopeNote(t *testing.T) {
 }
 
 func TestFormatStatsResult(t *testing.T) {
-	statsJSON, _ := json.Marshal(map[string]int64{
+	statsJSON, _ := json.Marshal(map[string]any{
 		"total_files":  10,
 		"total_chunks": 50,
+		"languages": map[string]int64{
+			"go": 7,
+		},
+		"backend": "veclite",
+		"freshness": map[string]any{
+			"state":               "unknown",
+			"reason":              "structural_manifest_mismatch",
+			"raw_source_complete": true,
+			"receipt_verified":    true,
+			"manifest_required":   true,
+			"manifest_verified":   false,
+		},
+		"pending_changes": map[string]int{
+			"new_files":      0,
+			"modified_files": 0,
+			"deleted_files":  0,
+			"total_pending":  0,
+		},
 	})
 
 	text := formatStatsResult(statsJSON, "/test/project")
@@ -255,6 +313,12 @@ func TestFormatStatsResult(t *testing.T) {
 	}
 	if !contains(text, "Total chunks: 50") {
 		t.Fatalf("expected 'Total chunks: 50' in output, got: %s", text)
+	}
+	if !contains(text, "go: 7") || contains(text, "stats parse error") {
+		t.Fatalf("heterogeneous stats should parse, got: %s", text)
+	}
+	if !contains(text, "Freshness: unknown (structural_manifest_mismatch)") || !contains(text, "force:true") {
+		t.Fatalf("daemon MCP status omitted conservative freshness: %s", text)
 	}
 }
 

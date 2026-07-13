@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "project": "fixture",
+  "project_key": "0123456789ab",
+  "index_fingerprint": "42b21d9ac2b7dc180d0d780967732502790294c0a0a83e4eb01c2d8a9e1dba3d",
+  "offset": 0,
+  "limit": 128,
+  "max_content_bytes": 262144,
+  "total_records": 1,
+  "returned_records": 1,
+  "complete": true,
+  "records": [
+    {
+      "schema_version": 1,
+      "ordinal": 1,
+      "project": "fixture",
+      "project_key": "0123456789ab",
+      "index_fingerprint": "42b21d9ac2b7dc180d0d780967732502790294c0a0a83e4eb01c2d8a9e1dba3d",
+      "file": "pkg/target.go",
+      "start_line": 3,
+      "end_line": 3,
+      "symbol": "Target",
+      "fqn": "fixture.Target",
+      "kind": "function",
+      "language": "go",
+      "signature": "func Target() string",
+      "docstring": "Target returns a stable fixture value.",
+      "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "content": "func Target() string { return \"ok\" }",
+      "content_hash": "a1fa56715b32d638dce3e69bb50847a758e5ae3afef3b87997e473f9ff4fa613"
+    }
+  ]
+}

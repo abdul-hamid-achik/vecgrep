@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
@@ -27,7 +28,10 @@ type Session struct {
 }
 
 type Service struct {
-	session *Session
+	session            *Session
+	indexCoordinatorMu sync.Mutex
+	indexCoordinator   *IndexCoordinator
+	manifestSource     *codemapStructuralManifestSource
 }
 
 func OpenSession(ctx context.Context, startDir string) (*Session, error) {
@@ -98,6 +102,32 @@ func OpenSession(ctx context.Context, startDir string) (*Session, error) {
 		LegacyDBPath:     legacyPath,
 		MigrationWarning: migrationWarning,
 	}, nil
+}
+
+// OpenDaemonSession opens the same project/database session as OpenSession but
+// replaces the general CLI provider with one daemon-configured throttle layer.
+// This prevents the daemon from wrapping an already-throttled provider while
+// keeping provider lifetime owned by Session.
+func OpenDaemonSession(ctx context.Context, startDir string) (*Session, error) {
+	session, err := OpenSession(ctx, startDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// The provider has not served any request yet. Close it before opening the
+	// daemon provider because both may own the same disk-cache file.
+	if err := closeProvider(session.Provider); err != nil {
+		_ = session.DB.Close()
+		return nil, fmt.Errorf("close general provider: %w", err)
+	}
+	session.Provider = nil
+	provider, err := NewDaemonProvider(session.Config)
+	if err != nil {
+		_ = session.DB.Close()
+		return nil, fmt.Errorf("create daemon provider: %w", err)
+	}
+	session.Provider = provider
+	return session, nil
 }
 
 // openErrorHint wraps a database-open error with actionable guidance. A live
@@ -209,18 +239,22 @@ func (s *Session) Close() error {
 	if s == nil {
 		return nil
 	}
-	var providerErr error
-	switch closer := s.Provider.(type) {
-	case interface{ Close() error }:
-		providerErr = closer.Close()
-	case interface{ Close() }:
-		closer.Close()
-	}
+	providerErr := closeProvider(s.Provider)
 	var dbErr error
 	if s.DB != nil {
 		dbErr = s.DB.Close()
 	}
 	return errors.Join(providerErr, dbErr)
+}
+
+func closeProvider(provider embed.Provider) error {
+	switch closer := provider.(type) {
+	case interface{ Close() error }:
+		return closer.Close()
+	case interface{ Close() }:
+		closer.Close()
+	}
+	return nil
 }
 
 func NewService(session *Session) *Service {

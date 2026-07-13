@@ -106,15 +106,9 @@ func TestPrintSearchEnvelope_IndexedWithHits(t *testing.T) {
 		t.Fatalf("fresh = true, want false (source file absent from disk)")
 	}
 
-	envelope := struct {
-		Index struct {
-			Indexed bool `json:"indexed"`
-			Fresh   bool `json:"fresh"`
-			Chunks  int  `json:"chunks"`
-		} `json:"index"`
-		Hits []search.Result `json:"hits"`
-	}{
-		Hits: []search.Result{{RelativePath: "main.go", Score: 0.9}},
+	envelope := searchEnvelope{
+		SchemaVersion: searchEnvelopeSchemaVersion,
+		Hits:          []search.Result{{RelativePath: "main.go", Score: 0.9}},
 	}
 	envelope.Index.Indexed = indexed
 	envelope.Index.Fresh = fresh
@@ -126,7 +120,8 @@ func TestPrintSearchEnvelope_IndexedWithHits(t *testing.T) {
 	}
 
 	var got struct {
-		Index struct {
+		SchemaVersion int `json:"schema_version"`
+		Index         struct {
 			Indexed bool `json:"indexed"`
 			Fresh   bool `json:"fresh"`
 			Chunks  int  `json:"chunks"`
@@ -135,6 +130,9 @@ func TestPrintSearchEnvelope_IndexedWithHits(t *testing.T) {
 	}
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("envelope not parseable as a single JSON document: %v", err)
+	}
+	if got.SchemaVersion != 1 {
+		t.Fatalf("schema_version = %d, want 1", got.SchemaVersion)
 	}
 	if got.Index.Indexed != true || got.Index.Fresh != false || got.Index.Chunks != 1 {
 		t.Errorf("index block = %+v, want {true false 1}", got.Index)

@@ -80,6 +80,13 @@ func ParseConfigValue(key, value string) (any, error) {
 		return parsed, nil
 	case "codemap.bin", "codemap.mcp_endpoint":
 		return value, nil
+	case "codemap.structural_chunks":
+		switch value {
+		case "auto", "off", "required":
+			return value, nil
+		default:
+			return nil, fmt.Errorf("invalid codemap.structural_chunks value %q: want auto, off, or required", value)
+		}
 	case "codemap.structural_weight":
 		w, err := strconv.ParseFloat(value, 32)
 		if err != nil {
@@ -223,6 +230,8 @@ func ApplyConfigValue(cfg *Config, key, value string) error {
 		cfg.Codemap.MCPEndpoint = parsed.(string)
 	case "codemap.structural_weight":
 		cfg.Codemap.StructuralWeight = parsed.(float32)
+	case "codemap.structural_chunks":
+		cfg.Codemap.StructuralChunks = parsed.(string)
 	case "daemon.autostart":
 		cfg.Daemon.Autostart = parsed.(bool)
 	case "daemon.idle_timeout":

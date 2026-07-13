@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/snapshot"
 )
@@ -416,25 +417,24 @@ func (d *Daemon) handleReindex(ctx context.Context, req *jsonRPCRequest) jsonRPC
 	if rpcErr != nil {
 		return jsonRPCResponse{ID: req.ID, Error: rpcErr}
 	}
-	w.reindexWg.Add(1)
-	go func() {
-		defer w.reindexWg.Done()
-		w.reindex(ctx)
-	}()
+	go w.reindex(ctx)
 	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"started": true}}
 }
 
 // reindexSyncParams are the parameters for a daemon.reindex_sync request.
 type reindexSyncParams struct {
-	Project string `json:"project"`
-	Full    bool   `json:"full"`
+	Project           string   `json:"project"`
+	Full              bool     `json:"full"`
+	StructuralChunks  string   `json:"structural_chunks,omitempty"`
+	Paths             []string `json:"paths,omitempty"`
+	AdditionalIgnores []string `json:"additional_ignores,omitempty"`
 }
 
 // handleReindexSync runs an incremental (or full) reindex synchronously and
 // returns the index.IndexResult, so a CLI `vecgrep index` that finds the
 // daemon running can delegate and render the same summary as a local index
 // instead of opening a second write handle (which would collide with the
-// daemon's exclusive lock). Tracked by reindexWg so close() drains it.
+// daemon's exclusive lock). The worker's operation lease lets close drain it.
 func (d *Daemon) handleReindexSync(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {
 	var p reindexSyncParams
 	if len(req.Params) > 0 {
@@ -444,15 +444,19 @@ func (d *Daemon) handleReindexSync(ctx context.Context, req *jsonRPCRequest) jso
 	if rpcErr != nil {
 		return jsonRPCResponse{ID: req.ID, Error: rpcErr}
 	}
-	w.reindexWg.Add(1)
-	defer w.reindexWg.Done()
-	result, err := w.reindexSync(ctx, p.Full)
+	result, err := w.reindexSync(ctx, app.IndexRequest{
+		Paths:             p.Paths,
+		FullReindex:       p.Full,
+		AdditionalIgnores: p.AdditionalIgnores,
+		StructuralChunks:  p.StructuralChunks,
+	})
 	if err != nil {
 		return jsonRPCResponse{ID: req.ID, Error: &jsonRPCError{Code: -32000, Message: err.Error()}}
 	}
 	wire := reindexSyncResult{
 		FilesProcessed: result.FilesProcessed,
 		FilesSkipped:   result.FilesSkipped,
+		FilesDeleted:   result.FilesDeleted,
 		ChunksCreated:  result.ChunksCreated,
 		Duration:       result.Duration,
 	}
@@ -642,6 +646,7 @@ type searchParams struct {
 	Directory   string   `json:"directory,omitempty"`
 	MinLine     int      `json:"min_line,omitempty"`
 	MaxLine     int      `json:"max_line,omitempty"`
+	MinScore    float32  `json:"min_score,omitempty"`
 	Explain     bool     `json:"explain,omitempty"`
 	FilePaths   []string `json:"file_paths,omitempty"`
 	Symbol      string   `json:"symbol,omitempty"`

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,7 @@ type ChunkRecord struct {
 	FilePath     string
 	RelativePath string
 	FileHash     string
+	SourceHash   string
 	FileSize     int64
 	Language     string
 	Content      string
@@ -43,6 +45,7 @@ type ChunkRecord struct {
 	EndLine      int
 	StartByte    int
 	EndByte      int
+	ChunkIndex   int
 	ChunkType    string
 	SymbolName   string
 	ProjectRoot  string
@@ -50,11 +53,23 @@ type ChunkRecord struct {
 	Vector       []float32
 }
 
+func stableChunkKey(chunk ChunkRecord) string {
+	return fmt.Sprintf("%s\x00%s\x00%d:%d:%d:%d",
+		chunk.ProjectRoot,
+		chunk.RelativePath,
+		chunk.StartByte,
+		chunk.EndByte,
+		chunk.StartLine,
+		chunk.ChunkIndex,
+	)
+}
+
 // FileInfo represents file information stored in veclite.
 type FileInfo struct {
 	Path         string
 	RelativePath string
 	Hash         string
+	SourceHash   string
 	Size         int64
 	Language     string
 	IndexedAt    time.Time
@@ -89,8 +104,9 @@ type HNSWConfig struct {
 // *Collection is internally synchronized, so callers only need the lock long
 // enough to read the current pointer (see collection()).
 type vecLiteBackendTestHooks struct {
-	afterChunkInsert func()
-	syncLocked       func()
+	afterChunkInsert        func()
+	beforeProjectHashDelete func() error
+	syncLocked              func()
 }
 
 type VecLiteBackend struct {
@@ -307,10 +323,16 @@ func (b *VecLiteBackend) searchOptions(limit int) []veclite.SearchOption {
 const (
 	fileHashRecordType       = "file_hash"
 	fileHashReadyType        = "project_ready"
+	fileHashDirtyType        = "project_dirty"
 	fileHashKeyField         = "_file_hash_key"
 	fileHashRecordField      = "_record_type"
 	fileHashCompleteMetadata = "_file_hash_index_complete"
 )
+
+// ErrProjectFileHashesDirty means a previous multi-collection mutation did not
+// complete. Incremental indexing must fail closed until an explicit full
+// reindex resets the project and rebuilds both chunks and hash metadata.
+var ErrProjectFileHashesDirty = errors.New("project file hash metadata is dirty")
 
 func fileHashKey(projectRoot, relativePath string) string {
 	return "file:" + projectRoot + "\x00" + relativePath
@@ -318,6 +340,10 @@ func fileHashKey(projectRoot, relativePath string) string {
 
 func fileHashReadyKey(projectRoot string) string {
 	return "project:" + projectRoot
+}
+
+func fileHashDirtyKey(projectRoot string) string {
+	return "dirty:" + projectRoot
 }
 
 func (b *VecLiteBackend) upsertFileHash(chunk ChunkRecord) error {
@@ -333,6 +359,7 @@ func (b *VecLiteBackend) upsertFileHash(chunk ChunkRecord) error {
 			"file_path":         chunk.FilePath,
 			"relative_path":     chunk.RelativePath,
 			"file_hash":         chunk.FileHash,
+			"source_hash":       chunk.SourceHash,
 			"project_root":      chunk.ProjectRoot,
 		},
 	})
@@ -353,6 +380,70 @@ func (b *VecLiteBackend) markFileHashesReady(projectRoot string) error {
 		},
 	})
 	return err
+}
+
+// markFileHashesDirty persists a project-scoped tombstone before a multi-
+// collection mutation. Readers treat the tombstone as authoritative evidence
+// that raw-source freshness is unknown until the mutation completes or a full
+// project reset/reindex removes every project record.
+func (b *VecLiteBackend) markFileHashesDirty(projectRoot string) error {
+	coll := b.fileHashCollection()
+	if coll == nil {
+		return fmt.Errorf("file hash collection is unavailable")
+	}
+	key := fileHashDirtyKey(projectRoot)
+	_, _, err := coll.UpsertRecordByKey(fileHashKeyField, key, veclite.RecordInput{
+		Payload: map[string]any{
+			fileHashKeyField:    key,
+			fileHashRecordField: fileHashDirtyType,
+			"project_root":      projectRoot,
+		},
+	})
+	return err
+}
+
+func (b *VecLiteBackend) clearFileHashesDirty(projectRoot string) error {
+	coll := b.fileHashCollection()
+	if coll == nil {
+		return fmt.Errorf("file hash collection is unavailable")
+	}
+	_, err := coll.DeleteWhere(
+		veclite.Equal(fileHashKeyField, fileHashDirtyKey(projectRoot)),
+		veclite.Equal(fileHashRecordField, fileHashDirtyType),
+	)
+	return err
+}
+
+// finishProjectFileDelete clears only the tombstone created by this operation.
+// A preexisting tombstone may represent an older partial failure on a different
+// file and must remain authoritative until a full reset/reindex repairs the
+// entire project.
+func (b *VecLiteBackend) finishProjectFileDelete(projectRoot string, wasDirty bool) error {
+	if wasDirty {
+		return nil
+	}
+	if err := b.clearFileHashesDirty(projectRoot); err != nil {
+		// A failed cleanup must fail closed. Re-upsert the marker in case the
+		// underlying delete removed it before reporting an error.
+		dirtyErr := b.markFileHashesDirty(projectRoot)
+		return errors.Join(fmt.Errorf("clear project file hash tombstone: %w", err), dirtyErr)
+	}
+	return nil
+}
+
+func (b *VecLiteBackend) fileHashesDirty(projectRoot string) bool {
+	coll := b.fileHashCollection()
+	if coll == nil {
+		return true
+	}
+	record, err := coll.FindOne(
+		veclite.Equal(fileHashKeyField, fileHashDirtyKey(projectRoot)),
+		veclite.Equal(fileHashRecordField, fileHashDirtyType),
+	)
+	if errors.Is(err, veclite.ErrNotFound) {
+		return false
+	}
+	return err != nil || record != nil
 }
 
 func (b *VecLiteBackend) fileHashesReady(projectRoot string) bool {
@@ -389,13 +480,14 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 	}
 
 	// Generate unique chunk key for upsert operations
-	chunkKey := fmt.Sprintf("%s:%d", chunk.RelativePath, chunk.StartLine)
+	chunkKey := stableChunkKey(chunk)
 
 	payload := map[string]any{
 		// File info (denormalized)
 		"file_path":     chunk.FilePath,
 		"relative_path": chunk.RelativePath,
 		"file_hash":     chunk.FileHash,
+		"source_hash":   chunk.SourceHash,
 		"file_size":     chunk.FileSize,
 		"language":      chunk.Language,
 
@@ -405,6 +497,7 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		"end_line":    chunk.EndLine,
 		"start_byte":  chunk.StartByte,
 		"end_byte":    chunk.EndByte,
+		"chunk_index": chunk.ChunkIndex,
 		"chunk_type":  chunk.ChunkType,
 		"symbol_name": chunk.SymbolName,
 
@@ -456,11 +549,12 @@ func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]f
 
 		vectors[i] = embeddings[i]
 
-		chunkKey := fmt.Sprintf("%s:%d", chunk.RelativePath, chunk.StartLine)
+		chunkKey := stableChunkKey(chunk)
 		payloads[i] = map[string]any{
 			"file_path":     chunk.FilePath,
 			"relative_path": chunk.RelativePath,
 			"file_hash":     chunk.FileHash,
+			"source_hash":   chunk.SourceHash,
 			"file_size":     chunk.FileSize,
 			"language":      chunk.Language,
 			"content":       chunk.Content,
@@ -468,6 +562,7 @@ func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]f
 			"end_line":      chunk.EndLine,
 			"start_byte":    chunk.StartByte,
 			"end_byte":      chunk.EndByte,
+			"chunk_index":   chunk.ChunkIndex,
 			"chunk_type":    chunk.ChunkType,
 			"symbol_name":   chunk.SymbolName,
 			"chunk_key":     chunkKey,
@@ -505,12 +600,13 @@ func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		return 0, false, fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), b.dimensions)
 	}
 
-	chunkKey := fmt.Sprintf("%s:%d", chunk.RelativePath, chunk.StartLine)
+	chunkKey := stableChunkKey(chunk)
 
 	payload := map[string]any{
 		"file_path":     chunk.FilePath,
 		"relative_path": chunk.RelativePath,
 		"file_hash":     chunk.FileHash,
+		"source_hash":   chunk.SourceHash,
 		"file_size":     chunk.FileSize,
 		"language":      chunk.Language,
 		"content":       chunk.Content,
@@ -518,6 +614,7 @@ func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		"end_line":      chunk.EndLine,
 		"start_byte":    chunk.StartByte,
 		"end_byte":      chunk.EndByte,
+		"chunk_index":   chunk.ChunkIndex,
 		"chunk_type":    chunk.ChunkType,
 		"symbol_name":   chunk.SymbolName,
 		"chunk_key":     chunkKey,
@@ -593,19 +690,108 @@ func (b *VecLiteBackend) DeleteByFilePath(filePath string) (int64, error) {
 	return int64(deleted), nil
 }
 
+// DeleteByProjectFile removes a file's chunks and then its vectorless hash
+// metadata using the complete project identity. A durable project tombstone is
+// written before either collection changes. Any partial failure therefore
+// makes GetSourceHashes report incomplete instead of trusting stale metadata.
+// A clean operation removes only its own tombstone after both deletes succeed;
+// a tombstone that predated the operation is never cleared by a file-scoped
+// delete and remains authoritative until a full project reset/reindex.
+func (b *VecLiteBackend) DeleteByProjectFile(projectRoot, filePath string) (int64, error) {
+	if projectRoot == "" {
+		return 0, fmt.Errorf("project root is required")
+	}
+	if filePath == "" {
+		return 0, fmt.Errorf("file path is required")
+	}
+
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
+	wasDirty := b.fileHashesDirty(projectRoot)
+	if err := b.markFileHashesDirty(projectRoot); err != nil {
+		return 0, fmt.Errorf("mark project file hashes dirty: %w", err)
+	}
+
+	chunkFilters := []veclite.Filter{
+		veclite.Equal("project_root", projectRoot),
+		veclite.Equal("relative_path", filePath),
+	}
+	hashFilters := []veclite.Filter{
+		veclite.Equal(fileHashRecordField, fileHashRecordType),
+		veclite.Equal("project_root", projectRoot),
+		veclite.Equal("relative_path", filePath),
+	}
+	deleted, err := b.collection().DeleteWhere(chunkFilters...)
+	if err != nil {
+		return int64(deleted), fmt.Errorf("delete project file chunks: %w", err)
+	}
+	if b.testHooks != nil && b.testHooks.beforeProjectHashDelete != nil {
+		if err := b.testHooks.beforeProjectHashDelete(); err != nil {
+			return int64(deleted), err
+		}
+	}
+	hashDeleted := 0
+	if coll := b.fileHashCollection(); coll != nil {
+		hashDeleted, err = coll.DeleteWhere(hashFilters...)
+		if err != nil {
+			return int64(deleted), fmt.Errorf("delete project file hash: %w", err)
+		}
+	}
+	if deleted > 0 || hashDeleted > 0 {
+		if err := b.finishProjectFileDelete(projectRoot, wasDirty); err != nil {
+			return int64(deleted), err
+		}
+		return int64(deleted), nil
+	}
+
+	// Legacy records may only carry their absolute file_path. Keep the project
+	// predicate so the compatibility lookup cannot cross project boundaries.
+	deleted, err = b.collection().DeleteWhere(
+		veclite.Equal("project_root", projectRoot),
+		veclite.Equal("file_path", filePath),
+	)
+	if err != nil {
+		return int64(deleted), fmt.Errorf("delete legacy project file chunks: %w", err)
+	}
+	if coll := b.fileHashCollection(); coll != nil {
+		if _, err := coll.DeleteWhere(
+			veclite.Equal(fileHashRecordField, fileHashRecordType),
+			veclite.Equal("project_root", projectRoot),
+			veclite.Equal("file_path", filePath),
+		); err != nil {
+			return int64(deleted), fmt.Errorf("delete legacy project file hash: %w", err)
+		}
+	}
+	if err := b.finishProjectFileDelete(projectRoot, wasDirty); err != nil {
+		return int64(deleted), err
+	}
+	return int64(deleted), nil
+}
+
 // DeleteByProjectRoot removes all chunks for a project.
 // If all records are deleted, the collection is recreated to reset the HNSW index.
 func (b *VecLiteBackend) DeleteByProjectRoot(projectRoot string) (int64, error) {
+	if projectRoot == "" {
+		return 0, fmt.Errorf("project root is required")
+	}
 	b.storageMu.Lock()
 	defer b.storageMu.Unlock()
+	if err := b.markFileHashesDirty(projectRoot); err != nil {
+		return 0, fmt.Errorf("mark project file hashes dirty: %w", err)
+	}
 
 	deleted, err := b.collection().DeleteWhere(veclite.Equal("project_root", projectRoot))
 	if err != nil {
-		return int64(deleted), err
+		return int64(deleted), fmt.Errorf("delete project chunks: %w", err)
+	}
+	if b.testHooks != nil && b.testHooks.beforeProjectHashDelete != nil {
+		if err := b.testHooks.beforeProjectHashDelete(); err != nil {
+			return int64(deleted), err
+		}
 	}
 	if coll := b.fileHashCollection(); coll != nil {
 		if _, err := coll.DeleteWhere(veclite.Equal("project_root", projectRoot)); err != nil {
-			return int64(deleted), err
+			return int64(deleted), fmt.Errorf("delete project file hashes: %w", err)
 		}
 	}
 
@@ -625,6 +811,9 @@ func (b *VecLiteBackend) DeleteByProjectRoot(projectRoot string) (int64, error) 
 func (b *VecLiteBackend) GetFileHashes(projectRoot string) (map[string]string, error) {
 	b.storageMu.Lock()
 	defer b.storageMu.Unlock()
+	if b.fileHashesDirty(projectRoot) {
+		return nil, fmt.Errorf("%w; run 'vecgrep index --full' or call vecgrep_index with force:true", ErrProjectFileHashesDirty)
+	}
 
 	if b.fileHashesReady(projectRoot) {
 		records, err := b.fileHashCollection().Find(
@@ -670,6 +859,76 @@ func (b *VecLiteBackend) GetFileHashes(projectRoot string) (map[string]string, e
 	return fileHashes, nil
 }
 
+// GetSourceHashes returns the raw-source hash for each indexed file in a
+// project. complete is false when any indexed file lacks a source hash or has
+// inconsistent source hashes across its chunks. Callers must only use the map
+// as a freshness fast path when complete is true; old indexes intentionally
+// degrade to an incomplete result until they are rebuilt.
+func (b *VecLiteBackend) GetSourceHashes(projectRoot string) (hashes map[string]string, complete bool, err error) {
+	if projectRoot == "" {
+		return nil, false, fmt.Errorf("project root is required")
+	}
+
+	b.storageMu.Lock()
+	defer b.storageMu.Unlock()
+	if b.fileHashesDirty(projectRoot) {
+		coll := b.fileHashCollection()
+		if coll == nil {
+			return map[string]string{}, false, nil
+		}
+		records, findErr := coll.Find(
+			veclite.Equal(fileHashRecordField, fileHashRecordType),
+			veclite.Equal("project_root", projectRoot),
+		)
+		if findErr != nil {
+			return nil, false, fmt.Errorf("find dirty source hash records: %w", findErr)
+		}
+		hashes, _ = sourceHashesFromRecords(records)
+		return hashes, false, nil
+	}
+
+	if b.fileHashesReady(projectRoot) {
+		records, findErr := b.fileHashCollection().Find(
+			veclite.Equal(fileHashRecordField, fileHashRecordType),
+			veclite.Equal("project_root", projectRoot),
+		)
+		if findErr != nil {
+			return nil, false, fmt.Errorf("find source hash records: %w", findErr)
+		}
+		hashes, complete = sourceHashesFromRecords(records)
+		return hashes, complete, nil
+	}
+
+	// A legacy database may not have the lightweight file_hashes collection
+	// populated yet. Scan chunks once and backfill it, preserving an empty
+	// source_hash for legacy files so completeness remains honest.
+	records, findErr := b.collection().Find(veclite.Equal("project_root", projectRoot))
+	if findErr != nil {
+		return nil, false, fmt.Errorf("find project records: %w", findErr)
+	}
+	hashes, complete = sourceHashesFromRecords(records)
+
+	hashColl := b.fileHashCollection()
+	if b.readOnly || hashColl == nil {
+		return hashes, complete, nil
+	}
+	if _, deleteErr := hashColl.DeleteWhere(
+		veclite.Equal(fileHashRecordField, fileHashRecordType),
+		veclite.Equal("project_root", projectRoot),
+	); deleteErr != nil {
+		return nil, false, fmt.Errorf("clear file hash records: %w", deleteErr)
+	}
+	for _, chunk := range fileMetadataFromRecords(records) {
+		if upsertErr := b.upsertFileHash(chunk); upsertErr != nil {
+			return nil, false, fmt.Errorf("backfill source hash: %w", upsertErr)
+		}
+	}
+	if readyErr := b.markFileHashesReady(projectRoot); readyErr != nil {
+		return nil, false, fmt.Errorf("mark file hashes ready: %w", readyErr)
+	}
+	return hashes, complete, nil
+}
+
 func fileHashesFromRecords(records []*veclite.Record) map[string]string {
 	fileHashes := make(map[string]string)
 	for _, r := range records {
@@ -682,8 +941,41 @@ func fileHashesFromRecords(records []*veclite.Record) map[string]string {
 	return fileHashes
 }
 
+func sourceHashesFromRecords(records []*veclite.Record) (map[string]string, bool) {
+	sourceHashes := make(map[string]string)
+	incompleteFiles := make(map[string]struct{})
+	complete := true
+	for _, r := range records {
+		relPath := getStringPayload(r.Payload, "relative_path")
+		if relPath == "" {
+			complete = false
+			continue
+		}
+
+		sourceHash := getStringPayload(r.Payload, "source_hash")
+		if sourceHash == "" {
+			complete = false
+			incompleteFiles[relPath] = struct{}{}
+			delete(sourceHashes, relPath)
+			continue
+		}
+		if _, incomplete := incompleteFiles[relPath]; incomplete {
+			continue
+		}
+		if existing, exists := sourceHashes[relPath]; exists && existing != sourceHash {
+			complete = false
+			incompleteFiles[relPath] = struct{}{}
+			delete(sourceHashes, relPath)
+			continue
+		}
+		sourceHashes[relPath] = sourceHash
+	}
+	return sourceHashes, complete
+}
+
 func fileMetadataFromRecords(records []*veclite.Record) map[string]ChunkRecord {
 	files := make(map[string]ChunkRecord)
+	sourceHashes, _ := sourceHashesFromRecords(records)
 	for _, r := range records {
 		relPath := getStringPayload(r.Payload, "relative_path")
 		hash := getStringPayload(r.Payload, "file_hash")
@@ -694,6 +986,7 @@ func fileMetadataFromRecords(records []*veclite.Record) map[string]ChunkRecord {
 			FilePath:     getStringPayload(r.Payload, "file_path"),
 			RelativePath: relPath,
 			FileHash:     hash,
+			SourceHash:   sourceHashes[relPath],
 			ProjectRoot:  getStringPayload(r.Payload, "project_root"),
 		}
 	}
@@ -1062,6 +1355,7 @@ func recordToChunk(r *veclite.Record) ChunkRecord {
 		FilePath:     getStringPayload(r.Payload, "file_path"),
 		RelativePath: getStringPayload(r.Payload, "relative_path"),
 		FileHash:     getStringPayload(r.Payload, "file_hash"),
+		SourceHash:   getStringPayload(r.Payload, "source_hash"),
 		FileSize:     getInt64Payload(r.Payload, "file_size"),
 		Language:     getStringPayload(r.Payload, "language"),
 		Content:      getStringPayload(r.Payload, "content"),
@@ -1069,6 +1363,7 @@ func recordToChunk(r *veclite.Record) ChunkRecord {
 		EndLine:      getIntPayload(r.Payload, "end_line"),
 		StartByte:    getIntPayload(r.Payload, "start_byte"),
 		EndByte:      getIntPayload(r.Payload, "end_byte"),
+		ChunkIndex:   getIntPayload(r.Payload, "chunk_index"),
 		ChunkType:    getStringPayload(r.Payload, "chunk_type"),
 		SymbolName:   getStringPayload(r.Payload, "symbol_name"),
 		ProjectRoot:  getStringPayload(r.Payload, "project_root"),
@@ -1114,6 +1409,7 @@ func (b *VecLiteBackend) ListFiles(projectRoot string) ([]FileInfo, error) {
 				Path:         getStringPayload(r.Payload, "file_path"),
 				RelativePath: relPath,
 				Hash:         getStringPayload(r.Payload, "file_hash"),
+				SourceHash:   getStringPayload(r.Payload, "source_hash"),
 				Size:         getInt64Payload(r.Payload, "file_size"),
 				Language:     getStringPayload(r.Payload, "language"),
 				IndexedAt:    indexedAt,

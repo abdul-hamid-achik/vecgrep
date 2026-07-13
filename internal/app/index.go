@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
@@ -14,6 +13,9 @@ type IndexRequest struct {
 	Paths             []string
 	FullReindex       bool
 	AdditionalIgnores []string
+	// StructuralChunks overrides codemap.structural_chunks for this run when
+	// non-empty (auto, off, or required).
+	StructuralChunks string
 }
 
 type ResetScope string
@@ -27,66 +29,25 @@ func (s *Service) Index(ctx context.Context, req IndexRequest, progress func(ind
 	if s == nil || s.session == nil {
 		return nil, fmt.Errorf("service not initialized")
 	}
-	if s.session.Provider == nil {
-		return nil, ErrProviderRequired
-	}
-	if err := s.ensureEmbeddingProfileForIndex(req.FullReindex); err != nil {
-		return nil, err
-	}
-	if err := s.session.Provider.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("embedding provider unavailable: %w", err)
-	}
+	return s.coordinator().Index(ctx, req, progress)
+}
 
-	// Restore the embedding cache from fcheap before indexing so unchanged
-	// chunks don't need to be re-embedded. Best-effort: if no stash is found
-	// or fcheap is unavailable, indexing proceeds normally.
-	s.maybeRestoreEmbeddingCache(ctx)
+// ApplyWatchEvents routes one debounced watcher batch through the same
+// coordinator lifecycle and serialization as explicit CLI/MCP indexing.
+func (s *Service) ApplyWatchEvents(ctx context.Context, events []index.WatchEvent) (*index.IndexResult, error) {
+	if s == nil || s.session == nil {
+		return nil, fmt.Errorf("service not initialized")
+	}
+	return s.coordinator().ApplyWatchEvents(ctx, events)
+}
 
-	// Warm up the embedding model so the first batch doesn't pay
-	// cold-start latency.
-	log.Printf("warming up embedding model")
-	if loadDur, err := s.session.Provider.Warmup(ctx); err != nil {
-		log.Printf("model warmup skipped: %v", err)
-	} else {
-		log.Printf("model warmup complete (load_duration: %dms)", loadDur.Milliseconds())
+func (s *Service) coordinator() *IndexCoordinator {
+	s.indexCoordinatorMu.Lock()
+	defer s.indexCoordinatorMu.Unlock()
+	if s.indexCoordinator == nil {
+		s.indexCoordinator = newSessionIndexCoordinator(s.session)
 	}
-
-	indexer := index.NewIndexer(s.session.DB, s.session.Provider, s.indexerConfig(req.AdditionalIgnores))
-	if progress != nil {
-		indexer.SetProgressCallback(progress)
-	}
-
-	var result *index.IndexResult
-	var indexErr error
-	if req.FullReindex {
-		result, indexErr = indexer.ReindexAll(ctx, s.session.ProjectRoot)
-	} else {
-		result, indexErr = indexer.Index(ctx, s.session.ProjectRoot, req.Paths...)
-	}
-
-	// A persistent embedding cache may buffer writes behind its async writer.
-	// Flush before saving/stashing cache metadata while keeping the provider
-	// reusable by this session.
-	var flushErr error
-	if flusher, ok := s.session.Provider.(interface{ Flush() error }); ok {
-		flushErr = flusher.Flush()
-	}
-	if indexErr != nil {
-		return nil, indexErr
-	}
-	if flushErr != nil {
-		return nil, fmt.Errorf("flush embedding provider: %w", flushErr)
-	}
-	if err := s.saveCurrentEmbeddingProfile(); err != nil {
-		return nil, err
-	}
-
-	// Auto-snapshot the embedding cache to fcheap after a successful index.
-	// Best-effort: failures are logged and swallowed so they never break
-	// the index command.
-	s.maybeStashEmbeddingCache(ctx)
-
-	return result, nil
+	return s.indexCoordinator
 }
 
 // maybeRestoreEmbeddingCache searches fcheap for a matching embedding-cache
@@ -122,17 +83,26 @@ func (s *Service) DeleteFile(ctx context.Context, path string) (int64, error) {
 	if s == nil || s.session == nil {
 		return 0, fmt.Errorf("service not initialized")
 	}
-	return s.session.DB.DeleteFile(ctx, path)
+	return s.session.DB.DeleteProjectFile(ctx, s.session.ProjectRoot, path)
 }
 
 // DryRunPreview returns counts of files needing reindexing and an estimated
 // chunk count without calling the embedding provider. It is used by the
 // --dry-run flag on the index command to preview what would change.
 func (s *Service) DryRunPreview(ctx context.Context) (*index.DryRunPreview, error) {
+	return s.DryRunPreviewWithStructuralMode(ctx, "")
+}
+
+// DryRunPreviewWithStructuralMode is DryRunPreview with the same optional
+// structural-mode override accepted by Index.
+func (s *Service) DryRunPreviewWithStructuralMode(ctx context.Context, structuralMode string) (*index.DryRunPreview, error) {
 	if s == nil || s.session == nil {
 		return nil, fmt.Errorf("service not initialized")
 	}
-	indexer := index.NewIndexer(s.session.DB, nil, s.indexerConfig(nil))
+	indexer, err := NewConfiguredIndexer(s.session.DB, nil, s.session.Config, nil, structuralMode)
+	if err != nil {
+		return nil, err
+	}
 	return indexer.DryRunPreview(ctx, s.session.ProjectRoot)
 }
 
@@ -161,23 +131,6 @@ func (s *Service) Reset(ctx context.Context, scope ResetScope) error {
 		return fmt.Errorf("remove embedding profile metadata: %w", err)
 	}
 	return RemoveEmbeddingProfile(s.session.Config.DataDir)
-}
-
-func (s *Service) indexerConfig(additionalIgnores []string) index.IndexerConfig {
-	cfg := index.DefaultIndexerConfig()
-	// Config ChunkSize is in tokens; the chunker operates in characters.
-	// Approximate conversion: ~4 chars per token for typical code.
-	cfg.ChunkSize = s.session.Config.Indexing.ChunkSize * 4
-	// Config ChunkOverlap is in tokens; the chunker operates in characters.
-	// Approximate conversion: ~4 chars per token for typical code.
-	cfg.ChunkOverlap = s.session.Config.Indexing.ChunkOverlap * 4
-	cfg.MaxFileSize = s.session.Config.Indexing.MaxFileSize
-	cfg.SourceBufferBytes = s.session.Config.Indexing.SourceBufferBytes
-	cfg.SyncInterval = s.session.Config.Indexing.SyncInterval
-	cfg.SyncIntervalDuration = s.session.Config.Indexing.SyncIntervalDuration
-	cfg.IgnorePatterns = append(cfg.IgnorePatterns, s.session.Config.Indexing.IgnorePatterns...)
-	cfg.IgnorePatterns = append(cfg.IgnorePatterns, additionalIgnores...)
-	return cfg
 }
 
 func RoundDuration(d time.Duration) time.Duration {

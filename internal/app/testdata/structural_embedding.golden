@@ -1,0 +1,5 @@
+Explains Fresh.
+
+func Fresh() string
+
+func Fresh() string { return "fresh" }

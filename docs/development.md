@@ -278,9 +278,11 @@ type EmbeddingConfig struct {
 
 ### Adding a Language Chunker
 
-1. Add language detection in `internal/index/chunker.go`
+1. Add recognition metadata in `internal/index/languages.go`. Recognition does
+   not imply structural parsing; the generic chunker remains the safe fallback.
 
-2. Implement heuristic chunk extraction in `internal/index/chunker.go`:
+2. Only add structural extraction when fixtures demonstrate correct boundaries.
+   Implement it in `internal/index/chunker.go`:
 ```go
 func (c *Chunker) chunkNewLang(content string) []Chunk {
     // Identify semantic units (functions, classes, etc.)
@@ -288,7 +290,9 @@ func (c *Chunker) chunkNewLang(content string) []Chunk {
 }
 ```
 
-3. Add tests with sample code in your language
+3. Add detection and source-coverage tests. A parser must preserve uncovered
+   imports, docs, globals, and trailing source, keep every chunk valid UTF-8 and
+   at most 4096 bytes, and avoid claiming call-graph support.
 
 ### Adding an MCP Tool
 

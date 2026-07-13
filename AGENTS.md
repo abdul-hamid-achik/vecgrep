@@ -92,6 +92,13 @@ Tests that require Ollama are skipped if it's not running.
 
 ## Architecture Notes
 
+### codemap Integration
+
+Follow [`docs/codemap-integration.md`](docs/codemap-integration.md) for the cross-tool
+contract. codemap owns the resolved structural graph and impact analysis; vecgrep owns
+semantic retrieval and memory. Integration is one hop through versioned CLI JSON: neither
+tool links the other's packages nor reads or shares the other's database.
+
 ### Embedding Flow
 1. Files are chunked by `internal/index/chunker.go` (language-aware)
 2. Chunks are embedded via `internal/embed/ollama.go`

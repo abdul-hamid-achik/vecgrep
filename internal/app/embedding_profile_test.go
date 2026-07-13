@@ -31,11 +31,11 @@ func TestEmbeddingProfileProtectsSemanticTemplates(t *testing.T) {
 	}
 }
 
-func TestEmbeddingProfileLegacyIdentityUnchangedWithoutTemplates(t *testing.T) {
+func TestEmbeddingProfileIdentityTracksLosslessChunker(t *testing.T) {
 	cfg := config.DefaultConfig()
 	profile := CurrentEmbeddingProfile(cfg)
-	if profile.ProfileID != "ollama:nomic-embed-text:768:cosine:code-chunker-v1" {
-		t.Fatalf("ProfileID = %q, want legacy-compatible identity", profile.ProfileID)
+	if profile.ProfileID != "ollama:nomic-embed-text:768:cosine:code-chunker-v2-lossless" {
+		t.Fatalf("ProfileID = %q, want lossless chunker identity", profile.ProfileID)
 	}
 }
 
@@ -125,8 +125,8 @@ func TestEmbeddingProfileLegacyMigrationDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeProfile() error = %v", err)
 	}
-	if current := CurrentEmbeddingProfile(config.DefaultConfig()); !legacy.Matches(current) {
-		t.Fatalf("legacy default profile should remain compatible:\nlegacy:  %+v\ncurrent: %+v", legacy, current)
+	if current := CurrentEmbeddingProfile(config.DefaultConfig()); legacy.Matches(current) {
+		t.Fatalf("legacy lossy profile must require a rebuild:\nlegacy:  %+v\ncurrent: %+v", legacy, current)
 	}
 
 	withContext := config.DefaultConfig()

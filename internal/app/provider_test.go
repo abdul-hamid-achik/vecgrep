@@ -1,6 +1,7 @@
 package app
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
@@ -84,4 +85,21 @@ func TestNewProviderRejectsUnknownProvider(t *testing.T) {
 	if _, err := NewProvider(cfg); err == nil {
 		t.Fatal("NewProvider succeeded for unknown provider")
 	}
+}
+
+func TestNewDaemonProviderOwnsSingleThrottleLayer(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataDir = filepath.Join(t.TempDir(), "data")
+	cfg.Daemon.EmbedWorkers = 2
+	cfg.Daemon.EmbedMaxInFlight = 3
+
+	provider, err := NewDaemonProvider(cfg)
+	if err != nil {
+		t.Fatalf("NewDaemonProvider failed: %v", err)
+	}
+	throttled, ok := provider.(*embed.ThrottledProvider)
+	if !ok {
+		t.Fatalf("provider type = %T, want *embed.ThrottledProvider", provider)
+	}
+	throttled.Close()
 }

@@ -38,6 +38,9 @@ type StatusResponse struct {
 	PendingChanges   *index.PendingChanges
 	ConfigSources    []string
 	MigrationWarning string
+	IngestionReceipt *IngestionReceipt
+	ReceiptError     string
+	Freshness        *IndexFreshnessReport
 
 	// HNSWConfig reports the resolved HNSW index/search parameters actually
 	// applied to the veclite collection (M, EfConstruction, EfSearch). These
@@ -57,8 +60,9 @@ type StatusResponse struct {
 	// semantic search will work before issuing a query.
 	ProviderHealth string
 
-	// HasCodemapGraph reports whether codemap has an index for this project
-	// (checked by stat-ing codemap's XDG registry). When true, the codemap
+	// HasCodemapGraph reports whether codemap has an index for this project.
+	// A verified structural manifest is authoritative when required; otherwise
+	// the value falls back to stat-ing codemap's XDG registry. When true, codemap
 	// integration can use real call-graph data for related-files and
 	// structural re-ranking. This is best-effort — a false value does not mean
 	// codemap is uninstalled, just that no graph index was found.
@@ -115,9 +119,16 @@ func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {
 		profileMatches = false
 	}
 
-	indexer := index.NewIndexer(s.session.DB, nil, s.indexerConfig(nil))
-	pending, _ := indexer.GetPendingChanges(ctx, s.session.ProjectRoot)
-	indexFresh := pending != nil && pending.TotalPending == 0
+	// Status reads raw source hashes plus codemap's bounded structural manifest;
+	// it never loads the paginated structural export. Receipt corruption and
+	// legacy hashes degrade freshness to unknown rather than failing stats.
+	ingestionReceipt, receiptErr := LoadIngestionReceipt(s.session.Config.DataDir, s.session.ProjectRoot)
+	receiptError := ""
+	if receiptErr != nil {
+		receiptError = receiptErr.Error()
+	}
+	freshness, pending, _ := s.indexFreshness(ctx, ingestionReceipt, receiptErr)
+	indexFresh := freshness.IsFresh()
 
 	// Resolve the effective HNSW parameters. The config layer defaults M to 0
 	// (meaning "use veclite's default"), so surface the veclite default when
@@ -151,6 +162,12 @@ func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {
 	// XDG registry directory. Best-effort: missing registry or missing
 	// codemap installation simply reports false.
 	hasCodemapGraph := checkCodemapRegistry(s.session.ProjectRoot)
+	// Once a structural manifest is required, its project-scoped validation is
+	// authoritative. Do not let the legacy global-registry heuristic claim a
+	// graph exists after a mismatch or unavailable peer response.
+	if freshness != nil && freshness.ManifestRequired {
+		hasCodemapGraph = freshness.ManifestVerified
+	}
 
 	return &StatusResponse{
 		ProjectRoot:      s.session.ProjectRoot,
@@ -176,6 +193,9 @@ func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {
 		PendingChanges:   pending,
 		ConfigSources:    s.session.ConfigSources,
 		MigrationWarning: s.session.MigrationWarning,
+		IngestionReceipt: ingestionReceipt,
+		ReceiptError:     receiptError,
+		Freshness:        freshness,
 		// Surface the resolved HNSW parameters so users can confirm their
 		// config tuning is actually applied (Phase 1 wiring). Defaults are
 		// resolved above so a 0 in config shows as veclite's default, not 0.
@@ -213,14 +233,13 @@ func (s *Service) IndexMeta(ctx context.Context) (indexed bool, fresh bool, chun
 		return indexed, false, chunks, nil
 	}
 
-	indexer := index.NewIndexer(s.session.DB, nil, s.indexerConfig(nil))
-	pending, perr := indexer.GetPendingChanges(ctx, s.session.ProjectRoot)
-	if perr != nil || pending == nil {
+	freshness, _, freshnessErr := s.IndexFreshness(ctx)
+	if freshnessErr != nil || freshness == nil {
 		// Could not determine pending changes; report not fresh rather than
 		// fabricating an "up to date" signal.
 		return indexed, false, chunks, nil
 	}
-	return indexed, pending.TotalPending == 0, chunks, nil
+	return indexed, freshness.IsFresh(), chunks, nil
 }
 
 func fileSize(path string) int64 {

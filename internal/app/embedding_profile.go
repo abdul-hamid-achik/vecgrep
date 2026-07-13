@@ -19,7 +19,7 @@ const (
 	embeddingProfileSchemaVersion = 1
 	embeddingProfileDistance      = "cosine"
 	embeddingProfileModality      = "text"
-	embeddingProfilePreprocessor  = "code-chunker-v1"
+	embeddingProfilePreprocessor  = "code-chunker-v2-lossless"
 )
 
 type EmbeddingProfile struct {

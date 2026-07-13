@@ -42,8 +42,8 @@ features:
     title: Cloud-Ready Providers
     details: Switch to OpenAI, Cohere, or Voyage AI when a managed provider fits. Same CLI, same search, same workflow — just a config change away.
   - icon: 🧩
-    title: Language-Aware Chunking
-    details: Code is chunked by language syntax — functions, classes, methods — not arbitrary line splits. Results map to real code structures.
+    title: Lossless Language-Aware Chunking
+    details: Structural boundaries are used when available; imports, globals, container regions, and recognized long-tail languages stay searchable through a bounded generic fallback.
 ---
 
 <div class="vp-home-custom">
@@ -70,8 +70,8 @@ vecgrep init
 vecgrep index
 ```
 
-vecgrep chunks your source tree by language syntax, embeds each chunk via
-Ollama, and stores vectors in VecLite — all locally under
+vecgrep uses structural boundaries where available and a lossless generic
+fallback everywhere else, embeds each chunk via Ollama, and stores vectors in VecLite — all locally under
 `~/.vecgrep/projects/`.
 
 </div>
@@ -188,7 +188,7 @@ query your index directly — `vecgrep_search`, `vecgrep_similar`,
 | Match by meaning | ✗ text patterns only | ✓ semantic vectors |
 | Natural language queries | ✗ | ✓ plain English |
 | Keyword + semantic blend | ✗ | ✓ hybrid mode |
-| Language-aware chunking | ✗ line-based | ✓ syntax-aware |
+| Language-aware chunking | ✗ line-based | ✓ structural where available, lossless fallback otherwise |
 | Filter by language/type/dir | limited | ✓ full metadata filters |
 | Similar code discovery | ✗ | ✓ `vecgrep similar` |
 | AI assistant integration | ✗ | ✓ MCP server |
@@ -295,9 +295,13 @@ codebase overview.
 <details>
 <summary><strong>What languages does vecgrep support?</strong></summary>
 
-vecgrep's chunker is language-aware and supports Go, JavaScript, TypeScript,
-Python, Rust, Java, C/C++, and more. Code is chunked by syntax structures
-(functions, classes, methods) rather than arbitrary line splits.
+vecgrep recognizes Go, JavaScript/TypeScript, Python, Vue, Rust, Java/Kotlin/
+Scala, C/C++/CUDA, C#/VB, Ruby, PHP, Dart, Swift, Lua, Elixir, common web
+containers, Terraform/HCL, and text formats. Recognition provides stable
+language metadata and filters. Built-in structural heuristics currently cover
+Go, JavaScript/TypeScript, Python, and Rust; fresh codemap exports provide
+stronger symbol boundaries. Every other language uses bounded generic chunks,
+so recognition never overstates parser or call-graph support.
 
 </details>
 

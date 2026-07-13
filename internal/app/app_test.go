@@ -110,7 +110,7 @@ func TestServiceIndexRejectsMismatchedEmbeddingProfile(t *testing.T) {
 
 	stored := CurrentEmbeddingProfile(session.Config)
 	stored.Model = "other-model"
-	stored.ProfileID = "ollama:other-model:768:cosine:code-chunker-v1"
+	stored.ProfileID = "ollama:other-model:768:cosine:code-chunker-v2-lossless"
 	if err := SaveEmbeddingProfile(session.DB, session.Config.DataDir, stored); err != nil {
 		t.Fatalf("SaveEmbeddingProfile failed: %v", err)
 	}
@@ -141,6 +141,34 @@ func TestServiceFullIndexWritesEmbeddingProfile(t *testing.T) {
 	}
 	if !profile.Matches(CurrentEmbeddingProfile(session.Config)) {
 		t.Fatalf("profile = %+v, want current %+v", profile, CurrentEmbeddingProfile(session.Config))
+	}
+	status, err := service.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if status.IngestionReceipt == nil || !status.IngestionReceipt.Success || !status.IngestionReceipt.Complete {
+		t.Fatalf("status ingestion receipt = %+v, error = %q", status.IngestionReceipt, status.ReceiptError)
+	}
+}
+
+func TestStatusReportsCorruptIngestionReceiptWithoutFailing(t *testing.T) {
+	session, service := createTestSession(t)
+	path, err := IngestionReceiptPath(session.Config.DataDir, session.ProjectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status failed because receipt was corrupt: %v", err)
+	}
+	if status.IngestionReceipt != nil || !strings.Contains(status.ReceiptError, "decode ingestion receipt") {
+		t.Fatalf("status receipt/error = %+v / %q", status.IngestionReceipt, status.ReceiptError)
 	}
 }
 

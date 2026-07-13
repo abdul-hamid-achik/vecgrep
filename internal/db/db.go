@@ -186,9 +186,22 @@ func (db *DB) DeleteFile(ctx context.Context, filePath string) (int64, error) {
 	return db.backend.DeleteByFilePath(filePath)
 }
 
+// DeleteProjectFile removes one file only from the named project's index.
+// Use this for every project-aware surface; DeleteFile remains solely for
+// compatibility with legacy callers that do not carry project identity.
+func (db *DB) DeleteProjectFile(ctx context.Context, projectRoot, filePath string) (int64, error) {
+	return db.backend.DeleteByProjectFile(projectRoot, filePath)
+}
+
 // GetFileHashes returns file hashes for incremental indexing.
 func (db *DB) GetFileHashes(projectRoot string) (map[string]string, error) {
 	return db.backend.GetFileHashes(projectRoot)
+}
+
+// GetSourceHashes returns project-scoped raw-source hashes. complete is false
+// when any indexed file lacks a source hash, as is expected for legacy indexes.
+func (db *DB) GetSourceHashes(projectRoot string) (hashes map[string]string, complete bool, err error) {
+	return db.backend.GetSourceHashes(projectRoot)
 }
 
 // GetFileHash returns the hash of an indexed file.

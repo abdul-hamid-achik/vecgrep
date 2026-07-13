@@ -365,6 +365,7 @@ func isolateConfigTestEnv(t *testing.T) string {
 	t.Setenv("VECGREP_CODEMAP_BIN", "")
 	t.Setenv("VECGREP_CODEMAP_MCP_ENDPOINT", "")
 	t.Setenv("VECGREP_CODEMAP_STRUCTURAL_WEIGHT", "")
+	t.Setenv("VECGREP_CODEMAP_STRUCTURAL_CHUNKS", "")
 	t.Setenv("VECGREP_DAEMON_AUTOSTART", "")
 	t.Setenv("VECGREP_DAEMON_IDLE_TIMEOUT", "")
 	t.Setenv("VECGREP_DAEMON_EMBED_WORKERS", "")

@@ -1,18 +1,55 @@
 package mcp
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
 	vlsession "github.com/abdul-hamid-achik/veclite/session"
 )
+
+type lifecycleMCPProvider struct {
+	dimensions int
+	model      string
+	pingStart  chan struct{}
+	pingDone   chan struct{}
+	closeCalls atomic.Int32
+}
+
+func (p *lifecycleMCPProvider) Embed(context.Context, string) ([]float32, error) {
+	return make([]float32, p.dimensions), nil
+}
+
+func (p *lifecycleMCPProvider) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	result := make([][]float32, len(texts))
+	for i := range result {
+		result[i] = make([]float32, p.dimensions)
+	}
+	return result, nil
+}
+
+func (p *lifecycleMCPProvider) Model() string   { return p.model }
+func (p *lifecycleMCPProvider) Dimensions() int { return p.dimensions }
+func (p *lifecycleMCPProvider) Ping(ctx context.Context) error {
+	close(p.pingStart)
+	select {
+	case <-p.pingDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (p *lifecycleMCPProvider) Warmup(context.Context) (time.Duration, error) { return 0, nil }
+func (p *lifecycleMCPProvider) Close()                                        { p.closeCalls.Add(1) }
 
 // newTestMCPSession creates an mcpSession backed by a temp directory with
 // a minimal vecgrep config. No embedding provider is needed for DB-only tests.
@@ -494,6 +531,428 @@ func TestMCPSessionCloseReleasesReadOnlyLock(t *testing.T) {
 		t.Fatalf("sess2 readWriteDB after close: %v", err)
 	}
 	defer rwDB2.Close()
+}
+
+func TestMCPSessionCloseWaitsForIndexAndClosesProviderOnce(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Embedding.Dimensions = 8
+	cfg.Codemap.Enabled = false
+	cfg.Codemap.StructuralChunks = string(app.StructuralChunksOff)
+	provider := &lifecycleMCPProvider{
+		dimensions: cfg.Embedding.Dimensions,
+		model:      cfg.Embedding.Model,
+		pingStart:  make(chan struct{}),
+		pingDone:   make(chan struct{}),
+	}
+	var releasePing sync.Once
+	defer releasePing.Do(func() { close(provider.pingDone) })
+	sess := newMCPSession(cfg, root, provider)
+
+	indexErr := make(chan error, 1)
+	go func() {
+		_, err := sess.index(context.Background(), app.IndexRequest{StructuralChunks: string(app.StructuralChunksOff)})
+		indexErr <- err
+	}()
+	select {
+	case <-provider.pingStart:
+	case <-time.After(time.Second):
+		t.Fatal("index did not reach provider preflight")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- sess.close() }()
+	waitForMCPSessionClosing(t, sess)
+	if _, err := sess.index(context.Background(), app.IndexRequest{}); !errors.Is(err, errMCPSessionClosing) {
+		t.Fatalf("new index during close error = %v, want session closing", err)
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("close returned during provider preflight: %v", err)
+	default:
+	}
+	if provider.closeCalls.Load() != 0 {
+		t.Fatal("provider closed while an index operation was active")
+	}
+
+	releasePing.Do(func() { close(provider.pingDone) })
+	if err := <-indexErr; !errors.Is(err, errMCPSessionClosing) {
+		t.Fatalf("in-flight index error = %v, want nested DB lease rejected by close", err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("close did not drain the index operation")
+	}
+	if provider.closeCalls.Load() != 1 {
+		t.Fatalf("provider close calls = %d, want 1", provider.closeCalls.Load())
+	}
+	if err := sess.close(); err != nil {
+		t.Fatalf("second close error = %v", err)
+	}
+	if provider.closeCalls.Load() != 1 {
+		t.Fatalf("provider close calls after second close = %d, want 1", provider.closeCalls.Load())
+	}
+}
+
+func TestMCPSessionCloseWaitsForWriteLease(t *testing.T) {
+	sess, _ := newTestMCPSession(t)
+	_, release, err := sess.acquireWriteDB(context.Background())
+	if err != nil {
+		t.Fatalf("acquireWriteDB: %v", err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- sess.close() }()
+	waitForMCPSessionClosing(t, sess)
+
+	if _, _, err := sess.acquireWriteDB(context.Background()); !errors.Is(err, errMCPSessionClosing) {
+		t.Fatalf("new write lease during close error = %v, want session closing", err)
+	}
+	if _, _, err := sess.acquireRO(); !errors.Is(err, errMCPSessionClosing) {
+		t.Fatalf("new read lease during close error = %v, want session closing", err)
+	}
+	select {
+	case err := <-closed:
+		t.Fatalf("close returned before write release: %v", err)
+	default:
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release write lease: %v", err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("close did not drain the write lease")
+	}
+}
+
+func TestMCPSessionSerializesWriterLeasesUntilRelease(t *testing.T) {
+	sess, _ := newTestMCPSession(t)
+	defer func() { _ = sess.close() }()
+
+	first, releaseFirst, err := sess.acquireWriteDB(context.Background())
+	if err != nil || first == nil {
+		t.Fatalf("first acquireWriteDB = %v, %v", first, err)
+	}
+	type writeLease struct {
+		database *db.DB
+		release  func() error
+		err      error
+	}
+	second := make(chan writeLease, 1)
+	go func() {
+		database, release, err := sess.acquireWriteDB(context.Background())
+		second <- writeLease{database: database, release: release, err: err}
+	}()
+	waitForMCPWriterWaiters(t, sess, 1)
+
+	select {
+	case got := <-second:
+		t.Fatalf("second writer acquired before first release: %+v", got)
+	default:
+	}
+	if err := releaseFirst(); err != nil {
+		t.Fatalf("release first writer: %v", err)
+	}
+
+	select {
+	case got := <-second:
+		if got.err != nil || got.database == nil || got.release == nil {
+			t.Fatalf("second writer lease = %+v", got)
+		}
+		if err := got.release(); err != nil {
+			t.Fatalf("release second writer: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second writer did not acquire after first release")
+	}
+}
+
+func TestMCPSessionWriterPreferenceDrainsReadersAndBlocksNewOnes(t *testing.T) {
+	sess, _ := newTestMCPSession(t, true)
+	defer func() { _ = sess.close() }()
+
+	_, releaseInitialReader, err := sess.acquireRO()
+	if err != nil {
+		t.Fatalf("initial acquireRO: %v", err)
+	}
+	type writeLease struct {
+		database *db.DB
+		release  func() error
+		err      error
+	}
+	writer := make(chan writeLease, 1)
+	go func() {
+		database, release, err := sess.acquireWriteDB(context.Background())
+		writer <- writeLease{database: database, release: release, err: err}
+	}()
+	waitForMCPWriterActive(t, sess)
+
+	reader := make(chan error, 1)
+	go func() {
+		_, release, err := sess.acquireROContext(context.Background())
+		if release != nil {
+			release()
+		}
+		reader <- err
+	}()
+	select {
+	case err := <-reader:
+		t.Fatalf("new reader bypassed waiting writer: %v", err)
+	default:
+	}
+
+	releaseInitialReader()
+	var activeWriter writeLease
+	select {
+	case activeWriter = <-writer:
+		if activeWriter.err != nil || activeWriter.database == nil || activeWriter.release == nil {
+			t.Fatalf("writer lease = %+v", activeWriter)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("writer did not progress after the initial reader drained")
+	}
+	select {
+	case err := <-reader:
+		t.Fatalf("new reader entered while writer handle was active: %v", err)
+	default:
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	canceledReader := make(chan error, 1)
+	go func() {
+		_, _, err := sess.acquireROContext(cancelCtx)
+		canceledReader <- err
+	}()
+	cancel()
+	select {
+	case err := <-canceledReader:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("blocked reader error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked reader did not observe cancellation")
+	}
+
+	if err := activeWriter.release(); err != nil {
+		t.Fatalf("release writer: %v", err)
+	}
+	select {
+	case err := <-reader:
+		if err != nil {
+			t.Fatalf("reader after writer release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reader did not proceed after writer release")
+	}
+}
+
+func TestMCPSessionWriterProgressesAgainstContinuousReaders(t *testing.T) {
+	sess, _ := newTestMCPSession(t, true)
+	defer func() { _ = sess.close() }()
+
+	readCtx, stopReaders := context.WithCancel(context.Background())
+	var reads atomic.Int64
+	var readers sync.WaitGroup
+	for range 8 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				database, release, err := sess.acquireROContext(readCtx)
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					t.Errorf("continuous acquireRO: %v", err)
+					return
+				}
+				_, _ = database.Stats()
+				reads.Add(1)
+				release()
+			}
+		}()
+	}
+	deadline := time.Now().Add(time.Second)
+	for reads.Load() < 16 {
+		if time.Now().After(deadline) {
+			stopReaders()
+			readers.Wait()
+			t.Fatal("continuous readers did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	writerCtx, cancelWriter := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelWriter()
+	type writeLease struct {
+		release func() error
+		err     error
+	}
+	writer := make(chan writeLease, 1)
+	go func() {
+		_, release, err := sess.acquireWriteDB(writerCtx)
+		writer <- writeLease{release: release, err: err}
+	}()
+	var got writeLease
+	select {
+	case got = <-writer:
+		if got.err != nil || got.release == nil {
+			stopReaders()
+			readers.Wait()
+			t.Fatalf("writer under reader load = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		stopReaders()
+		readers.Wait()
+		t.Fatal("continuous readers starved writer")
+	}
+	if err := got.release(); err != nil {
+		t.Fatalf("release writer: %v", err)
+	}
+	stopReaders()
+	readers.Wait()
+}
+
+func TestMCPSessionWriterCancelsWhileDrainingExistingReader(t *testing.T) {
+	sess, _ := newTestMCPSession(t, true)
+	defer func() { _ = sess.close() }()
+	_, releaseReader, err := sess.acquireRO()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseReader()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := make(chan error, 1)
+	go func() {
+		_, _, err := sess.acquireWriteDB(ctx)
+		writer <- err
+	}()
+	waitForMCPWriterActive(t, sess)
+	cancel()
+	select {
+	case err := <-writer:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("writer drain error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("writer did not cancel while draining an existing reader")
+	}
+
+	// Canceling the preferred writer must reopen admission for ordinary reads
+	// even though the original reader is still leased.
+	_, releaseNext, err := sess.acquireROContext(context.Background())
+	if err != nil {
+		t.Fatalf("reader after canceled writer: %v", err)
+	}
+	releaseNext()
+}
+
+func TestMCPSessionQueuedWriterCancellationAndCloseDrain(t *testing.T) {
+	sess, _ := newTestMCPSession(t)
+	_, releaseFirst, err := sess.acquireWriteDB(context.Background())
+	if err != nil {
+		t.Fatalf("first acquireWriteDB: %v", err)
+	}
+
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	waitResult := make(chan error, 1)
+	go func() {
+		_, _, err := sess.acquireWriteDB(waitCtx)
+		waitResult <- err
+	}()
+	waitForMCPWriterWaiters(t, sess, 1)
+	cancelWait()
+	select {
+	case err := <-waitResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("queued writer error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued writer did not observe cancellation")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- sess.close() }()
+	waitForMCPSessionClosing(t, sess)
+	select {
+	case err := <-closed:
+		t.Fatalf("close returned before active writer release: %v", err)
+	default:
+	}
+	if _, _, err := sess.acquireWriteDB(context.Background()); !errors.Is(err, errMCPSessionClosing) {
+		t.Fatalf("writer accepted during close: %v", err)
+	}
+	if err := releaseFirst(); err != nil {
+		t.Fatalf("release first writer: %v", err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("close did not drain the active writer")
+	}
+}
+
+func waitForMCPWriterWaiters(t *testing.T, sess *mcpSession, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		sess.mu.Lock()
+		waiters := sess.writerWaiters
+		sess.mu.Unlock()
+		if waiters >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("writer waiters = %d, want at least %d", waiters, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForMCPWriterActive(t *testing.T, sess *mcpSession) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		sess.mu.Lock()
+		active := sess.writerActive
+		sess.mu.Unlock()
+		if active {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("writer never became active")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func waitForMCPSessionClosing(t *testing.T, sess *mcpSession) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		sess.mu.Lock()
+		closing := sess.closing
+		sess.mu.Unlock()
+		if closing {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session never entered closing state")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestFormatLockErrorWithFileLocked(t *testing.T) {

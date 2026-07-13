@@ -478,6 +478,9 @@ func mergeCodemapConfig(dst, src *Config) {
 	if src.Codemap.StructuralWeight > 0 {
 		dst.Codemap.StructuralWeight = src.Codemap.StructuralWeight
 	}
+	if src.Codemap.StructuralChunks != "" || src.has("codemap.structural_chunks") {
+		dst.Codemap.StructuralChunks = src.Codemap.StructuralChunks
+	}
 }
 
 // mergeCacheConfig merges non-zero cache settings from src into dst.
@@ -689,6 +692,9 @@ func (r *ConfigResolution) applyEnvironment(cfg *Config) {
 		if w, err := strconv.ParseFloat(val, 32); err == nil {
 			cfg.Codemap.StructuralWeight = float32(w)
 		}
+	}
+	if val := os.Getenv("VECGREP_CODEMAP_STRUCTURAL_CHUNKS"); val != "" {
+		cfg.Codemap.StructuralChunks = val
 	}
 
 	// Daemon settings
@@ -936,6 +942,7 @@ func ShowResolvedConfig(cfg *Config, sources []string) string {
 		fmt.Fprintf(&sb, "  codemap.mcp_endpoint: %s\n", cfg.Codemap.MCPEndpoint)
 	}
 	fmt.Fprintf(&sb, "  codemap.structural_weight: %.2f\n", cfg.Codemap.StructuralWeight)
+	fmt.Fprintf(&sb, "  codemap.structural_chunks: %s\n", cfg.Codemap.StructuralChunks)
 
 	// Daemon settings
 	sb.WriteString("\nDaemon:\n")

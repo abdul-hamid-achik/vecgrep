@@ -186,6 +186,22 @@ func Goodbye() string {
 	}
 }
 
+func TestChunkFile_SemanticHintsPreserveUncoveredSource(t *testing.T) {
+	c := NewChunker(DefaultChunkerConfig())
+	content := "// package documentation\npackage demo\n\nimport \"fmt\"\n\nfunc Run() {\n\tfmt.Println(\"run\")\n}\n\nvar TailSentinel = true\n"
+	chunks := c.ChunkFile(content, "main.go")
+	if len(chunks) < 3 {
+		t.Fatalf("chunks = %+v, want prologue + function + tail", chunks)
+	}
+	var reconstructed strings.Builder
+	for _, chunk := range chunks {
+		reconstructed.WriteString(chunk.Content)
+	}
+	if got := reconstructed.String(); got != content {
+		t.Fatalf("semantic chunking lost uncovered source\n--- got ---\n%s\n--- want ---\n%s", got, content)
+	}
+}
+
 func TestChunkFile_GoType(t *testing.T) {
 	c := NewChunker(DefaultChunkerConfig())
 	content := `package main

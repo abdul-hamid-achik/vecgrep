@@ -73,6 +73,11 @@ vector:
     m: 16
     ef_construction: 200
     ef_search: 100
+
+codemap:
+  # auto = use fresh symbol records and fall back per file; off = local
+  # chunker only; required = fail indexing if any export file is unusable.
+  structural_chunks: auto
 ```
 
 ## Configure From CLI
@@ -84,6 +89,7 @@ vecgrep config set search.default_mode keyword
 vecgrep config set embedding.provider voyage
 vecgrep config set embedding.model voyage-code-3
 vecgrep config set embedding.dimensions 1024
+vecgrep config set codemap.structural_chunks required
 ```
 
 Set global defaults:
@@ -133,5 +139,6 @@ vecgrep config show --global
 | `VECGREP_COHERE_BASE_URL` | Cohere-compatible base URL |
 | `VECGREP_VOYAGE_API_KEY` | Voyage AI API key |
 | `VECGREP_VOYAGE_BASE_URL` | Voyage-compatible base URL |
+| `VECGREP_CODEMAP_STRUCTURAL_CHUNKS` | `auto`, `off`, or `required` structural indexing mode |
 
 Provider-standard API key aliases are also supported: `OPENAI_API_KEY`, `COHERE_API_KEY`, and `VOYAGE_API_KEY`.

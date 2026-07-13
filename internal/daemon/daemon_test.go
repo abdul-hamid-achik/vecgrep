@@ -6,10 +6,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 )
 
 func TestHandleSwitchBranchIsRejected(t *testing.T) {
@@ -28,6 +31,63 @@ func TestHandleSwitchBranchIsRejected(t *testing.T) {
 	}
 	if !strings.Contains(resp.Error.Message, "vecgrep branch switch") {
 		t.Fatalf("error should point to the CLI branch-switch flow, got: %q", resp.Error.Message)
+	}
+}
+
+func TestSearchParamsPreserveMinScore(t *testing.T) {
+	want := searchParams{Project: "/project", Query: "needle", MinScore: 0.73}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got searchParams
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.MinScore != want.MinScore {
+		t.Fatalf("min_score = %v, want %v", got.MinScore, want.MinScore)
+	}
+}
+
+func TestProjectWorkerCloseDrainsOperationsAndRejectsNewWork(t *testing.T) {
+	w := &projectWorker{}
+	if !w.beginOperation() {
+		t.Fatal("initial operation was rejected")
+	}
+	closed := make(chan struct{})
+	go func() {
+		w.close()
+		close(closed)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		w.operationsMu.Lock()
+		closing := w.closing
+		w.operationsMu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker never entered closing state")
+		}
+		runtime.Gosched()
+	}
+	if w.beginOperation() {
+		w.endOperation()
+		t.Fatal("worker accepted an operation after close began")
+	}
+	select {
+	case <-closed:
+		t.Fatal("close returned before the active operation drained")
+	default:
+	}
+
+	w.endOperation()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("close did not return after the active operation ended")
 	}
 }
 
@@ -163,6 +223,7 @@ func TestReindexSyncWireRoundTrip(t *testing.T) {
 	original := reindexSyncResult{
 		FilesProcessed: 12,
 		FilesSkipped:   3,
+		FilesDeleted:   2,
 		ChunksCreated:  40,
 		Duration:       1500 * time.Millisecond,
 		Errors:         []string{"boom", "warn"},
@@ -175,7 +236,7 @@ func TestReindexSyncWireRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &loaded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if loaded.FilesProcessed != original.FilesProcessed || loaded.ChunksCreated != original.ChunksCreated ||
+	if loaded.FilesProcessed != original.FilesProcessed || loaded.FilesDeleted != original.FilesDeleted || loaded.ChunksCreated != original.ChunksCreated ||
 		loaded.Duration != original.Duration || len(loaded.Errors) != 2 {
 		t.Fatalf("round-trip mismatch: %+v", loaded)
 	}
@@ -189,7 +250,7 @@ func TestReindexSyncClientNoDaemon(t *testing.T) {
 	tmp := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := ReindexSync(ctx, tmp, "/some/project", false); err == nil {
+	if _, err := ReindexSync(ctx, tmp, "/some/project", app.IndexRequest{}); err == nil {
 		t.Fatal("ReindexSync with no daemon should error")
 	}
 }
@@ -215,13 +276,14 @@ func TestReindexSyncClientDecodesResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	var callCount atomic.Int32
+	requests := make(chan rpcRequestExternal, 2)
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go handleStubReindex(c, &callCount)
+			go handleStubReindex(c, &callCount, requests)
 		}
 	}()
 	t.Cleanup(func() { _ = ln.Close() })
@@ -230,7 +292,12 @@ func TestReindexSyncClientDecodesResult(t *testing.T) {
 	defer cancel()
 
 	// First call: canned success result.
-	res, err := ReindexSync(ctx, dir, "/proj", true)
+	res, err := ReindexSync(ctx, dir, "/proj", app.IndexRequest{
+		Paths:             []string{"pkg/only.go"},
+		FullReindex:       true,
+		AdditionalIgnores: []string{"generated/**"},
+		StructuralChunks:  "required",
+	})
 	if err != nil {
 		t.Fatalf("ReindexSync success: %v", err)
 	}
@@ -240,9 +307,17 @@ func TestReindexSyncClientDecodesResult(t *testing.T) {
 	if len(res.Errors) != 1 || res.Errors[0].Error() != "stub warning" {
 		t.Errorf("decoded errors = %v, want [stub warning]", res.Errors)
 	}
+	firstReq := <-requests
+	var params reindexSyncParams
+	if err := json.Unmarshal(firstReq.Params, &params); err != nil {
+		t.Fatalf("decode forwarded params: %v", err)
+	}
+	if !params.Full || params.StructuralChunks != "required" || len(params.Paths) != 1 || params.Paths[0] != "pkg/only.go" || len(params.AdditionalIgnores) != 1 {
+		t.Fatalf("forwarded params = %+v", params)
+	}
 
 	// Second call: the stub returns a JSON-RPC error envelope.
-	_, err = ReindexSync(ctx, dir, "/proj", false)
+	_, err = ReindexSync(ctx, dir, "/proj", app.IndexRequest{})
 	if err == nil || !strings.Contains(err.Error(), "stub failure") {
 		t.Fatalf("expected 'stub failure' error, got %v", err)
 	}
@@ -250,7 +325,7 @@ func TestReindexSyncClientDecodesResult(t *testing.T) {
 
 // handleStubReindex answers one request per connection: the first connection
 // gets a success result, the second gets a JSON-RPC error envelope.
-func handleStubReindex(c net.Conn, count *atomic.Int32) {
+func handleStubReindex(c net.Conn, count *atomic.Int32, requests chan<- rpcRequestExternal) {
 	defer c.Close()
 	dec := json.NewDecoder(c)
 	enc := json.NewEncoder(c)
@@ -258,6 +333,7 @@ func handleStubReindex(c net.Conn, count *atomic.Int32) {
 	if err := dec.Decode(&req); err != nil {
 		return
 	}
+	requests <- req
 	if count.Add(1) == 1 {
 		out := reindexSyncResult{FilesProcessed: 7, ChunksCreated: 19, Duration: 42 * time.Millisecond, Errors: []string{"stub warning"}}
 		resultJSON, _ := json.Marshal(out)
@@ -274,5 +350,6 @@ func handleStubReindex(c net.Conn, count *atomic.Int32) {
 
 // rpcRequestExternal mirrors the wire request shape for the stub server.
 type rpcRequestExternal struct {
-	Method string `json:"method"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
 }

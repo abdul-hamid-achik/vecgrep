@@ -737,7 +737,7 @@ func (m *Model) daemonReindexCmd(full bool) tea.Cmd {
 	root := m.session.ProjectRoot
 	return func() tea.Msg {
 		dir, _ := config.GetGlobalConfigDir()
-		result, err := daemon.ReindexSync(m.ctx, dir, root, full)
+		result, err := daemon.ReindexSync(m.ctx, dir, root, app.IndexRequest{FullReindex: full})
 		return daemonReindexDoneMsg{result: result, err: err, full: full}
 	}
 }

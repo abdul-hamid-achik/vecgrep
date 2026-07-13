@@ -435,6 +435,7 @@ func init() {
 	indexCmd.Flags().StringSlice("ignore", nil, "additional patterns to ignore")
 	indexCmd.Flags().Bool("no-progress", false, "disable the live progress bar (useful for scripts/CI)")
 	indexCmd.Flags().Bool("dry-run", false, "preview changes without calling the embedding provider")
+	indexCmd.Flags().String("structural-chunks", "", "codemap symbol chunks: auto, off, or required (overrides config)")
 
 	// Search command flags
 	searchCmd.Flags().IntP("limit", "n", 10, "maximum number of results")
@@ -707,6 +708,10 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	if gdir, err := config.GetGlobalConfigDir(); err == nil && daemon.IsRunning(gdir) {
 		return indexViaDaemon(cmd, args, gdir)
 	}
+	structuralMode, _ := cmd.Flags().GetString("structural-chunks")
+	if _, err := app.ParseStructuralChunksMode(structuralMode); err != nil {
+		return err
+	}
 	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
 		if errors.Is(err, veclite.ErrFileLocked) || strings.Contains(strings.ToLower(err.Error()), "locked") {
@@ -721,7 +726,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 
 	// --dry-run: preview changes without calling the embedding provider.
 	if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
-		preview, err := service.DryRunPreview(cmd.Context())
+		preview, err := service.DryRunPreviewWithStructuralMode(cmd.Context(), structuralMode)
 		if err != nil {
 			return fmt.Errorf("dry-run failed: %w", err)
 		}
@@ -762,6 +767,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		Paths:             args,
 		FullReindex:       fullReindex,
 		AdditionalIgnores: additionalIgnores,
+		StructuralChunks:  structuralMode,
 	}
 	if fullReindex {
 		fmt.Println("  Mode: full re-index")
@@ -814,6 +820,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nIndexing complete:\n")
 	fmt.Printf("  Files processed: %d\n", result.FilesProcessed)
 	fmt.Printf("  Files skipped (unchanged): %d\n", result.FilesSkipped)
+	fmt.Printf("  Files deleted: %d\n", result.FilesDeleted)
 	fmt.Printf("  Chunks created: %d\n", result.ChunksCreated)
 	fmt.Printf("  Duration: %s\n", result.Duration.Round(100*1000000))
 
@@ -832,15 +839,18 @@ func runIndex(cmd *cobra.Command, args []string) error {
 // indexViaDaemon handles `vecgrep index` when the daemon hub is running. The
 // real reindex is delegated to the daemon over its control socket (so the CLI
 // never opens a second write handle that would collide with the daemon's
-// exclusive lock); --dry-run uses a read-only session for the preview. Forwards
-// --full. --ignore (additional ignores) is NOT forwarded — the daemon's
-// configured ignores apply; stop + restart the daemon to change them.
+// exclusive lock); --dry-run uses a read-only session for the preview. It
+// forwards --full, selected paths, structural mode, and one-run ignores.
 func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) error {
 	projectRoot, err := config.GetProjectRoot()
 	if err != nil {
 		return fmt.Errorf("resolve project root: %w", err)
 	}
 	verbose, _ := rootCmd.PersistentFlags().GetBool("verbose")
+	structuralMode, _ := cmd.Flags().GetString("structural-chunks")
+	if _, err := app.ParseStructuralChunksMode(structuralMode); err != nil {
+		return err
+	}
 
 	if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
 		session, err := app.OpenReadOnlySession(cmd.Context(), "")
@@ -849,7 +859,7 @@ func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) err
 		}
 		defer session.Close()
 		service := app.NewService(session)
-		preview, err := service.DryRunPreview(cmd.Context())
+		preview, err := service.DryRunPreviewWithStructuralMode(cmd.Context(), structuralMode)
 		if err != nil {
 			return fmt.Errorf("dry-run failed: %w", err)
 		}
@@ -868,6 +878,7 @@ func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) err
 	}
 
 	fullReindex, _ := cmd.Flags().GetBool("full")
+	additionalIgnores, _ := cmd.Flags().GetStringSlice("ignore")
 	fmt.Printf("Indexing %s (via daemon)...\n", projectRoot)
 	if fullReindex {
 		fmt.Println("  Mode: full re-index")
@@ -875,7 +886,12 @@ func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) err
 		fmt.Println("  Mode: incremental")
 	}
 
-	result, err := daemon.ReindexSync(cmd.Context(), globalDataDir, projectRoot, fullReindex)
+	result, err := daemon.ReindexSync(cmd.Context(), globalDataDir, projectRoot, app.IndexRequest{
+		Paths:             args,
+		FullReindex:       fullReindex,
+		AdditionalIgnores: additionalIgnores,
+		StructuralChunks:  structuralMode,
+	})
 	if err != nil {
 		return fmt.Errorf("delegate to daemon: %w", err)
 	}
@@ -883,6 +899,7 @@ func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) err
 	fmt.Printf("\nIndexing complete (via daemon):\n")
 	fmt.Printf("  Files processed: %d\n", result.FilesProcessed)
 	fmt.Printf("  Files skipped (unchanged): %d\n", result.FilesSkipped)
+	fmt.Printf("  Files deleted: %d\n", result.FilesDeleted)
 	fmt.Printf("  Chunks created: %d\n", result.ChunksCreated)
 	fmt.Printf("  Duration: %s\n", result.Duration.Round(100*1000000))
 	if len(result.Errors) > 0 {
@@ -925,7 +942,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	// unavailable or the request fails. The json-envelope format needs
 	// index metadata from a session, so it always takes the session path.
 	if format != "json-envelope" {
-		if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, explain, format, scopeFiles, symbol); ok {
+		if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, minScore, explain, format, scopeFiles, symbol); ok {
 			return nil
 		}
 	}
@@ -1039,6 +1056,18 @@ func isMachineFormat(format string) bool {
 	return false
 }
 
+const searchEnvelopeSchemaVersion = 1
+
+type searchEnvelope struct {
+	SchemaVersion int `json:"schema_version"`
+	Index         struct {
+		Indexed bool `json:"indexed"`
+		Fresh   bool `json:"fresh"`
+		Chunks  int  `json:"chunks"`
+	} `json:"index"`
+	Hits []search.Result `json:"hits"`
+}
+
 // printSearchEnvelope emits the json-envelope contract: a single JSON object
 // carrying index state alongside the hits, so a consumer can distinguish
 // "never indexed" (indexed=false) from "indexed but nothing matched"
@@ -1048,15 +1077,9 @@ func printSearchEnvelope(ctx context.Context, service *app.Service, results []se
 	if err != nil {
 		return fmt.Errorf("index metadata: %w", err)
 	}
-	envelope := struct {
-		Index struct {
-			Indexed bool `json:"indexed"`
-			Fresh   bool `json:"fresh"`
-			Chunks  int  `json:"chunks"`
-		} `json:"index"`
-		Hits []search.Result `json:"hits"`
-	}{
-		Hits: results,
+	envelope := searchEnvelope{
+		SchemaVersion: searchEnvelopeSchemaVersion,
+		Hits:          results,
 	}
 	envelope.Index.Indexed = indexed
 	envelope.Index.Fresh = fresh
@@ -1085,6 +1108,7 @@ func tryDaemonSearch(
 	languages, chunkTypes []string,
 	chunkType, filePattern, directory string,
 	minLine, maxLine int,
+	minScore float32,
 	explain bool,
 	format string,
 	scopeFiles []string,
@@ -1125,17 +1149,19 @@ func tryDaemonSearch(
 	dec := json.NewDecoder(conn)
 
 	params := struct {
-		Project  string `json:"project"`
-		Query    string `json:"query"`
-		Limit    int    `json:"limit"`
-		Mode     string `json:"mode"`
-		Language string `json:"language,omitempty"`
+		Project  string  `json:"project"`
+		Query    string  `json:"query"`
+		Limit    int     `json:"limit"`
+		Mode     string  `json:"mode"`
+		Language string  `json:"language,omitempty"`
+		MinScore float32 `json:"min_score,omitempty"`
 	}{
 		Project:  projectRoot,
 		Query:    query,
 		Limit:    limit,
 		Mode:     modeStr,
 		Language: lang,
+		MinScore: minScore,
 	}
 	paramsJSON, _ := json.Marshal(params)
 
@@ -1247,26 +1273,29 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 // StatusOutput represents the JSON output for the status command
 type StatusOutput struct {
-	ProjectRoot    string                `json:"project_root"`
-	DataDir        string                `json:"data_dir"`
-	Database       string                `json:"database"`
-	VectorBackend  string                `json:"vector_backend"`
-	EmbeddingModel string                `json:"embedding_model"`
-	Provider       string                `json:"provider"`
-	Dimensions     int                   `json:"dimensions"`
-	ProfilePath    string                `json:"profile_path"`
-	ProfileStatus  string                `json:"profile_status"`
-	ProfileMatches bool                  `json:"profile_matches"`
-	CurrentProfile app.EmbeddingProfile  `json:"current_profile"`
-	StoredProfile  *app.EmbeddingProfile `json:"stored_profile,omitempty"`
-	VecLiteBytes   int64                 `json:"veclite_bytes"`
-	IndexedBytes   int64                 `json:"indexed_bytes"`
-	LatestIndexed  string                `json:"latest_indexed_at,omitempty"`
-	IndexFresh     bool                  `json:"index_fresh"`
-	Stats          map[string]int64      `json:"stats"`
-	Languages      map[string]int64      `json:"languages,omitempty"`
-	ChunkTypes     map[string]int64      `json:"chunk_types,omitempty"`
-	PendingChanges *PendingChanges       `json:"pending_changes,omitempty"`
+	ProjectRoot      string                    `json:"project_root"`
+	DataDir          string                    `json:"data_dir"`
+	Database         string                    `json:"database"`
+	VectorBackend    string                    `json:"vector_backend"`
+	EmbeddingModel   string                    `json:"embedding_model"`
+	Provider         string                    `json:"provider"`
+	Dimensions       int                       `json:"dimensions"`
+	ProfilePath      string                    `json:"profile_path"`
+	ProfileStatus    string                    `json:"profile_status"`
+	ProfileMatches   bool                      `json:"profile_matches"`
+	CurrentProfile   app.EmbeddingProfile      `json:"current_profile"`
+	StoredProfile    *app.EmbeddingProfile     `json:"stored_profile,omitempty"`
+	VecLiteBytes     int64                     `json:"veclite_bytes"`
+	IndexedBytes     int64                     `json:"indexed_bytes"`
+	LatestIndexed    string                    `json:"latest_indexed_at,omitempty"`
+	IndexFresh       bool                      `json:"index_fresh"`
+	Stats            map[string]int64          `json:"stats"`
+	Languages        map[string]int64          `json:"languages,omitempty"`
+	ChunkTypes       map[string]int64          `json:"chunk_types,omitempty"`
+	PendingChanges   *PendingChanges           `json:"pending_changes,omitempty"`
+	IngestionReceipt *app.IngestionReceipt     `json:"ingestion_receipt,omitempty"`
+	ReceiptError     string                    `json:"ingestion_receipt_error,omitempty"`
+	Freshness        *app.IndexFreshnessReport `json:"freshness,omitempty"`
 }
 
 // PendingChanges represents pending reindex changes
@@ -1275,6 +1304,46 @@ type PendingChanges struct {
 	ModifiedFiles int `json:"modified_files"`
 	DeletedFiles  int `json:"deleted_files"`
 	TotalPending  int `json:"total_pending"`
+}
+
+func statusOutputFromResponse(status *app.StatusResponse) StatusOutput {
+	output := StatusOutput{
+		ProjectRoot:      status.ProjectRoot,
+		DataDir:          status.DataDir,
+		Database:         status.VecLitePath,
+		VectorBackend:    status.VectorBackend,
+		EmbeddingModel:   status.Model,
+		Provider:         status.Provider,
+		Dimensions:       status.Dimensions,
+		ProfilePath:      status.ProfilePath,
+		ProfileStatus:    status.ProfileStatus,
+		ProfileMatches:   status.ProfileMatches,
+		CurrentProfile:   status.CurrentProfile,
+		StoredProfile:    status.StoredProfile,
+		VecLiteBytes:     status.VecLiteSizeBytes,
+		IndexedBytes:     status.IndexedBytes,
+		IndexFresh:       status.IndexFresh,
+		Stats:            status.Stats,
+		IngestionReceipt: status.IngestionReceipt,
+		ReceiptError:     status.ReceiptError,
+		Freshness:        status.Freshness,
+	}
+	if !status.LatestIndexedAt.IsZero() {
+		output.LatestIndexed = status.LatestIndexedAt.Format(time.RFC3339)
+	}
+	if status.DetailedStats != nil {
+		output.Languages = status.DetailedStats.Languages
+		output.ChunkTypes = status.DetailedStats.ChunkTypes
+	}
+	if status.PendingChanges != nil {
+		output.PendingChanges = &PendingChanges{
+			NewFiles:      status.PendingChanges.NewFiles,
+			ModifiedFiles: status.PendingChanges.ModifiedFiles,
+			DeletedFiles:  status.PendingChanges.DeletedFiles,
+			TotalPending:  status.PendingChanges.TotalPending,
+		}
+	}
+	return output
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -1294,40 +1363,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	// JSON output
 	if format == "json" {
-		output := StatusOutput{
-			ProjectRoot:    status.ProjectRoot,
-			DataDir:        status.DataDir,
-			Database:       status.VecLitePath,
-			VectorBackend:  status.VectorBackend,
-			EmbeddingModel: status.Model,
-			Provider:       status.Provider,
-			Dimensions:     status.Dimensions,
-			ProfilePath:    status.ProfilePath,
-			ProfileStatus:  status.ProfileStatus,
-			ProfileMatches: status.ProfileMatches,
-			CurrentProfile: status.CurrentProfile,
-			StoredProfile:  status.StoredProfile,
-			VecLiteBytes:   status.VecLiteSizeBytes,
-			IndexedBytes:   status.IndexedBytes,
-			IndexFresh:     status.IndexFresh,
-			Stats:          status.Stats,
-		}
-		if !status.LatestIndexedAt.IsZero() {
-			output.LatestIndexed = status.LatestIndexedAt.Format(time.RFC3339)
-		}
-		if status.DetailedStats != nil {
-			output.Languages = status.DetailedStats.Languages
-			output.ChunkTypes = status.DetailedStats.ChunkTypes
-		}
-
-		if status.PendingChanges != nil {
-			output.PendingChanges = &PendingChanges{
-				NewFiles:      status.PendingChanges.NewFiles,
-				ModifiedFiles: status.PendingChanges.ModifiedFiles,
-				DeletedFiles:  status.PendingChanges.DeletedFiles,
-				TotalPending:  status.PendingChanges.TotalPending,
-			}
-		}
+		output := statusOutputFromResponse(status)
 
 		jsonBytes, err := json.MarshalIndent(output, "", "  ")
 		if err != nil {
@@ -1367,19 +1403,31 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Types:      %s\n", chunkTypes)
 		}
 	}
+	if status.IngestionReceipt != nil {
+		receipt := status.IngestionReceipt
+		fmt.Printf("  Structural ingestion: %s (requested %s, success=%t, complete=%t)\n", receipt.EffectiveMode, receipt.RequestedMode, receipt.Success, receipt.Complete)
+	} else if status.ReceiptError != "" {
+		fmt.Printf("  Structural ingestion: unknown (%s)\n", status.ReceiptError)
+	}
 
-	if status.PendingChanges != nil {
+	if status.Freshness != nil || status.PendingChanges != nil {
 		fmt.Printf("\nReindex status:\n")
-		if status.IndexFresh {
-			fmt.Printf("  Fresh:        yes\n")
+		if status.Freshness != nil {
+			fmt.Printf("  Freshness:    %s (%s)\n", status.Freshness.State, status.Freshness.Reason)
+		} else if status.IndexFresh {
+			fmt.Printf("  Freshness:    fresh\n")
 		} else {
-			fmt.Printf("  Fresh:        no\n")
+			fmt.Printf("  Freshness:    unknown\n")
 		}
-		fmt.Printf("  New files:      %d\n", status.PendingChanges.NewFiles)
-		fmt.Printf("  Modified files: %d\n", status.PendingChanges.ModifiedFiles)
-		fmt.Printf("  Deleted files:  %d\n", status.PendingChanges.DeletedFiles)
-		if status.PendingChanges.TotalPending > 0 {
+		if status.PendingChanges != nil {
+			fmt.Printf("  New files:      %d\n", status.PendingChanges.NewFiles)
+			fmt.Printf("  Modified files: %d\n", status.PendingChanges.ModifiedFiles)
+			fmt.Printf("  Deleted files:  %d\n", status.PendingChanges.DeletedFiles)
+		}
+		if status.PendingChanges != nil && status.PendingChanges.TotalPending > 0 {
 			fmt.Printf("\nRun 'vecgrep index' to update the index.\n")
+		} else if status.Freshness != nil && status.Freshness.State == app.IndexFreshnessUnknown {
+			fmt.Printf("\nFreshness could not be proven; run 'vecgrep index --full' to rebuild trusted metadata.\n")
 		}
 	}
 

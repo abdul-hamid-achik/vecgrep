@@ -3,6 +3,7 @@ package index
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,11 +28,6 @@ type WatcherConfig struct {
 
 	// Recursive enables recursive directory watching.
 	Recursive bool
-
-	// Locker, if non-nil, is held around each auto-reindex callback so watcher
-	// reindexes don't race an explicit reindex on the same indexer (e.g. a
-	// daemon's synchronous reindex RPC). Optional.
-	Locker sync.Locker
 }
 
 // DefaultWatcherConfig returns sensible defaults for the watcher.
@@ -109,8 +105,14 @@ type Watcher struct {
 	pendingMu sync.Mutex
 	pending   map[string]WatchEvent
 
-	stopCh chan struct{}
-	doneCh chan struct{}
+	lifecycleMu sync.Mutex
+	started     bool
+	stopped     bool
+	stopOnce    sync.Once
+	closeOnce   sync.Once
+	closeErr    error
+	stopCh      chan struct{}
+	doneCh      chan struct{}
 }
 
 // NewWatcher creates a new file watcher for the given root path.
@@ -139,18 +141,30 @@ func (w *Watcher) SetCallback(cb WatchCallback) {
 
 // Start begins watching for file system changes.
 func (w *Watcher) Start(ctx context.Context) error {
+	w.lifecycleMu.Lock()
+	defer w.lifecycleMu.Unlock()
+	if w.started {
+		return errors.New("watcher already started")
+	}
+	if w.stopped {
+		return errors.New("watcher already stopped")
+	}
+
 	// Add root path and optionally recurse
 	if err := w.addPath(w.rootPath); err != nil {
-		return err
+		w.stopped = true
+		return errors.Join(err, w.closeFSWatcher())
 	}
 
 	if w.config.Recursive {
 		if err := w.addRecursive(w.rootPath); err != nil {
-			return err
+			w.stopped = true
+			return errors.Join(err, w.closeFSWatcher())
 		}
 	}
 
 	// Start event processing goroutine
+	w.started = true
 	go w.processEvents(ctx)
 
 	return nil
@@ -158,9 +172,23 @@ func (w *Watcher) Start(ctx context.Context) error {
 
 // Stop stops the watcher and releases resources.
 func (w *Watcher) Stop() error {
-	close(w.stopCh)
-	<-w.doneCh
-	return w.watcher.Close()
+	w.lifecycleMu.Lock()
+	w.stopped = true
+	started := w.started
+	w.stopOnce.Do(func() { close(w.stopCh) })
+	w.lifecycleMu.Unlock()
+
+	if started {
+		<-w.doneCh
+	}
+	return w.closeFSWatcher()
+}
+
+func (w *Watcher) closeFSWatcher() error {
+	w.closeOnce.Do(func() {
+		w.closeErr = w.watcher.Close()
+	})
+	return w.closeErr
 }
 
 // addPath adds a single path to the watcher.
@@ -336,72 +364,4 @@ func (w *Watcher) flushPending() {
 	if w.callback != nil {
 		w.callback(events)
 	}
-}
-
-// WatchAndIndex creates a watcher that automatically triggers reindexing.
-func WatchAndIndex(ctx context.Context, indexer *Indexer, rootPath string, cfg WatcherConfig) (*Watcher, error) {
-	watcher, err := NewWatcher(rootPath, cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	watcher.SetCallback(func(events []WatchEvent) {
-		// Collect unique file paths that need reindexing
-		toIndex := make(map[string]struct{})
-		toRemove := make(map[string]struct{})
-
-		for _, e := range events {
-			switch e.Op {
-			case OpCreate, OpWrite:
-				toIndex[e.Path] = struct{}{}
-				delete(toRemove, e.Path)
-			case OpRemove:
-				toRemove[e.Path] = struct{}{}
-				delete(toIndex, e.Path)
-			case OpRename:
-				// Treat rename as remove + create
-				toRemove[e.Path] = struct{}{}
-			}
-		}
-
-		// Serialize against explicit reindexes on the same indexer (e.g. a
-		// daemon's synchronous reindex RPC) when a Locker is configured.
-		if cfg.Locker != nil {
-			cfg.Locker.Lock()
-		}
-		// Index changed files
-		if len(toIndex) > 0 {
-			paths := make([]string, 0, len(toIndex))
-			for p := range toIndex {
-				paths = append(paths, p)
-			}
-
-			_, err := indexer.Index(ctx, rootPath, paths...)
-			if err != nil {
-				log.Printf("auto-reindex failed: %v", err)
-			}
-		}
-
-		// Handle removed files — delete them from the index
-		if len(toRemove) > 0 {
-			for p := range toRemove {
-				relPath, err := filepath.Rel(rootPath, p)
-				if err != nil {
-					relPath = p
-				}
-				if _, err := indexer.db.DeleteFile(ctx, relPath); err != nil {
-					log.Printf("auto-reindex: delete removed file %s: %v", relPath, err)
-				}
-			}
-		}
-		if cfg.Locker != nil {
-			cfg.Locker.Unlock()
-		}
-	})
-
-	if err := watcher.Start(ctx); err != nil {
-		return nil, err
-	}
-
-	return watcher, nil
 }

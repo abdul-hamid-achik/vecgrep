@@ -3,12 +3,14 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
 	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
+	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 )
 
 // hubDataDir returns the global data dir (~/.vecgrep) where the daemon hub's
@@ -79,6 +81,13 @@ type jsonRPCError struct {
 
 // call sends a single JSON-RPC request and returns the result.
 func (c *daemonClient) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return c.callWithTimeout(ctx, method, params, 30*time.Second)
+}
+
+// callWithTimeout sends a single JSON-RPC request. The fallback timeout is
+// used only when the caller's context has no deadline; synchronous indexing
+// needs a much larger bound than ordinary daemon queries.
+func (c *daemonClient) callWithTimeout(ctx context.Context, method string, params any, fallbackTimeout time.Duration) (json.RawMessage, error) {
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
 	if err != nil {
@@ -90,7 +99,7 @@ func (c *daemonClient) call(ctx context.Context, method string, params any) (jso
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(fallbackTimeout))
 	}
 
 	enc := json.NewEncoder(conn)
@@ -137,6 +146,7 @@ type daemonSearchParams struct {
 	Directory   string   `json:"directory,omitempty"`
 	MinLine     int      `json:"min_line,omitempty"`
 	MaxLine     int      `json:"max_line,omitempty"`
+	MinScore    float32  `json:"min_score,omitempty"`
 	Explain     bool     `json:"explain,omitempty"`
 	FilePaths   []string `json:"file_paths,omitempty"`
 	Symbol      string   `json:"symbol,omitempty"`
@@ -154,6 +164,50 @@ func (c *daemonClient) search(ctx context.Context, params daemonSearchParams) (j
 func (c *daemonClient) reindex(ctx context.Context) error {
 	_, err := c.call(ctx, "daemon.reindex", map[string]any{"project": c.projectRoot})
 	return err
+}
+
+type daemonReindexSyncResult struct {
+	FilesProcessed int           `json:"files_processed"`
+	FilesSkipped   int           `json:"files_skipped"`
+	FilesDeleted   int           `json:"files_deleted"`
+	ChunksCreated  int           `json:"chunks_created"`
+	Duration       time.Duration `json:"duration"`
+	Errors         []string      `json:"errors"`
+}
+
+// reindexSync waits for daemon.reindex_sync and decodes the complete index
+// result. Unlike reindex, this makes structural-required validation failures
+// observable to the MCP caller before it reports success.
+func (c *daemonClient) reindexSync(ctx context.Context, full bool, structuralMode string, paths []string) (*index.IndexResult, error) {
+	params := map[string]any{
+		"project": c.projectRoot,
+		"full":    full,
+	}
+	if structuralMode != "" {
+		params["structural_chunks"] = structuralMode
+	}
+	if len(paths) > 0 {
+		params["paths"] = paths
+	}
+	raw, err := c.callWithTimeout(ctx, "daemon.reindex_sync", params, 30*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	var wire daemonReindexSyncResult
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, fmt.Errorf("decode index result: %w", err)
+	}
+	result := &index.IndexResult{
+		FilesProcessed: wire.FilesProcessed,
+		FilesSkipped:   wire.FilesSkipped,
+		FilesDeleted:   wire.FilesDeleted,
+		ChunksCreated:  wire.ChunksCreated,
+		Duration:       wire.Duration,
+	}
+	for _, message := range wire.Errors {
+		result.Errors = append(result.Errors, errors.New(message))
+	}
+	return result, nil
 }
 
 // stats sends a daemon.stats request and returns index statistics.

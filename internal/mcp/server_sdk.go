@@ -4,10 +4,12 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +49,7 @@ type SearchInput struct {
 	Symbol       string   `json:"symbol,omitempty" jsonschema:"When set, uses codemap impact to compute the blast radius of this symbol and scopes the search to affected files. Falls back to unscoped search if codemap is unavailable."`
 	MinLine      int      `json:"min_line,omitempty" jsonschema:"Filter by minimum start line."`
 	MaxLine      int      `json:"max_line,omitempty" jsonschema:"Filter by maximum start line."`
+	MinScore     float32  `json:"min_score,omitempty" jsonschema:"Drop matches below this score (0-1)."`
 	Mode         string   `json:"mode,omitempty" jsonschema:"Search mode: 'semantic' (vector only), 'keyword' (text only), or 'hybrid' (combined, default)."`
 	Explain      bool     `json:"explain,omitempty" jsonschema:"Return search diagnostics including timing and index info."`
 	ContextLines int      `json:"context_lines,omitempty" jsonschema:"Number of lines to include before and after each result (default: 0)."`
@@ -134,8 +137,8 @@ type SDKServer struct {
 	// stateMu guards the activation state below. MCP tool handlers run
 	// concurrently (the SDK dispatches every tools/call on its own goroutine),
 	// and activateProject swaps the session/daemon/project on the fly, so these
-	// fields must not be read and written without synchronization. Use the
-	// sess()/daemonClient()/projRoot()/isInitialized() accessors to read them.
+	// fields must not be read and written without synchronization. Multi-field
+	// handlers must use the project snapshot helpers below.
 	stateMu     sync.RWMutex
 	session     *mcpSession   // lazy dual-handle DB session (replaces s.db, s.provider, s.searcher)
 	daemon      *daemonClient // daemon socket client (nil if no daemon)
@@ -150,6 +153,126 @@ type SDKServer struct {
 	memoryStore   *memory.MemoryStore
 	memoryInitMu  sync.Mutex
 	memoryInitErr error
+
+	statusSnapshotHook func(projectReadSnapshot)          // tests only
+	readSnapshotHook   func(string, projectReadSnapshot)  // tests only
+	stateSnapshotHook  func(string, projectStateSnapshot) // tests only
+}
+
+// projectStateSnapshot is one coherent view of the active project. Tool calls
+// that combine the root, session/DB, daemon, and codemap configuration must
+// capture this once instead of using independent accessors while another MCP
+// request may activate a different project.
+type projectStateSnapshot struct {
+	session     *mcpSession
+	daemon      *daemonClient
+	projectRoot string
+	projectName string
+	initialized bool
+	cfg         *config.Config
+	provider    embed.Provider
+	codemap     *CodemapClient
+	codemapCfg  config.CodemapConfig
+}
+
+type projectReadSnapshot struct {
+	projectStateSnapshot
+	database *db.DB
+	searcher *search.Searcher
+	release  func()
+}
+
+type projectOperationSnapshot struct {
+	projectStateSnapshot
+	release func()
+}
+
+func (s *SDKServer) snapshotProjectState() projectStateSnapshot {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	return projectStateSnapshot{
+		session:     s.session,
+		daemon:      s.daemon,
+		projectRoot: s.projectRoot,
+		projectName: projectName(s.session),
+		initialized: s.initialized,
+		cfg:         projectConfig(s.session),
+		provider:    projectProvider(s.session),
+		codemap:     s.codemap,
+		codemapCfg:  s.codemapCfg,
+	}
+}
+
+func projectConfig(session *mcpSession) *config.Config {
+	if session == nil {
+		return nil
+	}
+	return session.cfg
+}
+
+func projectProvider(session *mcpSession) embed.Provider {
+	if session == nil {
+		return nil
+	}
+	return session.provider
+}
+
+func projectName(session *mcpSession) string {
+	if session == nil {
+		return ""
+	}
+	return session.projectName
+}
+
+// acquireProjectOperationSnapshot pins one activation without opening its
+// database. This is the daemon-first path: it keeps the session/provider alive
+// across scope resolution and the socket request, then can safely upgrade the
+// same activation to a read lease if the daemon call fails.
+func (s *SDKServer) acquireProjectOperationSnapshot() (projectOperationSnapshot, error) {
+	s.stateMu.RLock()
+	state := projectStateSnapshot{
+		session:     s.session,
+		daemon:      s.daemon,
+		projectRoot: s.projectRoot,
+		projectName: projectName(s.session),
+		initialized: s.initialized,
+		cfg:         projectConfig(s.session),
+		provider:    projectProvider(s.session),
+		codemap:     s.codemap,
+		codemapCfg:  s.codemapCfg,
+	}
+	if !state.initialized || state.session == nil || state.projectRoot == "" || state.cfg == nil {
+		s.stateMu.RUnlock()
+		return projectOperationSnapshot{}, fmt.Errorf("no active session")
+	}
+	if err := state.session.beginOperation(); err != nil {
+		s.stateMu.RUnlock()
+		return projectOperationSnapshot{}, err
+	}
+	s.stateMu.RUnlock()
+	var once sync.Once
+	return projectOperationSnapshot{
+		projectStateSnapshot: state,
+		release: func() {
+			once.Do(state.session.endOperation)
+		},
+	}, nil
+}
+
+func (state projectOperationSnapshot) acquireRead(ctx context.Context) (projectReadSnapshot, error) {
+	database, release, err := state.session.acquireROContextForOperation(ctx)
+	if err != nil {
+		return projectReadSnapshot{}, err
+	}
+	if rErr := state.session.reloadIfStale(); rErr != nil {
+		log.Printf("vecgrep: read-only index reload failed: %v (search may reflect stale persisted data)", rErr)
+	}
+	return projectReadSnapshot{
+		projectStateSnapshot: state.projectStateSnapshot,
+		database:             database,
+		searcher:             search.NewSearcher(database, state.provider),
+		release:              release,
+	}, nil
 }
 
 // sess returns the active DB session under the state read lock (nil if none).
@@ -157,20 +280,6 @@ func (s *SDKServer) sess() *mcpSession {
 	s.stateMu.RLock()
 	defer s.stateMu.RUnlock()
 	return s.session
-}
-
-// daemonClient returns the active daemon socket client under the read lock.
-func (s *SDKServer) daemonClient() *daemonClient {
-	s.stateMu.RLock()
-	defer s.stateMu.RUnlock()
-	return s.daemon
-}
-
-// projRoot returns the active project root under the read lock.
-func (s *SDKServer) projRoot() string {
-	s.stateMu.RLock()
-	defer s.stateMu.RUnlock()
-	return s.projectRoot
 }
 
 // isInitialized reports whether a project is active, under the read lock.
@@ -182,7 +291,9 @@ func (s *SDKServer) isInitialized() bool {
 
 // SDKServerConfig contains configuration for the SDK-based MCP server.
 type SDKServerConfig struct {
-	DB          *db.DB
+	DB *db.DB
+	// Provider ownership transfers to the server and is released with the
+	// active MCP session. Leave nil to construct one from project config.
 	Provider    embed.Provider
 	ProjectRoot string
 	Codemap     config.CodemapConfig
@@ -213,6 +324,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 			}
 			if provider != nil {
 				s.session = newMCPSession(resolved.Config, cfg.ProjectRoot, provider)
+				s.session.projectName = resolved.ProjectName
 				s.daemon = newDaemonClient(hubDataDir(), cfg.ProjectRoot)
 				s.initialized = true
 			}
@@ -264,7 +376,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_status",
-		Description: "Get statistics about the search index, including number of files, chunks, and language distribution.",
+		Description: "Get index statistics and conservative freshness evidence. Freshness is proven from raw source hashes, the last successful ingestion receipt, and codemap's bounded structural manifest when applicable; legacy or mismatched evidence reports unknown.",
 	}, s.handleStatus)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -343,8 +455,14 @@ const idleEvictInterval = 10 * time.Second
 // Run starts the MCP server.
 func (s *SDKServer) Run(ctx context.Context) error {
 	stopEvictor := s.startIdleEvictor(ctx)
-	defer stopEvictor()
-	return s.server.Run(ctx, &sdkmcp.StdioTransport{})
+	runErr := s.server.Run(ctx, &sdkmcp.StdioTransport{})
+	stopEvictor()
+	state := s.snapshotProjectState()
+	var closeErr error
+	if state.session != nil {
+		closeErr = state.session.close()
+	}
+	return errors.Join(runErr, closeErr)
 }
 
 // startIdleEvictor launches a goroutine that periodically releases the cached
@@ -375,61 +493,54 @@ func (s *SDKServer) startIdleEvictor(ctx context.Context) func() {
 	return func() { once.Do(func() { close(stop) }) }
 }
 
-// provider returns the embedding provider from the active session, or nil
-// if no session is active.
-func (s *SDKServer) provider() embed.Provider {
-	sess := s.sess()
-	if sess == nil {
-		return nil
+// acquireProjectReadSnapshot captures the active root/config/session/codemap
+// state and leases the matching read-only database while stateMu still pins
+// that activation. The returned searcher and database therefore cannot belong
+// to a different project, and a concurrent activation cannot close the old
+// session until release runs.
+func (s *SDKServer) acquireProjectReadSnapshot(ctx context.Context) (projectReadSnapshot, error) {
+	s.stateMu.RLock()
+	state := projectStateSnapshot{
+		session:     s.session,
+		daemon:      s.daemon,
+		projectRoot: s.projectRoot,
+		projectName: projectName(s.session),
+		initialized: s.initialized,
+		cfg:         projectConfig(s.session),
+		provider:    projectProvider(s.session),
+		codemap:     s.codemap,
+		codemapCfg:  s.codemapCfg,
 	}
-	return sess.provider
-}
-
-// roSearcher returns a *search.Searcher built from a leased read-only database
-// handle and the embedding provider, plus a release function the caller MUST
-// invoke (typically with defer) once it is done with the searcher. The lease
-// keeps the handle alive against a concurrent writer/evictor. The searcher is
-// created per-call (cheap struct) so it always reflects the latest DB state.
-func (s *SDKServer) roSearcher() (*search.Searcher, func(), error) {
-	sess := s.sess()
-	if sess == nil {
-		return nil, nil, fmt.Errorf("no active session")
+	if !state.initialized || state.session == nil || state.projectRoot == "" || state.cfg == nil {
+		s.stateMu.RUnlock()
+		return projectReadSnapshot{}, fmt.Errorf("no active session")
 	}
-	database, release, err := sess.acquireRO()
+	database, release, err := state.session.acquireROContext(ctx)
+	s.stateMu.RUnlock()
 	if err != nil {
-		return nil, nil, err
+		return projectReadSnapshot{}, err
 	}
-	if rErr := sess.reloadIfStale(); rErr != nil {
-		log.Printf("vecgrep: read-only index reload failed: %v (search may return stale results until the next successful reload)", rErr)
+	if rErr := state.session.reloadIfStale(); rErr != nil {
+		log.Printf("vecgrep: read-only index reload failed: %v (status may reflect stale persisted data)", rErr)
 	}
-	return search.NewSearcher(database, sess.provider), release, nil
+	return projectReadSnapshot{
+		projectStateSnapshot: state,
+		database:             database,
+		searcher:             search.NewSearcher(database, state.provider),
+		release:              release,
+	}, nil
 }
 
-// roDB returns a leased read-only database handle plus a release function the
-// caller MUST invoke once done with it.
-func (s *SDKServer) roDB() (*db.DB, func(), error) {
-	sess := s.sess()
-	if sess == nil {
-		return nil, nil, fmt.Errorf("no active session")
+func (s *SDKServer) observeReadSnapshot(handler string, state projectReadSnapshot) {
+	if s.readSnapshotHook != nil {
+		s.readSnapshotHook(handler, state)
 	}
-	database, release, err := sess.acquireRO()
-	if err != nil {
-		return nil, nil, err
-	}
-	if rErr := sess.reloadIfStale(); rErr != nil {
-		log.Printf("vecgrep: read-only index reload failed: %v (search may return stale results until the next successful reload)", rErr)
-	}
-	return database, release, nil
 }
 
-// rwDB returns a read-write database handle for write operations. The caller
-// must call database.Close() after use to release the exclusive lock.
-func (s *SDKServer) rwDB() (*db.DB, error) {
-	sess := s.sess()
-	if sess == nil {
-		return nil, fmt.Errorf("no active session")
+func (s *SDKServer) observeStateSnapshot(handler string, state projectStateSnapshot) {
+	if s.stateSnapshotHook != nil {
+		s.stateSnapshotHook(handler, state)
 	}
-	return sess.readWriteDB()
 }
 
 // ensureInitialized attempts to auto-detect and activate a project if not already initialized.
@@ -662,6 +773,7 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	// read leases to drain and we must not hold stateMu (which those handlers
 	// need) while it blocks.
 	newSession := newMCPSession(cfg, projectPath, provider)
+	newSession.projectName = resolved.ProjectName
 	s.stateMu.Lock()
 	oldSession := s.session
 	s.session = newSession
@@ -704,15 +816,12 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 				sb.WriteString("\nNext step: Run vecgrep_index to index your codebase.")
 			}
 
-			// Check for pending changes
-			indexerCfg := index.DefaultIndexerConfig()
-			indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, indexerCfg.IgnorePatterns...)
-			indexer := index.NewIndexer(database, nil, indexerCfg)
-			pending, pendingErr := indexer.GetPendingChanges(ctx, projectPath)
-			if pendingErr == nil && pending.TotalPending > 0 {
-				fmt.Fprintf(&sb, "\n**Reindex needed:** %d files changed (%d new, %d modified, %d deleted)\n",
-					pending.TotalPending, pending.NewFiles, pending.ModifiedFiles, pending.DeletedFiles)
-				sb.WriteString("Run vecgrep_index to update the index.\n")
+			// Use the same bounded freshness proof as vecgrep_status. Activation
+			// must not download codemap's structural export just to report drift.
+			freshnessService := app.NewService(&app.Session{ProjectRoot: projectPath, Config: cfg, DB: database})
+			freshness, pending, freshnessErr := freshnessService.IndexFreshness(ctx)
+			if freshnessErr == nil {
+				writeFreshnessStatus(&sb, freshness, pending)
 			}
 			release()
 		} else {
@@ -731,9 +840,7 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	}, nil, nil
 }
 
-// checkProvider verifies the embedding provider is available.
-func (s *SDKServer) checkProvider(ctx context.Context) *sdkmcp.CallToolResult {
-	p := s.provider()
+func checkEmbeddingProvider(ctx context.Context, p embed.Provider) *sdkmcp.CallToolResult {
 	if p == nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Embedding provider not configured. Run vecgrep_init first."}},
@@ -804,7 +911,13 @@ func formatDaemonSearchResult(raw json.RawMessage, scopeNote string) string {
 // formatStatsResult formats the JSON stats result from a daemon.stats socket
 // call into the same text format as the direct status path.
 func formatStatsResult(raw json.RawMessage, projectRoot string) string {
-	var stats map[string]int64
+	var stats struct {
+		TotalFiles     int64                     `json:"total_files"`
+		TotalChunks    int64                     `json:"total_chunks"`
+		Languages      map[string]int64          `json:"languages"`
+		Freshness      *app.IndexFreshnessReport `json:"freshness"`
+		PendingChanges *index.PendingChanges     `json:"pending_changes"`
+	}
 	if err := json.Unmarshal(raw, &stats); err != nil {
 		return fmt.Sprintf("stats parse error: %v", err)
 	}
@@ -812,13 +925,40 @@ func formatStatsResult(raw json.RawMessage, projectRoot string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Index status for: %s\n\n", projectRoot)
 
-	if totalFiles, ok := stats["total_files"]; ok {
-		fmt.Fprintf(&sb, "Total files: %d\n", totalFiles)
+	fmt.Fprintf(&sb, "Total files: %d\n", stats.TotalFiles)
+	fmt.Fprintf(&sb, "Total chunks: %d\n", stats.TotalChunks)
+	if len(stats.Languages) > 0 {
+		languages := make([]string, 0, len(stats.Languages))
+		for language := range stats.Languages {
+			languages = append(languages, language)
+		}
+		sort.Strings(languages)
+		sb.WriteString("\nBy language:\n")
+		for _, language := range languages {
+			fmt.Fprintf(&sb, "  %s: %d\n", language, stats.Languages[language])
+		}
 	}
-	if totalChunks, ok := stats["total_chunks"]; ok {
-		fmt.Fprintf(&sb, "Total chunks: %d\n", totalChunks)
-	}
+	writeFreshnessStatus(&sb, stats.Freshness, stats.PendingChanges)
 	return sb.String()
+}
+
+func writeFreshnessStatus(sb *strings.Builder, freshness *app.IndexFreshnessReport, pending *index.PendingChanges) {
+	if sb == nil || freshness == nil {
+		return
+	}
+	sb.WriteString("\nReindex status:\n")
+	fmt.Fprintf(sb, "  Freshness: %s (%s)\n", freshness.State, freshness.Reason)
+	if pending != nil {
+		fmt.Fprintf(sb, "  New files: %d\n", pending.NewFiles)
+		fmt.Fprintf(sb, "  Modified files: %d\n", pending.ModifiedFiles)
+		fmt.Fprintf(sb, "  Deleted files: %d\n", pending.DeletedFiles)
+	}
+	switch freshness.State {
+	case app.IndexFreshnessStale:
+		sb.WriteString("\n**Action needed:** Run vecgrep_index to update the index.\n")
+	case app.IndexFreshnessUnknown:
+		sb.WriteString("\n**Freshness unknown:** Call vecgrep_index with force:true to rebuild trusted source/receipt metadata.\n")
+	}
 }
 
 // handleSearch handles the vecgrep_search tool.
@@ -830,20 +970,27 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		}, nil, nil
 	}
 
-	// Check embedding provider
-	if errResult := s.checkProvider(ctx); errResult != nil {
-		return errResult, nil, nil
-	}
-
 	if input.Query == "" {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "query parameter is required"}},
 			IsError: true,
 		}, nil, nil
 	}
+	state, err := s.acquireProjectOperationSnapshot()
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to capture project session: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+	defer state.release()
+	s.observeStateSnapshot("search", state.projectStateSnapshot)
+	if errResult := checkEmbeddingProvider(ctx, state.provider); errResult != nil {
+		return errResult, nil, nil
+	}
 
 	opts := search.DefaultSearchOptions()
-	opts.ProjectRoot = s.projRoot()
+	opts.ProjectRoot = state.projectRoot
 
 	// Apply input options
 	if input.Limit > 0 {
@@ -873,10 +1020,13 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	if input.MaxLine > 0 {
 		opts.MaxLine = input.MaxLine
 	}
+	if input.MinScore > 0 {
+		opts.MinScore = input.MinScore
+	}
 
 	// Apply file scoping. Direct file_paths take precedence; otherwise,
 	// when symbol is set, resolve the blast radius via codemap impact.
-	scopeFiles, scopeNote := s.resolveSearchScope(ctx, input)
+	scopeFiles, scopeNote := state.resolveSearchScope(ctx, input)
 	if len(scopeFiles) > 0 {
 		opts.FilePaths = scopeFiles
 	}
@@ -902,7 +1052,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	}
 
 	// Try daemon socket first (warm session, no lock needed)
-	if dc := s.daemonClient(); dc != nil && dc.available() {
+	if dc := state.daemon; dc != nil && dc.available() {
 		params := daemonSearchParams{
 			Query:       input.Query,
 			Limit:       opts.Limit,
@@ -915,6 +1065,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 			Directory:   input.Directory,
 			MinLine:     input.MinLine,
 			MaxLine:     input.MaxLine,
+			MinScore:    input.MinScore,
 			Explain:     input.Explain,
 			FilePaths:   opts.FilePaths,
 		}
@@ -926,20 +1077,19 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		}
 		// fall through to RO session on daemon error
 	}
-
-	// Get a read-only searcher (opens RO handle if needed, reloads if stale)
-	searcher, release, err := s.roSearcher()
+	readState, err := state.acquireRead(ctx)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
 			IsError: true,
 		}, nil, nil
 	}
-	defer release()
+	defer readState.release()
+	s.observeReadSnapshot("search", readState)
 
 	// Perform search with or without explanation
 	if input.Explain {
-		results, explanation, err := searcher.SearchWithExplain(ctx, input.Query, opts)
+		results, explanation, err := readState.searcher.SearchWithExplain(ctx, input.Query, opts)
 		if err != nil {
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
@@ -957,15 +1107,15 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		// Expand context lines if requested
 		if input.ContextLines > 0 {
 			for i := range results {
-				results[i].Content = expandContextLines(s.projRoot(), results[i], input.ContextLines)
+				results[i].Content = expandContextLines(state.projectRoot, results[i], input.ContextLines)
 			}
 		}
 
-		s.rerankWithCodemap(ctx, results, s.codemapStructuralWeight())
+		state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
 		formatSearchResults(&sb, results)
-		s.annotateSearchHits(ctx, results, input.Query)
+		state.annotateSearchHits(ctx, results, input.Query)
 	} else {
-		results, err := searcher.Search(ctx, input.Query, opts)
+		results, err := readState.searcher.Search(ctx, input.Query, opts)
 		if err != nil {
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
@@ -976,13 +1126,13 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		// Expand context lines if requested
 		if input.ContextLines > 0 {
 			for i := range results {
-				results[i].Content = expandContextLines(s.projRoot(), results[i], input.ContextLines)
+				results[i].Content = expandContextLines(state.projectRoot, results[i], input.ContextLines)
 			}
 		}
 
-		s.rerankWithCodemap(ctx, results, s.codemapStructuralWeight())
+		state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
 		formatSearchResults(&sb, results)
-		s.annotateSearchHits(ctx, results, input.Query)
+		state.annotateSearchHits(ctx, results, input.Query)
 	}
 
 	return &sdkmcp.CallToolResult{
@@ -1047,47 +1197,57 @@ func (s *SDKServer) handleIndex(ctx context.Context, req *sdkmcp.CallToolRequest
 		}, nil, nil
 	}
 
-	// If the daemon is running, delegate reindexing to it (async).
-	if dc := s.daemonClient(); dc != nil && dc.available() {
-		if err := dc.reindex(ctx); err == nil {
+	state := s.snapshotProjectState()
+	if !state.initialized || state.session == nil || state.projectRoot == "" {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "No active project session. Run vecgrep_init first."}},
+			IsError: true,
+		}, nil, nil
+	}
+	structuralMode, err := app.ParseStructuralChunksMode(state.codemapCfg.StructuralChunks)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to configure structural chunks: %s", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	var result *index.IndexResult
+	// Required structural ingestion must wait for the daemon's validation and
+	// index result. Force and path-scoped requests also need the synchronous RPC
+	// so their semantics are not silently lost by the background endpoint.
+	if dc := state.daemon; dc != nil && dc.available() {
+		if structuralMode == app.StructuralChunksRequired || input.Force || len(input.Paths) > 0 {
+			result, err = dc.reindexSync(ctx, input.Force, string(structuralMode), input.Paths)
+			if err != nil {
+				return &sdkmcp.CallToolResult{
+					Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Indexing error: %v", err)}},
+					IsError: true,
+				}, nil, nil
+			}
+		} else if err := dc.reindex(ctx); err == nil {
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Reindexing in background via daemon. Run vecgrep_status to check progress."}},
 			}, nil, nil
 		}
-		// fall through to direct RW open on error
+		// Fall through to coordinated local indexing on daemon transport error.
 	}
 
-	// Check embedding provider
-	if errResult := s.checkProvider(ctx); errResult != nil {
-		return errResult, nil, nil
-	}
-
-	// Open RW database (exclusive lock, per-call — caller closes)
-	database, err := s.rwDB()
-	if err != nil {
-		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database for writing: %s", formatLockError(err))}},
-			IsError: true,
-		}, nil, nil
-	}
-	defer database.Close()
-
-	// Create indexer
-	cfg := index.DefaultIndexerConfig()
-	indexer := index.NewIndexer(database, s.provider(), cfg)
-
-	var result *index.IndexResult
-	if input.Force {
-		result, err = indexer.ReindexAll(ctx, s.projRoot())
-	} else {
-		result, err = indexer.Index(ctx, s.projRoot(), input.Paths...)
-	}
-
-	if err != nil {
-		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Indexing error: %v", err)}},
-			IsError: true,
-		}, nil, nil
+	if result == nil {
+		// Use the coordinator captured by the same project snapshot even if
+		// another request activates a new project mid-index. It owns the complete
+		// provider/profile/DB lifecycle and closes MCP's on-demand write lease.
+		result, err = state.session.index(ctx, app.IndexRequest{
+			Paths:            input.Paths,
+			FullReindex:      input.Force,
+			StructuralChunks: string(structuralMode),
+		})
+		if err != nil {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Indexing error: %s", formatLockError(err))}},
+				IsError: true,
+			}, nil, nil
+		}
 	}
 
 	// Format result
@@ -1095,6 +1255,7 @@ func (s *SDKServer) handleIndex(ctx context.Context, req *sdkmcp.CallToolRequest
 	sb.WriteString("Indexing complete:\n")
 	fmt.Fprintf(&sb, "- Files processed: %d\n", result.FilesProcessed)
 	fmt.Fprintf(&sb, "- Files skipped (unchanged): %d\n", result.FilesSkipped)
+	fmt.Fprintf(&sb, "- Files deleted: %d\n", result.FilesDeleted)
 	fmt.Fprintf(&sb, "- Chunks created: %d\n", result.ChunksCreated)
 	fmt.Fprintf(&sb, "- Duration: %s\n", result.Duration)
 
@@ -1108,8 +1269,8 @@ func (s *SDKServer) handleIndex(ctx context.Context, req *sdkmcp.CallToolRequest
 	// G4: after reindexing vecgrep, surface whether codemap also has a graph
 	// for this project and whether it's drifted — so the agent knows to keep
 	// the peer graph in sync. Degrades silently when codemap is absent.
-	if cfg, cfgErr := config.Load(s.projRoot()); cfgErr == nil && cfg.Codemap.Enabled {
-		s.writeCodemapStatus(ctx, &sb)
+	if state.codemapCfg.Enabled {
+		writeCodemapStatusFor(ctx, &sb, state.codemap, state.projectRoot)
 	}
 
 	return &sdkmcp.CallToolResult{
@@ -1126,27 +1287,32 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 		}, nil, nil
 	}
 
-	// Try daemon socket first for stats (warm session, no lock needed)
-	if dc := s.daemonClient(); dc != nil && dc.available() {
+	// The daemon branch needs only the immutable client/root pair. If it fails,
+	// acquireProjectReadSnapshot below captures a fresh, coherent direct-read
+	// activation instead of mixing this snapshot with independently read fields.
+	state := s.snapshotProjectState()
+	if dc := state.daemon; dc != nil && dc.available() {
 		if rawStats, dErr := dc.stats(ctx); dErr == nil {
 			return &sdkmcp.CallToolResult{
-				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: formatStatsResult(rawStats, s.projRoot())}},
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: formatStatsResult(rawStats, state.projectRoot)}},
 			}, nil, nil
 		}
 		// fall through to RO session
 	}
 
-	// Get stats via RO searcher
-	searcher, release, err := s.roSearcher()
+	readState, err := s.acquireProjectReadSnapshot(ctx)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
 			IsError: true,
 		}, nil, nil
 	}
-	defer release()
+	defer readState.release()
+	if s.statusSnapshotHook != nil {
+		s.statusSnapshotHook(readState)
+	}
 
-	stats, err := searcher.GetIndexStats(ctx)
+	stats, err := readState.searcher.GetIndexStats(ctx)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Error getting stats: %v", err)}},
@@ -1171,32 +1337,22 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 		}
 	}
 
-	// Check for pending changes
-	cfg, cfgErr := config.Load(s.projRoot())
-	if cfgErr == nil {
-		indexerCfg := index.DefaultIndexerConfig()
-		indexerCfg.IgnorePatterns = append(cfg.Indexing.IgnorePatterns, indexerCfg.IgnorePatterns...)
-		// Use the RO database for pending changes check
-		roDatabase, release, _ := s.roDB()
-		if roDatabase != nil {
-			defer release()
-			indexer := index.NewIndexer(roDatabase, nil, indexerCfg)
-			pending, pendingErr := indexer.GetPendingChanges(ctx, s.projRoot())
-			if pendingErr == nil {
-				sb.WriteString("\nReindex status:\n")
-				fmt.Fprintf(&sb, "  New files: %d\n", pending.NewFiles)
-				fmt.Fprintf(&sb, "  Modified files: %d\n", pending.ModifiedFiles)
-				fmt.Fprintf(&sb, "  Deleted files: %d\n", pending.DeletedFiles)
-				if pending.TotalPending > 0 {
-					sb.WriteString("\n**Action needed:** Run vecgrep_index to update the index.\n")
-				}
-			}
-		}
+	// The same leased database and activation config drive freshness; opening a
+	// second RO handle or reloading config by a newly activated root would tear
+	// one status response across projects.
+	freshnessService := app.NewService(&app.Session{
+		ProjectRoot: readState.projectRoot,
+		Config:      readState.cfg,
+		DB:          readState.database,
+	})
+	freshness, pending, freshnessErr := freshnessService.IndexFreshness(ctx)
+	if freshnessErr == nil {
+		writeFreshnessStatus(&sb, freshness, pending)
+	}
 
-		// Report codemap integration status (G4 cross-read).
-		if cfg.Codemap.Enabled {
-			s.writeCodemapStatus(ctx, &sb)
-		}
+	// Report codemap integration from the same activation snapshot.
+	if readState.codemapCfg.Enabled {
+		writeCodemapStatusFor(ctx, &sb, readState.codemap, readState.projectRoot)
 	}
 
 	return &sdkmcp.CallToolResult{
@@ -1211,14 +1367,14 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 // or erroring codemap simply reports "not found" / "not indexed", never an
 // error to the caller. Used by both vecgrep_status and vecgrep_index so an
 // agent knows before delegating whether the peer can answer.
-func (s *SDKServer) writeCodemapStatus(ctx context.Context, sb *strings.Builder) {
+func writeCodemapStatusFor(ctx context.Context, sb *strings.Builder, codemap *CodemapClient, projectRoot string) {
 	sb.WriteString("\nCodemap integration: enabled\n")
-	if s.codemap == nil || !s.codemap.Available() {
+	if codemap == nil || !codemap.Available() {
 		sb.WriteString("  Status: codemap binary not found\n")
 		return
 	}
 	sb.WriteString("  Status: connected\n")
-	status, _ := s.codemap.Status(ctx, s.projRoot())
+	status, _ := codemap.Status(ctx, projectRoot)
 	if !status.Indexed() {
 		sb.WriteString("  Graph: not indexed (run 'codemap index' to build)\n")
 		return
@@ -1239,11 +1395,6 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
 			IsError: true,
 		}, nil, nil
-	}
-
-	// Check Ollama
-	if errResult := s.checkProvider(ctx); errResult != nil {
-		return errResult, nil, nil
 	}
 
 	// Validate: exactly one of chunk_id, file_location, or text must be provided
@@ -1270,6 +1421,18 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 			IsError: true,
 		}, nil, nil
 	}
+	state, err := s.acquireProjectReadSnapshot(ctx)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+	defer state.release()
+	s.observeReadSnapshot("similar", state)
+	if errResult := checkEmbeddingProvider(ctx, state.provider); errResult != nil {
+		return errResult, nil, nil
+	}
 
 	// Build similar options with extended fields
 	opts := search.SimilarOptions{
@@ -1283,7 +1446,7 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 			Directory:   input.Directory,
 			MinLine:     input.MinLine,
 			MaxLine:     input.MaxLine,
-			ProjectRoot: s.projRoot(),
+			ProjectRoot: state.projectRoot,
 		},
 		ExcludeSameFile: input.ExcludeSameFile,
 		ExcludeSourceID: true, // Default to excluding source
@@ -1294,20 +1457,9 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 	}
 
 	var results []search.Result
-	var err error
-
-	// Get RO searcher
-	searcher, release, sErr := s.roSearcher()
-	if sErr != nil {
-		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", sErr)}},
-			IsError: true,
-		}, nil, nil
-	}
-	defer release()
 
 	if input.ChunkID != 0 {
-		results, err = searcher.SearchSimilarByID(ctx, input.ChunkID, opts)
+		results, err = state.searcher.SearchSimilarByID(ctx, input.ChunkID, opts)
 	} else if input.FileLocation != "" {
 		// Parse file:line
 		parts := strings.SplitN(input.FileLocation, ":", 2)
@@ -1324,9 +1476,9 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 				IsError: true,
 			}, nil, nil
 		}
-		results, err = searcher.SearchSimilarByLocation(ctx, parts[0], line, opts)
+		results, err = state.searcher.SearchSimilarByLocation(ctx, parts[0], line, opts)
 	} else if input.Text != "" {
-		results, err = searcher.SearchSimilarByText(ctx, input.Text, opts)
+		results, err = state.searcher.SearchSimilarByText(ctx, input.Text, opts)
 	}
 
 	if err != nil {
@@ -1364,7 +1516,7 @@ func (s *SDKServer) handleSimilar(ctx context.Context, req *sdkmcp.CallToolReque
 		sb.WriteString("\n```\n\n")
 	}
 
-	s.annotateSearchHits(ctx, results, "similar")
+	state.annotateSearchHits(ctx, results, "similar")
 
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
@@ -1387,17 +1539,24 @@ func (s *SDKServer) handleDelete(ctx context.Context, req *sdkmcp.CallToolReques
 		}, nil, nil
 	}
 
-	// Open RW database (exclusive lock, per-call)
-	database, err := s.rwDB()
+	state := s.snapshotProjectState()
+	if !state.initialized || state.session == nil || state.projectRoot == "" {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "No active project session. Run vecgrep_init first."}},
+			IsError: true,
+		}, nil, nil
+	}
+	// Acquire the DB and project root from one coherent activation snapshot.
+	database, release, err := state.session.acquireWriteDB(ctx)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database for writing: %s", formatLockError(err))}},
 			IsError: true,
 		}, nil, nil
 	}
-	defer database.Close()
+	defer func() { _ = release() }()
 
-	chunksDeleted, err := database.DeleteFile(ctx, input.FilePath)
+	chunksDeleted, err := database.DeleteProjectFile(ctx, state.projectRoot, input.FilePath)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to delete file: %v", err)}},
@@ -1419,15 +1578,22 @@ func (s *SDKServer) handleClean(ctx context.Context, req *sdkmcp.CallToolRequest
 		}, nil, nil
 	}
 
-	// Open RW database (exclusive lock, per-call)
-	database, err := s.rwDB()
+	state := s.snapshotProjectState()
+	if !state.initialized || state.session == nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "No active project session. Run vecgrep_init first."}},
+			IsError: true,
+		}, nil, nil
+	}
+	// Keep the write lease tied to the session captured for this tool call.
+	database, release, err := state.session.acquireWriteDB(ctx)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database for writing: %s", formatLockError(err))}},
 			IsError: true,
 		}, nil, nil
 	}
-	defer database.Close()
+	defer func() { _ = release() }()
 
 	stats, err := database.Clean(ctx)
 	if err != nil {
@@ -1475,15 +1641,22 @@ func (s *SDKServer) handleReset(ctx context.Context, req *sdkmcp.CallToolRequest
 		}, nil, nil
 	}
 
-	// Open RW database (exclusive lock, per-call)
-	database, err := s.rwDB()
+	state := s.snapshotProjectState()
+	if !state.initialized || state.session == nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "No active project session. Run vecgrep_init first."}},
+			IsError: true,
+		}, nil, nil
+	}
+	// Keep the write lease tied to the session captured for this tool call.
+	database, release, err := state.session.acquireWriteDB(ctx)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database for writing: %s", formatLockError(err))}},
 			IsError: true,
 		}, nil, nil
 	}
-	defer database.Close()
+	defer func() { _ = release() }()
 
 	if err := database.ResetAll(ctx); err != nil {
 		return &sdkmcp.CallToolResult{
@@ -1505,8 +1678,17 @@ func (s *SDKServer) handleBranchStatus(ctx context.Context, req *sdkmcp.CallTool
 			IsError: true,
 		}, nil, nil
 	}
+	state, stateErr := s.acquireProjectOperationSnapshot()
+	if stateErr != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to capture project session: %v", stateErr)}},
+			IsError: true,
+		}, nil, nil
+	}
+	defer state.release()
+	s.observeStateSnapshot("branch_status", state.projectStateSnapshot)
 
-	idx, info, err := app.BranchStatus(ctx, s.projRoot(), s.projectName())
+	idx, info, err := app.BranchStatus(ctx, state.projectRoot, state.projectName)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Branch status error: %v", err)}},
@@ -1549,18 +1731,6 @@ func (s *SDKServer) handleBranchStatus(ctx context.Context, req *sdkmcp.CallTool
 	}, nil, nil
 }
 
-// projectName returns the current project name from the resolved config.
-func (s *SDKServer) projectName() string {
-	if s.sess() == nil {
-		return ""
-	}
-	resolved, err := config.LoadResolved(s.projRoot())
-	if err != nil || resolved == nil {
-		return ""
-	}
-	return resolved.ProjectName
-}
-
 // annotateSearchHits pins search/similar results as codemap annotations
 // so they persist across reindex and surface in codemap's context views.
 // This is best-effort: errors are silently ignored and never affect the
@@ -1572,8 +1742,8 @@ func (s *SDKServer) projectName() string {
 // symbol-at (C2). We annotate that resolved FQN-anchored symbol and skip the
 // hit entirely when codemap can't place the position (resolution "none"), so
 // we never write a durable garbage pin.
-func (s *SDKServer) annotateSearchHits(ctx context.Context, results []search.Result, query string) {
-	if s.codemap == nil || !s.codemap.Available() || len(results) == 0 {
+func (state projectStateSnapshot) annotateSearchHits(ctx context.Context, results []search.Result, query string) {
+	if state.codemap == nil || !state.codemap.Available() || len(results) == 0 {
 		return
 	}
 	// Use a background context so annotation outlives the request
@@ -1583,14 +1753,14 @@ func (s *SDKServer) annotateSearchHits(ctx context.Context, results []search.Res
 	for _, r := range results {
 		// Resolve the hit's position to the enclosing symbol. We pin the
 		// graph-resolved symbol, not the regex-extracted name.
-		sa, err := s.codemap.SymbolAt(annotateCtx, s.projRoot(), r.RelativePath, r.StartLine)
+		sa, err := state.codemap.SymbolAt(annotateCtx, state.projectRoot, r.RelativePath, r.StartLine)
 		if err != nil || !sa.Resolved() {
 			// Project not indexed, position off any symbol, or codemap
 			// unavailable → skip rather than pin a guess.
 			continue
 		}
 		note := fmt.Sprintf("vecgrep semantic hit (score %.2f): %s", r.Score, truncate(query, 120))
-		_ = s.codemap.Annotate(annotateCtx, s.projRoot(), sa.Symbol, note, "vecgrep", map[string]any{
+		_ = state.codemap.Annotate(annotateCtx, state.projectRoot, sa.Symbol, note, "vecgrep", map[string]any{
 			"score":      r.Score,
 			"query":      query,
 			"file":       r.RelativePath,
@@ -1614,9 +1784,9 @@ func truncate(s string, n int) string {
 
 // codemapStructuralWeight returns the configured structural re-ranking
 // weight, defaulting to 0.15 when not explicitly set.
-func (s *SDKServer) codemapStructuralWeight() float32 {
-	if s.codemapCfg.StructuralWeight > 0 {
-		return s.codemapCfg.StructuralWeight
+func (state projectStateSnapshot) codemapStructuralWeight() float32 {
+	if state.codemapCfg.StructuralWeight > 0 {
+		return state.codemapCfg.StructuralWeight
 	}
 	return 0.15
 }
@@ -1625,8 +1795,8 @@ func (s *SDKServer) codemapStructuralWeight() float32 {
 // importance data (fan-in hub scores). The re-ranked results are written
 // back into the slice in-place. This is best-effort: if codemap is
 // unavailable or returns no data, results are left in their original order.
-func (s *SDKServer) rerankWithCodemap(ctx context.Context, results []search.Result, structuralWeight float32) {
-	if s.codemap == nil || !s.codemap.Available() || structuralWeight <= 0 || len(results) <= 1 {
+func (state projectStateSnapshot) rerankWithCodemap(ctx context.Context, results []search.Result, structuralWeight float32) {
+	if state.codemap == nil || !state.codemap.Available() || structuralWeight <= 0 || len(results) <= 1 {
 		return
 	}
 
@@ -1642,7 +1812,7 @@ func (s *SDKServer) rerankWithCodemap(ctx context.Context, results []search.Resu
 		}
 	}
 
-	reranked := s.codemap.Rerank(ctx, s.projRoot(), rerankInput, structuralWeight)
+	reranked := state.codemap.Rerank(ctx, state.projectRoot, rerankInput, structuralWeight)
 
 	// Reorder the original results slice to match reranked order, carrying
 	// the structural scores onto the results so downstream formatting can
@@ -1679,7 +1849,7 @@ func (s *SDKServer) rerankWithCodemap(ctx context.Context, results []search.Resu
 // status line for the caller's output (empty when no scoping was requested).
 // Degrades silently: if codemap is unavailable or unindexed, returns an empty
 // file list and a note explaining the fallback.
-func (s *SDKServer) resolveSearchScope(ctx context.Context, input SearchInput) (files []string, note string) {
+func (state projectStateSnapshot) resolveSearchScope(ctx context.Context, input SearchInput) (files []string, note string) {
 	// Direct file_paths take precedence
 	if len(input.FilePaths) > 0 {
 		return input.FilePaths, fmt.Sprintf("**Scope:** restricted to %d file(s)", len(input.FilePaths))
@@ -1689,12 +1859,12 @@ func (s *SDKServer) resolveSearchScope(ctx context.Context, input SearchInput) (
 		return nil, ""
 	}
 
-	if s.codemap == nil || !s.codemap.Available() {
+	if state.codemap == nil || !state.codemap.Available() {
 		return nil, fmt.Sprintf("**Scope:** symbol %q requested but codemap is unavailable — searching unscoped", input.Symbol)
 	}
 
-	depth := int(s.codemapCfg.ImpactDepth)
-	result, err := s.codemap.Impact(ctx, s.projRoot(), input.Symbol, depth)
+	depth := int(state.codemapCfg.ImpactDepth)
+	result, err := state.codemap.Impact(ctx, state.projectRoot, input.Symbol, depth)
 	if err != nil {
 		return nil, fmt.Sprintf("**Scope:** codemap impact failed for %q (%v) — searching unscoped", input.Symbol, err)
 	}
@@ -1728,10 +1898,6 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 		}, nil, nil
 	}
 
-	if errResult := s.checkProvider(ctx); errResult != nil {
-		return errResult, nil, nil
-	}
-
 	if input.Symbol == "" {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "symbol parameter is required"}},
@@ -1744,10 +1910,22 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 			IsError: true,
 		}, nil, nil
 	}
+	state, err := s.acquireProjectReadSnapshot(ctx)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+	defer state.release()
+	s.observeReadSnapshot("investigate", state)
+	if errResult := checkEmbeddingProvider(ctx, state.provider); errResult != nil {
+		return errResult, nil, nil
+	}
 
 	// Build search options from the investigate input
 	opts := search.DefaultSearchOptions()
-	opts.ProjectRoot = s.projRoot()
+	opts.ProjectRoot = state.projectRoot
 	if input.Limit > 0 {
 		opts.Limit = input.Limit
 	}
@@ -1768,7 +1946,7 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 	scopeInput := SearchInput{
 		Symbol: input.Symbol,
 	}
-	scopeFiles, scopeNote := s.resolveSearchScope(ctx, scopeInput)
+	scopeFiles, scopeNote := state.resolveSearchScope(ctx, scopeInput)
 	if len(scopeFiles) > 0 {
 		opts.FilePaths = scopeFiles
 	}
@@ -1781,16 +1959,7 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 		sb.WriteString("\n\n")
 	}
 
-	// Perform the scoped search via RO searcher
-	searcher, release, sErr := s.roSearcher()
-	if sErr != nil {
-		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", sErr)}},
-			IsError: true,
-		}, nil, nil
-	}
-	defer release()
-	results, err := searcher.Search(ctx, input.Query, opts)
+	results, err := state.searcher.Search(ctx, input.Query, opts)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
@@ -1801,13 +1970,13 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 	// Expand context lines if requested
 	if input.ContextLines > 0 {
 		for i := range results {
-			results[i].Content = expandContextLines(s.projRoot(), results[i], input.ContextLines)
+			results[i].Content = expandContextLines(state.projectRoot, results[i], input.ContextLines)
 		}
 	}
 
-	s.rerankWithCodemap(ctx, results, s.codemapStructuralWeight())
+	state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
 	formatSearchResults(&sb, results)
-	s.annotateSearchHits(ctx, results, input.Query)
+	state.annotateSearchHits(ctx, results, input.Query)
 
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},

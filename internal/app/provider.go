@@ -55,6 +55,33 @@ func NewProvider(cfg *config.Config) (embed.Provider, error) {
 	return embed.NewThrottledProvider(inner, throttleCfg), nil
 }
 
+// NewDaemonProvider constructs the daemon's provider with exactly one
+// throttle/cache layer. OpenSession already returns a throttled provider, so
+// wrapping it again in internal/daemon hides the disk cache and applies two
+// independent queues. The daemon-specific limits belong here, beside the raw
+// provider factory, while ownership and Close remain with app.Session.
+func NewDaemonProvider(cfg *config.Config) (embed.Provider, error) {
+	inner, err := newInnerProvider(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	throttleCfg := embed.ThrottleConfig{
+		Workers:     cfg.Daemon.EmbedWorkers,
+		RPS:         cfg.Daemon.EmbedRPS,
+		MaxInFlight: cfg.Daemon.EmbedMaxInFlight,
+		CacheSize:   1000,
+		CachePath:   ResolvedCachePath(cfg),
+	}
+	if throttleCfg.Workers <= 0 {
+		throttleCfg.Workers = config.DefaultDaemonEmbedWorkers
+	}
+	if throttleCfg.MaxInFlight <= 0 {
+		throttleCfg.MaxInFlight = config.DefaultDaemonEmbedMaxInFlight
+	}
+	return embed.NewThrottledProvider(inner, throttleCfg), nil
+}
+
 // newInnerProvider constructs the raw embedding provider based on the
 // configured provider type, without any throttle/cache wrapper.
 func newInnerProvider(cfg *config.Config) (embed.Provider, error) {

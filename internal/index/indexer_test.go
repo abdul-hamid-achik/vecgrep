@@ -242,6 +242,49 @@ func TestIndex_Basic(t *testing.T) {
 	}
 }
 
+func TestIndexCountsActualChunkOrigins(t *testing.T) {
+	counts := countChunkOrigins([]Chunk{
+		{Content: "local"},
+		{Content: "symbol", Origin: ChunkOriginStructural},
+		{Content: "gap one", Origin: ChunkOriginGap},
+		{Content: "gap two", Origin: ChunkOriginGap},
+	})
+	if counts.Files.Local != 1 || counts.Files.Structural != 1 || counts.Files.Gap != 1 {
+		t.Fatalf("file origin counts = %+v", counts.Files)
+	}
+	if counts.Chunks.Local != 1 || counts.Chunks.Structural != 1 || counts.Chunks.Gap != 2 {
+		t.Fatalf("chunk origin counts = %+v", counts.Chunks)
+	}
+}
+
+func TestIndexRunObserverFailureIsHardAndPreservesResult(t *testing.T) {
+	indexer, database, tmpDir := setupTestIndexer(t)
+	defer database.Close()
+	projectDir := filepath.Join(tmpDir, "observer-project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	indexer.SetIndexRunObserver(func(report IndexRunReport) error {
+		if report.Result == nil || report.Err != nil {
+			t.Fatalf("observer report = %+v", report)
+		}
+		return errors.New("receipt write failed")
+	})
+	result, err := indexer.Index(context.Background(), projectDir)
+	if err == nil || !strings.Contains(err.Error(), "record ingestion receipt") {
+		t.Fatalf("Index error = %v, want hard receipt error", err)
+	}
+	if result == nil || result.ChunksCreated == 0 {
+		t.Fatalf("Index result = %+v", result)
+	}
+	if len(result.Errors) == 0 || !strings.Contains(result.Errors[len(result.Errors)-1].Error(), "record ingestion receipt") {
+		t.Fatalf("observer warning not visible: %+v", result.Errors)
+	}
+}
+
 func TestIndex_IncrementalSkipsUnchanged(t *testing.T) {
 	indexer, database, tmpDir := setupTestIndexer(t)
 	defer database.Close()
@@ -440,10 +483,8 @@ func TestIndex_ContextCancellation(t *testing.T) {
 	cancel()
 
 	_, err := indexer.Index(ctx, projectDir)
-	// Should either return context error or complete with partial results
-	if err != nil && err != context.Canceled {
-		// Some errors are acceptable when context is canceled
-		t.Logf("Index returned error (expected): %v", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Index error = %v, want context canceled", err)
 	}
 }
 
@@ -574,6 +615,13 @@ func openTestDB(t *testing.T, dims int) *db.DB {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	return database
+}
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
 }
 
 // TestNewIndexer_DefaultMaxChunkChars pins that the chunk cap actually engages
@@ -765,7 +813,10 @@ func TestIndex_CancelMidIndexReturns(t *testing.T) {
 	cancel()
 
 	select {
-	case <-done: // returned without hanging — the property under test
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Index error = %v, want context canceled", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Index hung on mid-index cancellation (pipeline deadlock)")
 	}
@@ -1080,7 +1131,7 @@ func TestReindexAll_SkipsPerFileDeleteAfterReset(t *testing.T) {
 	}
 
 	deleteCalls := 0
-	idx.deleteFileFn = func(context.Context, string) (int64, error) {
+	idx.deleteFileFn = func(context.Context, string, string) (int64, error) {
 		deleteCalls++
 		return 0, nil
 	}
@@ -1093,6 +1144,36 @@ func TestReindexAll_SkipsPerFileDeleteAfterReset(t *testing.T) {
 	}
 	if deleteCalls != 0 {
 		t.Fatalf("per-file delete calls after reset = %d, want 0", deleteCalls)
+	}
+}
+
+func TestIndex_DeleteExistingFailurePreventsReplacementInsert(t *testing.T) {
+	database := openTestDB(t, 8)
+	idx := NewIndexer(database, newMockEmbedProvider(8), DefaultIndexerConfig())
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package p\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx.deleteFileFn = func(context.Context, string, string) (int64, error) {
+		return 0, errors.New("delete failed")
+	}
+
+	result, err := idx.Index(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ChunksCreated != 0 || len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Error(), "delete existing file chunks") {
+		t.Fatalf("result = %+v, want visible delete failure and no replacement chunks", result)
+	}
+	stats, err := database.StatsForProject(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats["chunks"] != 0 {
+		t.Fatalf("chunks = %d, want 0 after failed delete", stats["chunks"])
 	}
 }
 
@@ -1114,6 +1195,204 @@ func TestIndex_FinalSyncRunsForEmptyProject(t *testing.T) {
 	}
 	if syncCalls != 1 {
 		t.Fatalf("sync calls = %d, want one final sync", syncCalls)
+	}
+}
+
+func TestIndex_FullScanPrunesDeletedFiles(t *testing.T) {
+	database := openTestDB(t, 8)
+	idx := NewIndexer(database, newMockEmbedProvider(8), DefaultIndexerConfig())
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"keep.go", "delete.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("package p\nfunc F() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if result, err := idx.Index(context.Background(), root); err != nil || len(result.Errors) != 0 {
+		t.Fatalf("initial index = %+v, %v", result, err)
+	}
+	if err := os.Remove(filepath.Join(root, "delete.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := idx.Index(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Errors) != 0 || result.FilesDeleted != 1 {
+		t.Fatalf("prune result = %+v", result)
+	}
+	hashes, err := database.GetFileHashes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := hashes["delete.go"]; exists {
+		t.Fatalf("deleted file hash remains: %v", hashes)
+	}
+	if _, exists := hashes["keep.go"]; !exists {
+		t.Fatalf("live file hash missing: %v", hashes)
+	}
+}
+
+func TestIndex_SkipsSymlinkDirectoriesAndIndexesSymlinkFiles(t *testing.T) {
+	const dimensions = 8
+	database := openTestDB(t, dimensions)
+	cfg := DefaultIndexerConfig()
+	cfg.Workers = 1
+	idx := NewIndexer(database, newMockEmbedProvider(dimensions), cfg)
+
+	root := t.TempDir()
+	targetRoot := t.TempDir()
+	targetDir := filepath.Join(targetRoot, "shared")
+	if err := os.Mkdir(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "ignored.go"), []byte("package ignored\n\nfunc Ignored() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targetFile := filepath.Join(targetRoot, "shared.go")
+	if err := os.WriteFile(targetFile, []byte("package shared\n\nfunc Shared() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkOrSkip(t, targetDir, filepath.Join(root, "linked-dir"))
+	linkedFile := filepath.Join(root, "linked.go")
+	symlinkOrSkip(t, targetFile, linkedFile)
+
+	result, err := idx.Index(context.Background(), root)
+	if err != nil {
+		t.Fatalf("index symlinks: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("index symlink errors: %v", result.Errors)
+	}
+
+	hashes, complete, err := database.GetSourceHashes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !complete {
+		t.Fatalf("source hashes incomplete: %v", hashes)
+	}
+	wantLinkedHash, _, err := hashFile(linkedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hashes["linked.go"]; got != wantLinkedHash {
+		t.Fatalf("linked.go source hash = %q, want %q (all hashes: %v)", got, wantLinkedHash, hashes)
+	}
+	if _, ok := hashes["main.go"]; !ok {
+		t.Fatalf("main.go missing from source hashes: %v", hashes)
+	}
+	if len(hashes) != 2 {
+		t.Fatalf("indexed files = %v, want only main.go and linked.go", hashes)
+	}
+	for path := range hashes {
+		if path == "linked-dir" || strings.HasPrefix(path, "linked-dir"+string(filepath.Separator)) {
+			t.Fatalf("symlink directory was indexed: %v", hashes)
+		}
+	}
+}
+
+func TestIndex_PartialScanDoesNotPruneOutsideSelection(t *testing.T) {
+	database := openTestDB(t, 8)
+	idx := NewIndexer(database, newMockEmbedProvider(8), DefaultIndexerConfig())
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"keep.go", "outside.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("package p\nfunc F() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := idx.Index(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "outside.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := idx.Index(context.Background(), root, "keep.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FilesDeleted != 0 {
+		t.Fatalf("partial scan deleted %d files", result.FilesDeleted)
+	}
+	hashes, _ := database.GetFileHashes(root)
+	if _, exists := hashes["outside.go"]; !exists {
+		t.Fatalf("partial scan pruned outside selection: %v", hashes)
+	}
+}
+
+func TestIndex_CanceledScanDoesNotPrune(t *testing.T) {
+	database := openTestDB(t, 8)
+	idx := NewIndexer(database, newMockEmbedProvider(8), DefaultIndexerConfig())
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "stale.go")
+	if err := os.WriteFile(path, []byte("package p\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Index(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := idx.Index(ctx, root)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Index error = %v, want context canceled", err)
+	}
+	if result.FilesDeleted != 0 {
+		t.Fatalf("canceled scan deleted %d files", result.FilesDeleted)
+	}
+	hashes, _ := database.GetFileHashes(root)
+	if _, exists := hashes["stale.go"]; !exists {
+		t.Fatalf("canceled scan pruned stale file: %v", hashes)
+	}
+}
+
+func TestIndex_PruneFailureRemainsVisibleAndPending(t *testing.T) {
+	database := openTestDB(t, 8)
+	idx := NewIndexer(database, newMockEmbedProvider(8), DefaultIndexerConfig())
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "stale.go")
+	if err := os.WriteFile(path, []byte("package p\nfunc F() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.Index(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	idx.deleteFileFn = func(context.Context, string, string) (int64, error) {
+		return 0, errors.New("delete failed")
+	}
+
+	result, err := idx.Index(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FilesDeleted != 0 || len(result.Errors) == 0 || !strings.Contains(result.Errors[0].Error(), "delete failed") {
+		t.Fatalf("failed prune result = %+v", result)
+	}
+	hashes, _ := database.GetFileHashes(root)
+	if _, exists := hashes["stale.go"]; !exists {
+		t.Fatalf("failed prune removed hash: %v", hashes)
 	}
 }
 

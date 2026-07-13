@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 )
 
@@ -23,6 +24,7 @@ import (
 type reindexSyncResult struct {
 	FilesProcessed int           `json:"files_processed"`
 	FilesSkipped   int           `json:"files_skipped"`
+	FilesDeleted   int           `json:"files_deleted"`
 	ChunksCreated  int           `json:"chunks_created"`
 	Duration       time.Duration `json:"duration"`
 	Errors         []string      `json:"errors"`
@@ -58,7 +60,7 @@ type rpcError struct {
 // with the daemon's exclusive lock). globalDataDir is the hub's data dir
 // (~/.vecgrep); projectRoot identifies the worker. Returns an error if no
 // daemon is running, it doesn't respond in time, or the reindex failed.
-func ReindexSync(ctx context.Context, globalDataDir, projectRoot string, full bool) (*index.IndexResult, error) {
+func ReindexSync(ctx context.Context, globalDataDir, projectRoot string, req app.IndexRequest) (*index.IndexResult, error) {
 	socketPath := filepath.Join(globalDataDir, "daemon.sock")
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "unix", socketPath)
@@ -73,12 +75,22 @@ func ReindexSync(ctx context.Context, globalDataDir, projectRoot string, full bo
 		_ = conn.SetDeadline(time.Now().Add(reindexSyncReadTimeout))
 	}
 
-	params, err := json.Marshal(map[string]any{"project": projectRoot, "full": full})
+	paramsMap := map[string]any{"project": projectRoot, "full": req.FullReindex}
+	if req.StructuralChunks != "" {
+		paramsMap["structural_chunks"] = req.StructuralChunks
+	}
+	if len(req.Paths) > 0 {
+		paramsMap["paths"] = req.Paths
+	}
+	if len(req.AdditionalIgnores) > 0 {
+		paramsMap["additional_ignores"] = req.AdditionalIgnores
+	}
+	params, err := json.Marshal(paramsMap)
 	if err != nil {
 		return nil, fmt.Errorf("marshal params: %w", err)
 	}
-	req := rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "daemon.reindex_sync", Params: params}
-	if err := json.NewEncoder(conn).Encode(req); err != nil {
+	wireReq := rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "daemon.reindex_sync", Params: params}
+	if err := json.NewEncoder(conn).Encode(wireReq); err != nil {
 		return nil, fmt.Errorf("send reindex: %w", err)
 	}
 
@@ -97,6 +109,7 @@ func ReindexSync(ctx context.Context, globalDataDir, projectRoot string, full bo
 	res := &index.IndexResult{
 		FilesProcessed: wire.FilesProcessed,
 		FilesSkipped:   wire.FilesSkipped,
+		FilesDeleted:   wire.FilesDeleted,
 		ChunksCreated:  wire.ChunksCreated,
 		Duration:       wire.Duration,
 	}

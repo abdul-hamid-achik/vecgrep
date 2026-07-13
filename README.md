@@ -12,7 +12,7 @@ vecgrep indexes your codebase and enables natural language search using vector e
 - **Cloud Provider Support** - Optional OpenAI, Cohere, and Voyage AI embeddings
 - **Incremental Indexing** - Only re-index changed files
 - **Batch Operations** - Efficient bulk indexing with batch inserts
-- **Language-Aware Chunking** - Intelligent code splitting by functions, classes, and blocks
+- **Lossless Language-Aware Chunking** - Structural boundaries where available, generic fallback everywhere else
 - **Rich Filtering** - Filter by language, chunk type, directory, file pattern, and line range
 - **MCP Support** - Model Context Protocol server for AI assistant integration
 - **Studio** - Full-screen Bubble Tea workspace for search, preview, indexing, and status
@@ -139,7 +139,7 @@ Registers the project globally by default and stores data under `~/.vecgrep/proj
 ### Index Files
 
 ```bash
-vecgrep index [paths...] [--full] [--ignore pattern]
+vecgrep index [paths...] [--full] [--ignore pattern] [--structural-chunks mode]
 ```
 
 Options:
@@ -147,13 +147,13 @@ Options:
 - `--ignore` - Additional patterns to ignore
 - `-v, --verbose` - Show detailed progress
 - `--no-progress` - Disable the live progress bar
+- `--structural-chunks` - codemap symbol chunks: `auto`, `off`, or `required`
 
 When a background daemon hub is running, `vecgrep index` **delegates** the
 reindex to it over the daemon's control socket instead of opening a second
 write handle (which would collide with the daemon's exclusive lock). The
 output is the normal "Indexing complete" summary, annotated `(via daemon)`,
-and forwards `--full`. `--ignore` (additional ignores) is not forwarded — the
-daemon's configured ignores apply; stop + restart the daemon to change them.
+and forwards selected paths, `--full`, `--ignore`, and `--structural-chunks`.
 `--dry-run` uses a read-only session for the preview.
 
 vecgrep records an embedding profile in VecLite collection metadata after a successful first index or full re-index. Existing projects with a legacy `embedding_profile.json` sidecar are migrated transparently on the next open: the sidecar is read, written into collection metadata, and removed. If the active embedding provider, model, dimensions, distance, or chunker profile no longer matches the indexed vectors, incremental indexing and vector search fail with rebuild guidance. Run `vecgrep index --full` or `vecgrep reset --force` to refresh stale vectors.
@@ -431,6 +431,9 @@ vector:
     m: 16                       # HNSW max connections per node
     ef_construction: 200        # Build quality (higher = better quality, slower build)
     ef_search: 100              # Search quality (higher = better recall, slower search)
+
+codemap:
+  structural_chunks: auto      # auto (per-file fallback), off, or required
 ```
 
 ### Vector Backend

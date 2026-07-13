@@ -13,6 +13,7 @@ func TestLoadResolvedAppliesCodemapEnv(t *testing.T) {
 	t.Setenv("VECGREP_CODEMAP_BIN", "/usr/local/bin/codemap")
 	t.Setenv("VECGREP_CODEMAP_MCP_ENDPOINT", "stdio")
 	t.Setenv("VECGREP_CODEMAP_STRUCTURAL_WEIGHT", "0.25")
+	t.Setenv("VECGREP_CODEMAP_STRUCTURAL_CHUNKS", "required")
 
 	resolved, err := LoadResolved(projectRoot)
 	if err != nil {
@@ -31,6 +32,9 @@ func TestLoadResolvedAppliesCodemapEnv(t *testing.T) {
 	}
 	if cfg.Codemap.StructuralWeight != 0.25 {
 		t.Fatalf("codemap.structural_weight = %f, want 0.25", cfg.Codemap.StructuralWeight)
+	}
+	if cfg.Codemap.StructuralChunks != "required" {
+		t.Fatalf("codemap.structural_chunks = %q, want required", cfg.Codemap.StructuralChunks)
 	}
 }
 
@@ -87,6 +91,13 @@ func TestDefaultConfigHasDaemonDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigUsesAutomaticStructuralChunks(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Codemap.StructuralChunks != "auto" {
+		t.Fatalf("codemap.structural_chunks = %q, want auto", cfg.Codemap.StructuralChunks)
+	}
+}
+
 func TestSetConfigCodemapValuesResolve(t *testing.T) {
 	isolateConfigTestEnv(t)
 	projectRoot := t.TempDir()
@@ -96,6 +107,7 @@ func TestSetConfigCodemapValuesResolve(t *testing.T) {
 		"codemap.enabled":           "true",
 		"codemap.bin":               "/usr/local/bin/codemap",
 		"codemap.structural_weight": "0.2",
+		"codemap.structural_chunks": "off",
 		"daemon.autostart":          "true",
 		"daemon.idle_timeout":       "45",
 		"daemon.embed_workers":      "3",
@@ -122,6 +134,9 @@ func TestSetConfigCodemapValuesResolve(t *testing.T) {
 	if cfg.Codemap.StructuralWeight != 0.2 {
 		t.Fatalf("codemap.structural_weight = %f, want 0.2", cfg.Codemap.StructuralWeight)
 	}
+	if cfg.Codemap.StructuralChunks != "off" {
+		t.Fatalf("codemap.structural_chunks = %q, want off", cfg.Codemap.StructuralChunks)
+	}
 	if !cfg.Daemon.Autostart {
 		t.Fatal("daemon.autostart = false, want true")
 	}
@@ -140,6 +155,7 @@ func TestMergeCodemapConfig(t *testing.T) {
 			Enabled:          true,
 			Bin:              "/custom/codemap",
 			StructuralWeight: 0.5,
+			StructuralChunks: "required",
 		},
 	}
 	mergeCodemapConfig(dst, src)
@@ -152,6 +168,9 @@ func TestMergeCodemapConfig(t *testing.T) {
 	}
 	if dst.Codemap.StructuralWeight != 0.5 {
 		t.Errorf("codemap.structural_weight = %f, want 0.5", dst.Codemap.StructuralWeight)
+	}
+	if dst.Codemap.StructuralChunks != "required" {
+		t.Errorf("codemap.structural_chunks = %q, want required", dst.Codemap.StructuralChunks)
 	}
 }
 

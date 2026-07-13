@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,10 +105,18 @@ type Indexer struct {
 	config   IndexerConfig
 	progress ProgressCallback
 
+	structuralMu       sync.RWMutex
+	structuralSource   StructuralChunkSource
+	structuralRequired bool
+
+	observerMu sync.RWMutex
+	observer   IndexRunObserver
+	attemptID  string
+
 	// Test seams for observing storage calls without widening the public DB
 	// contract. Production leaves these nil and uses db directly.
 	syncFn       func() error
-	deleteFileFn func(context.Context, string) (int64, error)
+	deleteFileFn func(context.Context, string, string) (int64, error)
 }
 
 // NewIndexer creates a new Indexer.
@@ -152,20 +162,107 @@ func (idx *Indexer) sync() error {
 	return idx.db.Sync()
 }
 
-func (idx *Indexer) deleteFile(ctx context.Context, path string) (int64, error) {
+func (idx *Indexer) deleteFile(ctx context.Context, projectRoot, path string) (int64, error) {
 	if idx.deleteFileFn != nil {
-		return idx.deleteFileFn(ctx, path)
+		return idx.deleteFileFn(ctx, projectRoot, path)
 	}
-	return idx.db.DeleteFile(ctx, path)
+	return idx.db.DeleteProjectFile(ctx, projectRoot, path)
 }
 
 // IndexResult contains the results of an indexing operation.
 type IndexResult struct {
 	FilesProcessed int
 	FilesSkipped   int
+	FilesDeleted   int
 	ChunksCreated  int
 	Duration       time.Duration
 	Errors         []error
+	Ingestion      IngestionCounts
+}
+
+// OriginCounts are exact counts for chunks written by one indexing attempt.
+// A file may appear in more than one origin bucket (for example, a structural
+// file with generic gap chunks), while each chunk belongs to exactly one.
+type OriginCounts struct {
+	Structural int `json:"structural"`
+	Gap        int `json:"gap"`
+	Local      int `json:"local"`
+}
+
+// IngestionCounts separates persisted files and chunks by their actual
+// producer path. It is run-scoped rather than a claim about the whole index.
+type IngestionCounts struct {
+	Files  OriginCounts `json:"files"`
+	Chunks OriginCounts `json:"chunks"`
+}
+
+func (c *IngestionCounts) add(other IngestionCounts) {
+	c.Files.Structural += other.Files.Structural
+	c.Files.Gap += other.Files.Gap
+	c.Files.Local += other.Files.Local
+	c.Chunks.Structural += other.Chunks.Structural
+	c.Chunks.Gap += other.Chunks.Gap
+	c.Chunks.Local += other.Chunks.Local
+}
+
+// IndexRunReport is the storage-neutral event emitted after a public Index or
+// ReindexAll attempt. App owns any durable receipt derived from it.
+type IndexRunReport struct {
+	AttemptID            string
+	ScopeComplete        bool
+	ProjectRoot          string
+	StartedAt            time.Time
+	FinishedAt           time.Time
+	StructuralConfigured bool
+	StructuralRequired   bool
+	StructuralLoaded     bool
+	StructuralComplete   bool
+	StructuralProjectKey string
+	IndexFingerprint     string
+	StructuralFiles      int
+	StructuralIssues     int
+	StructuralWarning    bool
+	FailureStage         string
+	Result               *IndexResult
+	Err                  error
+}
+
+// IndexRunObserver records an attempt outside the indexing package. Returning
+// an error preserves any populated result for diagnostics but also fails the
+// run, so receipt persistence cannot fail silently.
+type IndexRunObserver func(IndexRunReport) error
+
+// SetIndexRunObserver installs the app-owned durable receipt hook.
+func (idx *Indexer) SetIndexRunObserver(observer IndexRunObserver) {
+	idx.observerMu.Lock()
+	defer idx.observerMu.Unlock()
+	idx.observer = observer
+}
+
+// SetIndexRunAttemptID binds the next public Index/ReindexAll call to the
+// durable app-owned ingestion attempt that was written before storage mutation.
+// Indexers used outside app may leave it empty; receipt observers are expected
+// to reject an unbound run rather than update unrelated durable evidence.
+func (idx *Indexer) SetIndexRunAttemptID(attemptID string) {
+	idx.observerMu.Lock()
+	defer idx.observerMu.Unlock()
+	idx.attemptID = attemptID
+}
+
+func (idx *Indexer) indexRunAttemptID() string {
+	idx.observerMu.RLock()
+	defer idx.observerMu.RUnlock()
+	return idx.attemptID
+}
+
+func (idx *Indexer) observeIndexRun(report IndexRunReport) error {
+	idx.observerMu.RLock()
+	observer := idx.observer
+	idx.observerMu.RUnlock()
+	if observer == nil {
+		return nil
+	}
+	return observer(report)
 }
 
 // Index indexes the given paths.
@@ -188,12 +285,79 @@ type IndexResult struct {
 // incremental db.Sync() calls flush the vector store periodically so a long run
 // stays crash-resilient.
 func (idx *Indexer) Index(ctx context.Context, projectRoot string, paths ...string) (*IndexResult, error) {
-	return idx.index(ctx, projectRoot, true, paths...)
+	return idx.indexObserved(ctx, projectRoot, paths...)
+}
+
+func (idx *Indexer) indexObserved(ctx context.Context, projectRoot string, paths ...string) (result *IndexResult, runErr error) {
+	startedAt := time.Now()
+	structuralConfig := idx.SnapshotStructuralChunkSource()
+	report := IndexRunReport{
+		AttemptID:            idx.indexRunAttemptID(),
+		ScopeComplete:        len(paths) == 0,
+		ProjectRoot:          projectRoot,
+		StartedAt:            startedAt,
+		StructuralConfigured: structuralConfig.source != nil,
+		StructuralRequired:   structuralConfig.required,
+	}
+	defer func() {
+		report.FinishedAt = time.Now()
+		report.Result = result
+		report.Err = runErr
+		if runErr != nil && report.FailureStage == "" {
+			report.FailureStage = "index"
+		}
+		if err := idx.observeIndexRun(report); err != nil {
+			receiptErr := fmt.Errorf("record ingestion receipt: %w", err)
+			if result != nil {
+				result.Errors = append(result.Errors, receiptErr)
+			}
+			runErr = errors.Join(runErr, receiptErr)
+		}
+	}()
+	structural, warning, err := idx.loadStructuralChunksWithSnapshot(ctx, projectRoot, structuralConfig)
+	if err != nil {
+		report.FailureStage = "structural_load"
+		return nil, err
+	}
+	populateStructuralRunReport(&report, structural, warning)
+	if structuralConfig.required && structural != nil && len(structural.Files) > 0 {
+		prepared, err := idx.prepareRequiredStructuralFiles(ctx, projectRoot, paths, structural)
+		if err != nil {
+			report.FailureStage = "structural_preflight"
+			return nil, err
+		}
+		return idx.indexPrepared(ctx, projectRoot, true, structural, warning, &prepared, paths...)
+	}
+	return idx.index(ctx, projectRoot, true, structural, warning, paths...)
+}
+
+func populateStructuralRunReport(report *IndexRunReport, structural *StructuralChunkSet, warning error) {
+	if report == nil {
+		return
+	}
+	report.StructuralWarning = warning != nil
+	if structural == nil {
+		return
+	}
+	report.StructuralLoaded = true
+	report.StructuralComplete = structural.Complete
+	report.StructuralProjectKey = structural.ProjectKey
+	report.IndexFingerprint = structural.IndexFingerprint
+	report.StructuralFiles = len(structural.Files)
+	report.StructuralIssues = len(structural.Issues)
 }
 
 // index runs the streaming pipeline. deleteExisting is false only after a
 // project Reset, when per-file deletion would redundantly scan an empty store.
-func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExisting bool, paths ...string) (*IndexResult, error) {
+func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExisting bool, structural *StructuralChunkSet, structuralWarning error, paths ...string) (*IndexResult, error) {
+	return idx.indexPrepared(ctx, projectRoot, deleteExisting, structural, structuralWarning, nil, paths...)
+}
+
+// indexPrepared runs the normal streaming pipeline. When prepared is non-nil,
+// it is a preflighted immutable view of the requested files. Required
+// structural mode uses this path so no filesystem race after validation can
+// silently downgrade a symbol file to the built-in chunker.
+func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, deleteExisting bool, structural *StructuralChunkSet, structuralWarning error, prepared *[]fileInfo, paths ...string) (*IndexResult, error) {
 	startTime := time.Now()
 
 	absRoot, err := filepath.Abs(projectRoot)
@@ -208,9 +372,15 @@ func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExistin
 	}
 
 	// Get existing file hashes from veclite up front for incremental
-	// filtering. If this fails, index everything (no filter).
+	// filtering. A durable dirty marker must fail closed: indexing everything
+	// without a project reset cannot clear that marker and would leave freshness
+	// unknown forever. Other legacy read failures retain the existing no-filter
+	// fallback.
 	existingHashes, err := idx.db.GetFileHashes(absRoot)
 	if err != nil {
+		if errors.Is(err, db.ErrProjectFileHashesDirty) {
+			return nil, err
+		}
 		existingHashes = map[string]string{}
 	}
 
@@ -234,6 +404,10 @@ func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExistin
 	// read by the results collector.
 	var totalDiscovered int64 // files queued for indexing
 	var skippedCount int64    // files skipped (unchanged)
+	var scan *fullScanState
+	if deleteExisting && len(paths) == 0 {
+		scan = newFullScanState()
+	}
 
 	// Stage 1: chunk workers. Read + chunk each changed file and emit one item
 	// per chunk; files needing no embedding (binary / empty) report immediately.
@@ -242,7 +416,7 @@ func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExistin
 		chunkWG.Add(1)
 		go func() {
 			defer chunkWG.Done()
-			idx.chunkWorker(ctx, absRoot, deleteExisting, sourceBudget, fileChan, itemChan, resultsChan)
+			idx.chunkWorker(ctx, absRoot, deleteExisting, structural, sourceBudget, fileChan, itemChan, resultsChan)
 		}()
 	}
 	go func() {
@@ -282,12 +456,20 @@ func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExistin
 	// error/cancel) so the pipeline drains and exits.
 	walkErrCh := make(chan error, 1)
 	go func() {
-		err := idx.walkAndFilter(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, sourceBudget, sourceBudgetBytes, fileChan, &totalDiscovered, &skippedCount)
+		var err error
+		if prepared != nil {
+			err = feedPreparedFiles(ctx, *prepared, existingHashes, scan, fileChan, &totalDiscovered, &skippedCount)
+		} else {
+			err = idx.walkAndFilterStructural(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, structural, scan, sourceBudget, sourceBudgetBytes, fileChan, &totalDiscovered, &skippedCount)
+		}
 		close(fileChan)
 		walkErrCh <- err
 	}()
 
 	result := &IndexResult{}
+	if structuralWarning != nil {
+		result.Errors = append(result.Errors, structuralWarning)
+	}
 	progress := Progress{StartTime: startTime}
 
 	// Incremental sync thresholds (fall back to defaults when unset).
@@ -306,6 +488,7 @@ func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExistin
 	for r := range resultsChan {
 		result.FilesProcessed++
 		result.ChunksCreated += r.chunksCreated
+		result.Ingestion.add(r.ingestion)
 
 		if r.err != nil {
 			result.Errors = append(result.Errors, r.err)
@@ -335,12 +518,23 @@ func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExistin
 		}
 	}
 
-	// Surface walk errors (context cancel is expected on cancellation).
-	if walkErr := <-walkErrCh; walkErr != nil && walkErr != context.Canceled {
+	// Surface walk errors. Cancellation is a hard run failure: treating a
+	// partially observed tree as a completed ingestion could advance durable
+	// freshness evidence for work that never ran.
+	walkErr := <-walkErrCh
+	var fatalErr error
+	if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
+		fatalErr = walkErr
+	} else if walkErr != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("walk: %w", walkErr))
 	}
 
 	result.FilesSkipped = int(atomic.LoadInt64(&skippedCount))
+	if scan != nil && scan.complete && walkErr == nil && ctx.Err() == nil {
+		deleted, pruneErrors := idx.pruneDeletedFiles(ctx, absRoot, existingHashes, scan.seen)
+		result.FilesDeleted = deleted
+		result.Errors = append(result.Errors, pruneErrors...)
+	}
 
 	// Final sync persists any work not already covered by an incremental sync.
 	// An empty/no-op run still syncs once, while a periodic sync on the final
@@ -350,9 +544,12 @@ func (idx *Indexer) index(ctx context.Context, projectRoot string, deleteExistin
 			result.Errors = append(result.Errors, fmt.Errorf("sync: %w", err))
 		}
 	}
+	if fatalErr == nil && ctx.Err() != nil {
+		fatalErr = ctx.Err()
+	}
 
 	result.Duration = time.Since(startTime)
-	return result, nil
+	return result, fatalErr
 }
 
 // fileInfo holds information about a file to be indexed. The content
@@ -363,15 +560,19 @@ type fileInfo struct {
 	path         string
 	relativePath string
 	hash         string
-	size         int64
-	content      []byte
-	queueBytes   int64
+	// sourceHash is the SHA-256 of the raw file. hash may additionally include
+	// the per-file structural profile for incremental invalidation.
+	sourceHash string
+	size       int64
+	content    []byte
+	queueBytes int64
 }
 
 // fileResult holds the result of indexing a single file.
 type fileResult struct {
 	path          string
 	chunksCreated int
+	ingestion     IngestionCounts
 	err           error
 }
 
@@ -380,9 +581,10 @@ type fileResult struct {
 // carry other files' chunks, so completion is reference-counted: the goroutine
 // that drives remaining to zero owns inserting the file and reporting it.
 type fileTask struct {
-	path    string
-	records []db.ChunkRecord // one per chunk, in chunk order
-	embeds  [][]float32      // filled in by slot as batches complete
+	path      string
+	records   []db.ChunkRecord // one per chunk, in chunk order
+	embeds    [][]float32      // filled in by slot as batches complete
+	ingestion IngestionCounts
 
 	mu        sync.Mutex
 	remaining int  // chunks not yet accounted for
@@ -430,7 +632,7 @@ type sourceByteBudget interface {
 // chunk. It releases each file's source-buffer charge as soon as the file
 // becomes active, keeping queued bytes separate from active-worker memory.
 // Files that need no embedding report completion directly.
-func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, deleteExisting bool, sourceBudget sourceByteBudget, files <-chan fileInfo, items chan<- embedItem, results chan<- fileResult) {
+func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, deleteExisting bool, structural *StructuralChunkSet, sourceBudget sourceByteBudget, files <-chan fileInfo, items chan<- embedItem, results chan<- fileResult) {
 	for file := range files {
 		sourceBudget.Release(file.queueBytes)
 		select {
@@ -439,7 +641,7 @@ func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, deleteE
 			return
 		default:
 		}
-		idx.chunkFile(ctx, projectRoot, deleteExisting, file, items, results)
+		idx.chunkFile(ctx, projectRoot, deleteExisting, structural, file, items, results)
 	}
 }
 
@@ -447,7 +649,7 @@ func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, deleteE
 // stale chunks, splits it, and hands each chunk to the embed pipeline. Binary
 // and empty files report immediately; everything else completes asynchronously
 // once its chunks are embedded and inserted.
-func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExisting bool, file fileInfo, items chan<- embedItem, results chan<- fileResult) {
+func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExisting bool, structural *StructuralChunkSet, file fileInfo, items chan<- embedItem, results chan<- fileResult) {
 	// Use cached content from the hash phase. If for some reason content is
 	// nil (e.g. fileInfo was constructed directly), fall back to reading.
 	content := file.content
@@ -460,20 +662,30 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 		}
 	}
 
-	if !IsTextFile(content) {
-		results <- fileResult{path: file.path} // binary: skip silently
+	// Drop stale chunks during incremental re-indexing. ReindexAll has already
+	// reset the project, so deleting every file again would be redundant.
+	// This must happen before binary/empty eligibility checks: a file that was
+	// previously text can become binary (or otherwise chunkless), and a
+	// successful index must remove its old chunks/hash so raw freshness can
+	// converge instead of reporting it modified forever.
+	if deleteExisting {
+		if _, err := idx.deleteFile(ctx, projectRoot, file.relativePath); err != nil {
+			results <- fileResult{path: file.path, err: fmt.Errorf("delete existing file chunks: %w", err)}
+			return
+		}
+	}
+
+	if !isChunkEligibleContent(content) {
+		results <- fileResult{path: file.path} // binary/empty/whitespace: skip silently
 		return
 	}
 
 	lang := DetectLanguage(file.path)
 
-	// Drop stale chunks during incremental re-indexing. ReindexAll has already
-	// reset the project, so deleting every file again would be redundant.
-	if deleteExisting {
-		_, _ = idx.deleteFile(ctx, file.relativePath)
-	}
-
 	chunks := idx.chunker.ChunkFile(string(content), file.path)
+	if structuralFile, ok := structuralFileForHash(structural, file.relativePath, file.sourceHash); ok {
+		chunks = structuralFile.Chunks
+	}
 	// Release the content reference so it can be GC'd while chunks are embedded.
 	file.content = nil
 
@@ -496,6 +708,7 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 		results <- fileResult{path: file.path}
 		return
 	}
+	ingestion := countChunkOrigins(chunks)
 
 	// Pre-build the records; embeddings are filled in as batches complete.
 	records := make([]db.ChunkRecord, len(chunks))
@@ -505,17 +718,20 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 			chunk.Content, chunk.StartLine, chunk.EndLine, chunk.StartByte, chunk.EndByte,
 			string(chunk.ChunkType), chunk.SymbolName, projectRoot,
 		)
+		records[i].ChunkIndex = i
+		records[i].SourceHash = file.sourceHash
 	}
 	task := &fileTask{
 		path:      file.path,
 		records:   records,
 		embeds:    make([][]float32, len(chunks)),
 		remaining: len(chunks),
+		ingestion: ingestion,
 	}
 
 	for i, chunk := range chunks {
 		select {
-		case items <- embedItem{task: task, slot: i, text: chunk.Content}:
+		case items <- embedItem{task: task, slot: i, text: embeddingContent(chunk)}:
 		case <-ctx.Done():
 			// Stop feeding; let any already-queued chunks finish the file with
 			// what was embedded so far.
@@ -525,6 +741,30 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 			return
 		}
 	}
+}
+
+func countChunkOrigins(chunks []Chunk) IngestionCounts {
+	var counts IngestionCounts
+	for _, chunk := range chunks {
+		switch chunk.Origin {
+		case ChunkOriginStructural:
+			counts.Chunks.Structural++
+		case ChunkOriginGap:
+			counts.Chunks.Gap++
+		default:
+			counts.Chunks.Local++
+		}
+	}
+	if counts.Chunks.Structural > 0 {
+		counts.Files.Structural = 1
+	}
+	if counts.Chunks.Gap > 0 {
+		counts.Files.Gap = 1
+	}
+	if counts.Chunks.Local > 0 {
+		counts.Files.Local = 1
+	}
+	return counts
 }
 
 // batchItems coalesces per-chunk items from every file into batches of up to
@@ -590,6 +830,7 @@ func (idx *Indexer) finishFile(task *fileTask, results chan<- fileResult) {
 		res.err = fmt.Errorf("batch insert: %w", err)
 	} else {
 		res.chunksCreated = len(ids)
+		res.ingestion = task.ingestion
 	}
 	results <- res
 }
@@ -658,7 +899,7 @@ func (idx *Indexer) collectFiles(ctx context.Context, rootPath string, paths []s
 
 		err := filepath.WalkDir(absPath, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return nil // Skip files with errors
+				return err
 			}
 
 			select {
@@ -685,9 +926,14 @@ func (idx *Indexer) collectFiles(ctx context.Context, rootPath string, paths []s
 				return nil
 			}
 
-			// Check file size
-			info, err := d.Info()
+			// Check file size. WalkDir does not follow symlinks: preserve
+			// symlink-to-file indexing, but do not pass a symlink-to-directory
+			// to ReadFile (which would fail with EISDIR).
+			info, skip, err := indexableFileInfo(p, d)
 			if err != nil {
+				return err
+			}
+			if skip {
 				return nil
 			}
 
@@ -698,7 +944,7 @@ func (idx *Indexer) collectFiles(ctx context.Context, rootPath string, paths []s
 			// Calculate file hash and read content in one pass
 			hash, content, err := hashFile(p)
 			if err != nil {
-				return nil
+				return err
 			}
 
 			mu.Lock()
@@ -706,6 +952,7 @@ func (idx *Indexer) collectFiles(ctx context.Context, rootPath string, paths []s
 				path:         p,
 				relativePath: relPath,
 				hash:         hash,
+				sourceHash:   hash,
 				size:         info.Size(),
 				content:      content,
 			})
@@ -720,6 +967,109 @@ func (idx *Indexer) collectFiles(ctx context.Context, rootPath string, paths []s
 	}
 
 	return files, nil
+}
+
+// indexableFileInfo returns the effective file information for one non-dir
+// WalkDir entry. WalkDir deliberately does not follow symlinks, while vecgrep
+// has historically indexed symlinks to regular files via os.ReadFile. Follow
+// only for classification/size: non-regular entries (directories, FIFOs,
+// sockets, and devices) plus dangling links are skipped, regular-file targets
+// remain indexable, and other stat failures stay visible rather than silently
+// certifying an incomplete scan.
+func indexableFileInfo(path string, entry fs.DirEntry) (info fs.FileInfo, skip bool, err error) {
+	info, err = entry.Info()
+	if err != nil {
+		return nil, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		info, err = os.Stat(path)
+		if os.IsNotExist(err) {
+			return nil, true, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	return info, !info.Mode().IsRegular(), nil
+}
+
+// prepareRequiredStructuralFiles materializes the requested filesystem view and
+// validates every selected structural file before any index mutation. The
+// returned content is reused by the pipeline, so a subsequent edit is reported
+// as pending on the next scan rather than causing a silent local-chunker
+// downgrade during this run.
+func (idx *Indexer) prepareRequiredStructuralFiles(ctx context.Context, rootPath string, paths []string, structural *StructuralChunkSet) ([]fileInfo, error) {
+	absRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("abs path: %w", err)
+	}
+	ignoreMatcher, err := idx.buildIgnoreMatcher(rootPath)
+	if err != nil {
+		return nil, fmt.Errorf("build ignore matcher: %w", err)
+	}
+	files, err := idx.collectFiles(ctx, rootPath, paths, ignoreMatcher)
+	if err != nil {
+		return nil, err
+	}
+	byPath := make(map[string]int, len(files))
+	for i := range files {
+		byPath[files[i].relativePath] = i
+	}
+	for relPath, structuralFile := range structural.Files {
+		if !structuralPathSelected(absRoot, relPath, paths) || ignoreMatcher.MatchesPath(relPath) || structuralFile.FileSize > idx.config.MaxFileSize {
+			continue
+		}
+		position, ok := byPath[relPath]
+		if !ok {
+			return nil, fmt.Errorf("required codemap structural source disappeared before indexing: %s", relPath)
+		}
+		if files[position].sourceHash != structuralFile.FileHash {
+			return nil, fmt.Errorf("required codemap structural source changed before indexing: %s", relPath)
+		}
+		files[position].hash = structuralIndexHash(files[position].sourceHash, structuralFile)
+	}
+	return files, nil
+}
+
+func structuralPathSelected(absRoot, relativePath string, paths []string) bool {
+	if len(paths) == 0 {
+		return true
+	}
+	filePath := filepath.Join(absRoot, relativePath)
+	for _, selected := range paths {
+		if !filepath.IsAbs(selected) {
+			selected = filepath.Join(absRoot, selected)
+		}
+		selected, err := filepath.Abs(selected)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(selected, filePath)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func feedPreparedFiles(ctx context.Context, files []fileInfo, existingHashes map[string]string, scan *fullScanState, fileChan chan<- fileInfo, totalDiscovered, skippedCount *int64) error {
+	for _, file := range files {
+		if scan != nil {
+			scan.observe(file.relativePath)
+		}
+		if existingHash, exists := existingHashes[file.relativePath]; exists && existingHash == file.hash {
+			atomic.AddInt64(skippedCount, 1)
+			continue
+		}
+		file.queueBytes = 0 // content is already retained by the preflight slice
+		select {
+		case fileChan <- file:
+			atomic.AddInt64(totalDiscovered, 1)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
 
 // walkAndFilter walks the file tree and streams fileInfo structs that need
@@ -741,6 +1091,23 @@ func (idx *Indexer) walkAndFilter(
 	totalDiscovered *int64,
 	skippedCount *int64,
 ) error {
+	return idx.walkAndFilterStructural(ctx, rootPath, absRoot, paths, ignore, existingHashes, nil, nil, sourceBudget, sourceBufferBytes, fileChan, totalDiscovered, skippedCount)
+}
+
+func (idx *Indexer) walkAndFilterStructural(
+	ctx context.Context,
+	rootPath, absRoot string,
+	paths []string,
+	ignore *gitignore.GitIgnore,
+	existingHashes map[string]string,
+	structural *StructuralChunkSet,
+	scan *fullScanState,
+	sourceBudget sourceByteBudget,
+	sourceBufferBytes int64,
+	fileChan chan<- fileInfo,
+	totalDiscovered *int64,
+	skippedCount *int64,
+) error {
 	// If no paths specified, use root
 	if len(paths) == 0 {
 		paths = []string{absRoot}
@@ -754,7 +1121,10 @@ func (idx *Indexer) walkAndFilter(
 
 		err := filepath.WalkDir(absPath, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return nil // Skip files with errors
+				if scan != nil {
+					scan.invalidate()
+				}
+				return err
 			}
 
 			select {
@@ -765,7 +1135,10 @@ func (idx *Indexer) walkAndFilter(
 
 			relPath, err := filepath.Rel(absRoot, p)
 			if err != nil {
-				relPath = p
+				if scan != nil {
+					scan.invalidate()
+				}
+				return err
 			}
 
 			if ignore.MatchesPath(relPath) {
@@ -779,13 +1152,22 @@ func (idx *Indexer) walkAndFilter(
 				return nil
 			}
 
-			info, err := d.Info()
+			info, skip, err := indexableFileInfo(p, d)
 			if err != nil {
+				if scan != nil {
+					scan.invalidate()
+				}
+				return err
+			}
+			if skip {
 				return nil
 			}
 
 			if info.Size() > idx.config.MaxFileSize {
 				return nil
+			}
+			if scan != nil {
+				scan.observe(relPath)
 			}
 
 			// Reserve before reading so a walker blocked behind the queue cannot
@@ -798,12 +1180,18 @@ func (idx *Indexer) walkAndFilter(
 
 			hash, content, err := hashFile(p)
 			if err != nil {
+				if scan != nil {
+					scan.invalidate()
+				}
 				sourceBudget.Release(reservedBytes)
-				return nil
+				return err
 			}
 
 			actualSize := int64(len(content))
 			if actualSize > idx.config.MaxFileSize {
+				if scan != nil {
+					scan.forget(relPath)
+				}
 				sourceBudget.Release(reservedBytes)
 				return nil
 			}
@@ -818,6 +1206,10 @@ func (idx *Indexer) walkAndFilter(
 				sourceBudget.Release(reservedBytes - actualBytes)
 			}
 			reservedBytes = actualBytes
+			sourceHash := hash
+			if structuralFile, ok := structuralFileForHash(structural, relPath, sourceHash); ok {
+				hash = structuralIndexHash(sourceHash, structuralFile)
+			}
 
 			// Incremental filter: skip unchanged files inline so the
 			// worker pool never sees them.
@@ -831,6 +1223,7 @@ func (idx *Indexer) walkAndFilter(
 				path:         p,
 				relativePath: relPath,
 				hash:         hash,
+				sourceHash:   sourceHash,
 				size:         actualSize,
 				content:      content,
 				queueBytes:   reservedBytes,
@@ -848,14 +1241,71 @@ func (idx *Indexer) walkAndFilter(
 		})
 
 		if err != nil && err != context.Canceled {
+			if scan != nil {
+				scan.invalidate()
+			}
 			return fmt.Errorf("walk %s: %w", path, err)
 		}
 		if err == context.Canceled {
+			if scan != nil {
+				scan.invalidate()
+			}
 			return err
 		}
 	}
 
 	return nil
+}
+
+// fullScanState tracks whether a root-wide traversal observed a complete
+// filesystem view. It is written only by the walker goroutine and read after
+// that goroutine reports completion through walkErrCh.
+type fullScanState struct {
+	seen     map[string]struct{}
+	complete bool
+}
+
+func newFullScanState() *fullScanState {
+	return &fullScanState{seen: make(map[string]struct{}), complete: true}
+}
+
+func (s *fullScanState) observe(path string) {
+	if s != nil {
+		s.seen[path] = struct{}{}
+	}
+}
+
+func (s *fullScanState) forget(path string) {
+	if s != nil {
+		delete(s.seen, path)
+	}
+}
+
+func (s *fullScanState) invalidate() {
+	if s != nil {
+		s.complete = false
+	}
+}
+
+func (idx *Indexer) pruneDeletedFiles(ctx context.Context, projectRoot string, existingHashes map[string]string, seen map[string]struct{}) (int, []error) {
+	stale := make([]string, 0)
+	for path := range existingHashes {
+		if _, exists := seen[path]; !exists {
+			stale = append(stale, path)
+		}
+	}
+	slices.Sort(stale)
+
+	deleted := 0
+	var errs []error
+	for _, path := range stale {
+		if _, err := idx.deleteFile(ctx, projectRoot, path); err != nil {
+			errs = append(errs, fmt.Errorf("prune deleted file %s: %w", path, err))
+			continue
+		}
+		deleted++
+	}
+	return deleted, errs
 }
 
 // hashFile calculates the SHA256 hash of a file and returns both the
@@ -872,14 +1322,19 @@ func hashFile(path string) (string, []byte, error) {
 
 // PendingChanges holds counts of files needing reindexing.
 type PendingChanges struct {
-	NewFiles      int
-	ModifiedFiles int
-	DeletedFiles  int
-	TotalPending  int
+	NewFiles      int `json:"new_files"`
+	ModifiedFiles int `json:"modified_files"`
+	DeletedFiles  int `json:"deleted_files"`
+	TotalPending  int `json:"total_pending"`
 }
 
 // GetPendingChanges scans the project and returns counts of files needing reindexing.
 func (idx *Indexer) GetPendingChanges(ctx context.Context, projectRoot string) (*PendingChanges, error) {
+	structuralConfig := idx.SnapshotStructuralChunkSource()
+	structural, _, err := idx.loadStructuralChunksWithSnapshot(ctx, projectRoot, structuralConfig)
+	if err != nil {
+		return nil, err
+	}
 	absPath, err := filepath.Abs(projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("abs path: %w", err)
@@ -898,8 +1353,16 @@ func (idx *Indexer) GetPendingChanges(ctx context.Context, projectRoot string) (
 		return nil, fmt.Errorf("build ignore matcher: %w", err)
 	}
 
-	// Collect current files from filesystem
-	currentFiles, err := idx.collectFiles(ctx, projectRoot, nil, ignoreMatcher)
+	// Collect current files from filesystem. Required mode uses the same strict
+	// preflight as indexing, so status never reports a local-chunker downgrade as
+	// an acceptable structural snapshot.
+	var currentFiles []fileInfo
+	if structuralConfig.required && structural != nil && len(structural.Files) > 0 {
+		currentFiles, err = idx.prepareRequiredStructuralFiles(ctx, projectRoot, nil, structural)
+	} else {
+		currentFiles, err = idx.collectFiles(ctx, projectRoot, nil, ignoreMatcher)
+		applyStructuralFileHashes(currentFiles, structural)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("collect files: %w", err)
 	}
@@ -951,6 +1414,11 @@ type DryRunPreview struct {
 // reindexing plus an estimated chunk count, without calling the embedding
 // provider.
 func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string) (*DryRunPreview, error) {
+	structuralConfig := idx.SnapshotStructuralChunkSource()
+	structural, _, err := idx.loadStructuralChunksWithSnapshot(ctx, projectRoot, structuralConfig)
+	if err != nil {
+		return nil, err
+	}
 	absPath, err := filepath.Abs(projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("abs path: %w", err)
@@ -968,8 +1436,15 @@ func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string) (*Dry
 		return nil, fmt.Errorf("build ignore matcher: %w", err)
 	}
 
-	// Collect current files from filesystem
-	currentFiles, err := idx.collectFiles(ctx, projectRoot, nil, ignoreMatcher)
+	// Collect current files from filesystem, with the same no-downgrade
+	// preflight used by a real required-mode index run.
+	var currentFiles []fileInfo
+	if structuralConfig.required && structural != nil && len(structural.Files) > 0 {
+		currentFiles, err = idx.prepareRequiredStructuralFiles(ctx, projectRoot, nil, structural)
+	} else {
+		currentFiles, err = idx.collectFiles(ctx, projectRoot, nil, ignoreMatcher)
+		applyStructuralFileHashes(currentFiles, structural)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("collect files: %w", err)
 	}
@@ -996,6 +1471,9 @@ func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string) (*Dry
 		// Estimate chunks for this file
 		if currentFile.content != nil && IsTextFile(currentFile.content) {
 			chunks := idx.chunker.ChunkFile(string(currentFile.content), currentFile.path)
+			if structuralFile, ok := structuralFileForHash(structural, relPath, currentFile.sourceHash); ok {
+				chunks = structuralFile.Chunks
+			}
 			preview.EstimatedChunks += len(chunks)
 		}
 	}
@@ -1012,18 +1490,73 @@ func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string) (*Dry
 	return preview, nil
 }
 
+func applyStructuralFileHashes(files []fileInfo, structural *StructuralChunkSet) {
+	for i := range files {
+		if structuralFile, ok := structuralFileForHash(structural, files[i].relativePath, files[i].sourceHash); ok {
+			files[i].hash = structuralIndexHash(files[i].sourceHash, structuralFile)
+		}
+	}
+}
+
 // ReindexAll forces reindexing of all files in the project.
-func (idx *Indexer) ReindexAll(ctx context.Context, projectRoot string) (*IndexResult, error) {
+func (idx *Indexer) ReindexAll(ctx context.Context, projectRoot string) (result *IndexResult, runErr error) {
+	startedAt := time.Now()
+	// Resolve the external snapshot before Reset so required mode can fail
+	// without destroying the last usable vecgrep index.
+	structuralConfig := idx.SnapshotStructuralChunkSource()
+	report := IndexRunReport{
+		AttemptID:            idx.indexRunAttemptID(),
+		ScopeComplete:        true,
+		ProjectRoot:          projectRoot,
+		StartedAt:            startedAt,
+		StructuralConfigured: structuralConfig.source != nil,
+		StructuralRequired:   structuralConfig.required,
+	}
+	defer func() {
+		report.FinishedAt = time.Now()
+		report.Result = result
+		report.Err = runErr
+		if runErr != nil && report.FailureStage == "" {
+			report.FailureStage = "index"
+		}
+		if err := idx.observeIndexRun(report); err != nil {
+			receiptErr := fmt.Errorf("record ingestion receipt: %w", err)
+			if result != nil {
+				result.Errors = append(result.Errors, receiptErr)
+			}
+			runErr = errors.Join(runErr, receiptErr)
+		}
+	}()
+	structural, warning, err := idx.loadStructuralChunksWithSnapshot(ctx, projectRoot, structuralConfig)
+	if err != nil {
+		report.FailureStage = "structural_load"
+		return nil, err
+	}
+	populateStructuralRunReport(&report, structural, warning)
+	var prepared *[]fileInfo
+	if structuralConfig.required && structural != nil && len(structural.Files) > 0 {
+		files, prepareErr := idx.prepareRequiredStructuralFiles(ctx, projectRoot, nil, structural)
+		if prepareErr != nil {
+			report.FailureStage = "structural_preflight"
+			return nil, prepareErr
+		}
+		prepared = &files
+	}
 	absPath, err := filepath.Abs(projectRoot)
 	if err != nil {
+		report.FailureStage = "project_root"
 		return nil, fmt.Errorf("abs path: %w", err)
 	}
 
 	// Delete all existing data for this project
 	if err := idx.db.Reset(ctx, absPath); err != nil {
+		report.FailureStage = "storage_reset"
 		return nil, fmt.Errorf("reset project: %w", err)
 	}
 
 	// Perform full index without redundant per-file deletion after Reset.
-	return idx.index(ctx, projectRoot, false)
+	if prepared != nil {
+		return idx.indexPrepared(ctx, projectRoot, false, structural, warning, prepared)
+	}
+	return idx.index(ctx, projectRoot, false, structural, warning)
 }

@@ -3,7 +3,8 @@ package index
 
 import (
 	"bufio"
-	"path/filepath"
+	"bytes"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -19,15 +20,33 @@ const (
 	ChunkTypeGeneric  ChunkType = "generic"
 )
 
+// ChunkOrigin identifies which ingestion path produced a chunk. It is kept in
+// memory for run receipts and is intentionally not part of the stored search
+// record: origin describes the ingestion attempt, not ranking semantics.
+type ChunkOrigin string
+
+const (
+	ChunkOriginLocal      ChunkOrigin = "local"
+	ChunkOriginStructural ChunkOrigin = "structural"
+	ChunkOriginGap        ChunkOrigin = "gap"
+)
+
 // Chunk represents a piece of code with its metadata.
 type Chunk struct {
-	Content    string
-	StartLine  int
-	EndLine    int
-	StartByte  int
-	EndByte    int
-	ChunkType  ChunkType
-	SymbolName string
+	// Content is the clean source stored in the index and returned as the
+	// search-result preview.
+	Content string
+	// EmbeddingContent optionally enriches Content for embedding only (for
+	// example, a symbol's docstring + signature + source). It is never stored
+	// as the preview. An empty value means use Content.
+	EmbeddingContent string
+	StartLine        int
+	EndLine          int
+	StartByte        int
+	EndByte          int
+	ChunkType        ChunkType
+	SymbolName       string
+	Origin           ChunkOrigin
 }
 
 // defaultMaxChunkChars is a hard upper bound on the bytes in any single chunk
@@ -93,6 +112,8 @@ func (c *Chunker) ChunkFile(content string, filename string) []Chunk {
 	chunks := c.semanticChunk(content, lang)
 	if len(chunks) == 0 {
 		chunks = c.lineBasedChunk(content)
+	} else {
+		chunks = c.withUncoveredSource(content, chunks)
 	}
 
 	// Final safety pass: neither chunker guarantees a hard size bound (a single
@@ -100,6 +121,122 @@ func (c *Chunker) ChunkFile(content string, filename string) []Chunk {
 	// a large unsplit block can slip through). Clamp every chunk so the embedder
 	// never receives oversized input it would silently truncate.
 	return c.enforceMaxChunkChars(chunks)
+}
+
+// withUncoveredSource adds generic chunks for every source region omitted by
+// a heuristic semantic parser. Parsers remain boundary hints: imports, package
+// docs, globals, and trailing code must never disappear merely because at
+// least one function or type was recognized.
+func (c *Chunker) withUncoveredSource(content string, semantic []Chunk) []Chunk {
+	lineStarts := []int{0}
+	for i := 0; i < len(content); i++ {
+		if content[i] == '\n' {
+			lineStarts = append(lineStarts, i+1)
+		}
+	}
+	covered := make([]bool, len(lineStarts))
+	for _, chunk := range semantic {
+		start := max(chunk.StartLine-1, 0)
+		end := min(chunk.EndLine-1, len(covered)-1)
+		for line := start; line <= end; line++ {
+			covered[line] = true
+		}
+	}
+
+	chunks := append([]Chunk(nil), semantic...)
+	for start := 0; start < len(covered); {
+		if covered[start] {
+			start++
+			continue
+		}
+		end := start
+		for end+1 < len(covered) && !covered[end+1] {
+			end++
+		}
+		startByte := lineStarts[start]
+		gapStartLine := start + 1
+		// Semantic extractors report line-bounded content without the newline
+		// that terminates their final line. Assign that separator to the
+		// following gap so the partition remains byte-for-byte lossless.
+		if start > 0 && covered[start-1] && startByte > 0 && content[startByte-1] == '\n' {
+			startByte--
+			gapStartLine--
+		}
+		endByte := len(content)
+		if end+1 < len(lineStarts) {
+			endByte = lineStarts[end+1]
+		}
+		if startByte < endByte {
+			piece := content[startByte:endByte]
+			endLine := gapStartLine + strings.Count(piece, "\n")
+			if strings.HasSuffix(piece, "\n") && endLine > gapStartLine {
+				endLine--
+			}
+			gap := Chunk{
+				Content:   piece,
+				StartLine: gapStartLine,
+				EndLine:   endLine,
+				StartByte: startByte,
+				EndByte:   endByte,
+				ChunkType: ChunkTypeGeneric,
+			}
+			maxBytes := min(c.config.ChunkSize, c.config.MaxChunkChars)
+			if maxBytes <= 0 {
+				maxBytes = defaultMaxChunkChars
+			}
+			chunks = append(chunks, splitByChars(gap, maxBytes)...)
+		}
+		start = end + 1
+	}
+
+	sort.SliceStable(chunks, func(i, j int) bool {
+		if chunks[i].StartLine != chunks[j].StartLine {
+			return chunks[i].StartLine < chunks[j].StartLine
+		}
+		return chunks[i].EndLine < chunks[j].EndLine
+	})
+	return coalesceWhitespaceOnlyChunks(chunks)
+}
+
+// coalesceWhitespaceOnlyChunks keeps the source partition lossless without
+// sending whitespace-only texts to the embedding provider. Interior and
+// trailing separators join the previous meaningful chunk; a leading separator
+// joins the first meaningful chunk. The final size guard may split the merged
+// chunk again, so this cannot bypass MaxChunkChars.
+func coalesceWhitespaceOnlyChunks(chunks []Chunk) []Chunk {
+	result := make([]Chunk, 0, len(chunks))
+	var leading *Chunk
+	for _, chunk := range chunks {
+		if strings.TrimSpace(chunk.Content) == "" {
+			if len(result) > 0 {
+				previous := &result[len(result)-1]
+				previous.Content += chunk.Content
+				previous.EndLine = max(previous.EndLine, chunk.EndLine)
+				previous.EndByte = max(previous.EndByte, chunk.EndByte)
+				continue
+			}
+			if leading == nil {
+				copy := chunk
+				leading = &copy
+			} else {
+				leading.Content += chunk.Content
+				leading.EndLine = max(leading.EndLine, chunk.EndLine)
+				leading.EndByte = max(leading.EndByte, chunk.EndByte)
+			}
+			continue
+		}
+		if leading != nil {
+			chunk.Content = leading.Content + chunk.Content
+			chunk.StartLine = min(leading.StartLine, chunk.StartLine)
+			chunk.StartByte = min(leading.StartByte, chunk.StartByte)
+			leading = nil
+		}
+		result = append(result, chunk)
+	}
+	if leading != nil {
+		result = append(result, *leading)
+	}
+	return result
 }
 
 // enforceMaxChunkChars splits any chunk whose content exceeds MaxChunkChars
@@ -585,100 +722,6 @@ func extractPythonSymbol(line, prefix string) string {
 	return name.String()
 }
 
-// Language represents a programming language.
-type Language string
-
-const (
-	LangGo         Language = "go"
-	LangPython     Language = "python"
-	LangJavaScript Language = "javascript"
-	LangTypeScript Language = "typescript"
-	LangRust       Language = "rust"
-	LangJava       Language = "java"
-	LangC          Language = "c"
-	LangCPP        Language = "cpp"
-	LangRuby       Language = "ruby"
-	LangPHP        Language = "php"
-	LangSwift      Language = "swift"
-	LangKotlin     Language = "kotlin"
-	LangShell      Language = "shell"
-	LangSQL        Language = "sql"
-	LangMarkdown   Language = "markdown"
-	LangJSON       Language = "json"
-	LangYAML       Language = "yaml"
-	LangTOML       Language = "toml"
-	LangHTML       Language = "html"
-	LangCSS        Language = "css"
-	LangUnknown    Language = "unknown"
-)
-
-// languageExtensions maps file extensions to languages.
-var languageExtensions = map[string]Language{
-	".go":    LangGo,
-	".py":    LangPython,
-	".pyw":   LangPython,
-	".js":    LangJavaScript,
-	".mjs":   LangJavaScript,
-	".cjs":   LangJavaScript,
-	".jsx":   LangJavaScript,
-	".ts":    LangTypeScript,
-	".tsx":   LangTypeScript,
-	".mts":   LangTypeScript,
-	".rs":    LangRust,
-	".java":  LangJava,
-	".c":     LangC,
-	".h":     LangC,
-	".cpp":   LangCPP,
-	".cc":    LangCPP,
-	".cxx":   LangCPP,
-	".hpp":   LangCPP,
-	".hxx":   LangCPP,
-	".rb":    LangRuby,
-	".php":   LangPHP,
-	".swift": LangSwift,
-	".kt":    LangKotlin,
-	".kts":   LangKotlin,
-	".sh":    LangShell,
-	".bash":  LangShell,
-	".zsh":   LangShell,
-	".fish":  LangShell,
-	".sql":   LangSQL,
-	".md":    LangMarkdown,
-	".json":  LangJSON,
-	".yaml":  LangYAML,
-	".yml":   LangYAML,
-	".toml":  LangTOML,
-	".html":  LangHTML,
-	".htm":   LangHTML,
-	".css":   LangCSS,
-	".scss":  LangCSS,
-	".sass":  LangCSS,
-	".less":  LangCSS,
-}
-
-// DetectLanguage detects the programming language from a filename.
-func DetectLanguage(filename string) Language {
-	ext := strings.ToLower(filepath.Ext(filename))
-	if lang, ok := languageExtensions[ext]; ok {
-		return lang
-	}
-
-	// Check for special filenames
-	base := strings.ToLower(filepath.Base(filename))
-	switch {
-	case base == "makefile" || base == "gnumakefile":
-		return LangShell
-	case base == "dockerfile" || strings.HasPrefix(base, "dockerfile."):
-		return LangShell
-	case base == "jenkinsfile":
-		return LangShell
-	case strings.HasSuffix(base, "rc") && !strings.Contains(base, "."):
-		return LangShell
-	}
-
-	return LangUnknown
-}
-
 // IsTextFile checks if content appears to be text (not binary).
 func IsTextFile(content []byte) bool {
 	if len(content) == 0 {
@@ -702,4 +745,11 @@ func IsTextFile(content []byte) bool {
 
 	// Check if valid UTF-8
 	return utf8.Valid(sample)
+}
+
+// isChunkEligibleContent is the shared cheap eligibility gate used by both
+// chunkFile and raw freshness. Binary, empty, and whitespace-only sources can
+// never leave a persisted chunk/file-hash record.
+func isChunkEligibleContent(content []byte) bool {
+	return IsTextFile(content) && len(bytes.TrimSpace(content)) > 0
 }

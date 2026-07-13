@@ -19,13 +19,14 @@ Use `--local` to create project-local state intentionally.
 ## Index
 
 ```bash
-vecgrep index [paths...] [--full] [--ignore pattern]
+vecgrep index [paths...] [--full] [--ignore pattern] [--structural-chunks mode]
 ```
 
 | Flag | Description |
 | --- | --- |
 | `--full` | Force a full re-index and ignore file hashes |
 | `--ignore` | Add an ignore pattern for this run |
+| `--structural-chunks` | Override codemap symbol chunks: `auto`, `off`, or `required` |
 | `-v`, `--verbose` | Print detailed progress |
 
 vecgrep writes `embedding_profile.json` next to `vectors.veclite`. If provider, model, dimensions, distance, or chunking profile changes, vector search and incremental indexing require a full rebuild.
@@ -60,7 +61,7 @@ alongside the hits so a consumer can distinguish "never indexed" from "indexed
 but nothing matched":
 
 ```json
-{ "index": { "indexed": true, "fresh": false, "chunks": 2126 }, "hits": [ ... ] }
+{ "schema_version": 1, "index": { "indexed": true, "fresh": false, "chunks": 2126 }, "hits": [ ... ] }
 ```
 
 Examples:
@@ -107,6 +108,15 @@ vecgrep delete internal/old_file.go
 vecgrep clean
 vecgrep reset --force
 ```
+
+`status --format json` includes a `freshness` proof. `fresh` means raw source
+hashes match, the latest ingestion receipt completed application postflight,
+and any structural snapshot still matches codemap's lightweight manifest.
+`stale` is confirmed drift; `unknown` is deliberately fail-closed evidence
+(for example a legacy index without raw hashes, an interrupted delete, a
+path-scoped indexing attempt, or a manifest mismatch). Run
+`vecgrep index --full` to rebuild trusted metadata when freshness is unknown;
+from MCP, call `vecgrep_index` with `force:true`.
 
 ## Memory
 

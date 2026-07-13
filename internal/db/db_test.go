@@ -657,3 +657,80 @@ func TestDeleteFileUsesCanonicalPathBeforeLegacyFallback(t *testing.T) {
 		t.Fatalf("legacy record remains after fallback deletion: got %d chunks", len(chunks))
 	}
 }
+
+func TestDeleteProjectFileDoesNotCrossProjectBoundary(t *testing.T) {
+	tmpDir := t.TempDir()
+	const dimensions = 16
+	database, err := Open("", dimensions, tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	for _, root := range []string{"/projects/alpha", "/projects/beta"} {
+		chunk := NewChunkRecord(root+"/main.go", "main.go", "hash-"+root, 10, "go", "package p", 1, 1, 0, 9, "generic", "", root)
+		if _, err := database.InsertChunk(chunk, make([]float32, dimensions)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if deleted, err := database.DeleteProjectFile(t.Context(), "/projects/alpha", "main.go"); err != nil {
+		t.Fatal(err)
+	} else if deleted != 1 {
+		t.Fatalf("deleted %d chunks, want 1", deleted)
+	}
+	alpha, _ := database.GetFileHashes("/projects/alpha")
+	beta, _ := database.GetFileHashes("/projects/beta")
+	if len(alpha) != 0 {
+		t.Fatalf("alpha hashes remain: %v", alpha)
+	}
+	if len(beta) != 1 || beta["main.go"] == "" {
+		t.Fatalf("beta was affected: %v", beta)
+	}
+}
+
+func TestChunkIdentitySeparatesPartsAndProjects(t *testing.T) {
+	tmpDir := t.TempDir()
+	const dimensions = 8
+	database, err := Open("", dimensions, tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	base := NewChunkRecord("/alpha/one.go", "one.go", "hash", 20, "go", "first", 1, 1, 0, 0, "function", "Long", "/alpha")
+	second := base
+	second.Content = "second"
+	second.ChunkIndex = 1
+	otherProject := base
+	otherProject.FilePath = "/beta/one.go"
+	otherProject.ProjectRoot = "/beta"
+	if _, err := database.InsertChunkBatch([]ChunkRecord{base, second, otherProject}, [][]float32{
+		make([]float32, dimensions), make([]float32, dimensions), make([]float32, dimensions),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	records := database.backend.collection().All()
+	keys := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		key := getStringPayload(record.Payload, "chunk_key")
+		if _, duplicate := keys[key]; duplicate {
+			t.Fatalf("duplicate chunk key %q", key)
+		}
+		keys[key] = struct{}{}
+	}
+	if len(keys) != 3 {
+		t.Fatalf("chunk keys = %v", keys)
+	}
+
+	base.Content = "updated"
+	if _, isNew, err := database.UpsertChunk(base, make([]float32, dimensions)); err != nil {
+		t.Fatal(err)
+	} else if isNew {
+		t.Fatal("upsert inserted a duplicate first part")
+	}
+	if got := database.backend.collection().Count(); got != 3 {
+		t.Fatalf("chunk count after upsert = %d, want 3", got)
+	}
+}

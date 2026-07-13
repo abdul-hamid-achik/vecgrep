@@ -238,6 +238,9 @@ type CodemapConfig struct {
 	// score when re-ranking hybrid search results (0-1). 0 disables
 	// re-ranking. Default 0.15.
 	StructuralWeight float32 `mapstructure:"structural_weight" yaml:"structural_weight,omitempty"`
+	// StructuralChunks controls symbol-bounded indexing from codemap's public
+	// export contract: auto (best-effort with fallback), off, or required.
+	StructuralChunks string `mapstructure:"structural_chunks" yaml:"structural_chunks,omitempty"`
 	// ImpactDepth is the transitive traversal depth for codemap impact
 	// (blast-radius) queries. 0 means use codemap's default (typically 3).
 	// Higher values find more affected files at the cost of a larger scope.
@@ -317,6 +320,9 @@ func DefaultConfig() *Config {
 			ChunkOverlap: 64,
 			IgnorePatterns: []string{
 				".git/**",
+				// Local-mode indexes live inside the project. Never index the
+				// database/config files vecgrep creates while it is walking.
+				".vecgrep/**",
 				"node_modules/**",
 				"vendor/**",
 				"*.min.js",
@@ -346,6 +352,9 @@ func DefaultConfig() *Config {
 				EfConstruction: DefaultVecLiteEfConstruction,
 				EfSearch:       DefaultVecLiteEfSearch,
 			},
+		},
+		Codemap: CodemapConfig{
+			StructuralChunks: "auto",
 		},
 		Daemon: DaemonConfig{
 			IdleTimeout:      DefaultDaemonIdleTimeout,

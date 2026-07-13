@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/abdul-hamid-achik/vecgrep/schemas/vecgrep.search.v1.schema.json",
+  "title": "vecgrep search envelope v1",
+  "type": "object",
+  "required": ["schema_version", "index", "hits"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "index": {
+      "type": "object",
+      "required": ["indexed", "fresh", "chunks"],
+      "properties": {
+        "indexed": { "type": "boolean" },
+        "fresh": { "type": "boolean" },
+        "chunks": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "hits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "chunk_id", "file_id", "file_path", "relative_path", "content",
+          "start_line", "end_line", "chunk_type", "language", "distance", "score"
+        ],
+        "properties": {
+          "chunk_id": { "type": "integer" },
+          "file_id": { "type": "integer" },
+          "file_path": { "type": "string" },
+          "relative_path": { "type": "string" },
+          "content": { "type": "string" },
+          "start_line": { "type": "integer", "minimum": 0 },
+          "end_line": { "type": "integer", "minimum": 0 },
+          "chunk_type": { "type": "string" },
+          "symbol_name": { "type": "string" },
+          "language": { "type": "string" },
+          "distance": { "type": "number" },
+          "score": { "type": "number" },
+          "structural_score": { "type": "number" },
+          "reranked": { "type": "boolean" }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

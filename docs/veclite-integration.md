@@ -96,13 +96,13 @@ vecgrep persists and validates an embedding profile guard before indexing and ve
 ```json
 {
   "schema_version": 1,
-  "profile_id": "ollama:nomic-embed-text:768:cosine:code-chunker-v1",
+  "profile_id": "ollama:nomic-embed-text:768:cosine:code-chunker-v2-lossless",
   "provider": "ollama",
   "model": "nomic-embed-text",
   "dimensions": 768,
   "distance": "cosine",
   "modality": "text",
-  "preprocessor": "code-chunker-v1"
+  "preprocessor": "code-chunker-v2-lossless"
 }
 ```
 
