@@ -328,8 +328,14 @@ issues, and feature requests are welcome.
 <div class="final-cta" markdown="1">
 
 ```bash
+# Homebrew (recommended)
+brew install abdul-hamid-achik/tap/vecgrep
+
+# Or build from source
 git clone https://github.com/abdul-hamid-achik/vecgrep.git
 cd vecgrep && task build
+
+# Then index and search
 cd /path/to/your/project
 vecgrep init && vecgrep index
 vecgrep search "what you're looking for"

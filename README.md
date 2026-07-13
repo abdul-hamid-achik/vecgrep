@@ -26,12 +26,11 @@ vecgrep indexes your codebase and enables natural language search using vector e
 
 ## Installation
 
-### Prerequisites
+### Homebrew (recommended)
 
-- Go 1.25+
-- [Ollama](https://ollama.ai) with an embedding model (default: `nomic-embed-text`)
-- [Bun](https://bun.sh) for the docs site
-- [Task](https://taskfile.dev) (optional, for development)
+```bash
+brew install abdul-hamid-achik/tap/vecgrep
+```
 
 ### From Source
 

@@ -1,18 +1,24 @@
 # Quick Start
 
-Use this guide to build vecgrep, register a project, index it, and run your first search.
+Use this guide to install vecgrep, register a project, index it, and run your first search.
 
 ## Prerequisites
 
-- Go 1.25 or newer
-- [Task](https://taskfile.dev) for project commands
 - [Ollama](https://ollama.ai) with `nomic-embed-text`
 
 ```bash
 ollama pull nomic-embed-text
 ```
 
-## Build vecgrep
+## Install vecgrep
+
+### Homebrew (recommended)
+
+```bash
+brew install abdul-hamid-achik/tap/vecgrep
+```
+
+### From Source
 
 ```bash
 git clone https://github.com/abdul-hamid-achik/vecgrep.git
