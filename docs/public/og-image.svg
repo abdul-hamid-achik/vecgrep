@@ -1,0 +1,64 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E293B"/>
+    </linearGradient>
+    <radialGradient id="glow-teal" cx="0.3" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="rgba(20,184,166,0.25)"/>
+      <stop offset="100%" stop-color="rgba(20,184,166,0)"/>
+    </radialGradient>
+    <radialGradient id="glow-blue" cx="0.8" cy="0.3" r="0.4">
+      <stop offset="0%" stop-color="rgba(37,99,235,0.18)"/>
+      <stop offset="100%" stop-color="rgba(37,99,235,0)"/>
+    </radialGradient>
+    <radialGradient id="glow-purple" cx="0.9" cy="0.9" r="0.35">
+      <stop offset="0%" stop-color="rgba(124,58,237,0.12)"/>
+      <stop offset="100%" stop-color="rgba(124,58,237,0)"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg-grad)"/>
+  <rect width="1200" height="630" fill="url(#glow-teal)"/>
+  <rect width="1200" height="630" fill="url(#glow-blue)"/>
+  <rect width="1200" height="630" fill="url(#glow-purple)"/>
+
+  <!-- Logo mark (scaled up, positioned left) -->
+  <g transform="translate(80, 200) scale(2)">
+    <rect x="12" y="12" width="104" height="104" rx="24" fill="#0F172A" stroke="rgba(45,212,191,0.3)" stroke-width="1"/>
+    <path d="M34 42H78C87.9411 42 96 50.0589 96 60C96 69.9411 87.9411 78 78 78H67" stroke="#2DD4BF" stroke-width="10" stroke-linecap="round"/>
+    <path d="M56 50L36 64L56 78" stroke="#60A5FA" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="82" cy="86" r="8" fill="#A78BFA"/>
+  </g>
+
+  <!-- App name -->
+  <text x="360" y="270" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="72" font-weight="800" fill="#FFFFFF" letter-spacing="-2">vecgrep</text>
+
+  <!-- Tagline -->
+  <text x="362" y="320" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="28" font-weight="400" fill="#94A3B8">Local-first semantic code search</text>
+
+  <!-- Badges -->
+  <g transform="translate(360, 370)">
+    <!-- Badge 1: Vector Embeddings -->
+    <rect x="0" y="0" width="200" height="42" rx="21" fill="rgba(20,184,166,0.15)" stroke="#14B8A6" stroke-width="1.5"/>
+    <text x="100" y="27" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="#2DD4BF" text-anchor="middle">Vector Embeddings</text>
+
+    <!-- Badge 2: Hybrid Search -->
+    <rect x="220" y="0" width="170" height="42" rx="21" fill="rgba(37,99,235,0.15)" stroke="#2563EB" stroke-width="1.5"/>
+    <text x="305" y="27" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="#60A5FA" text-anchor="middle">Hybrid Search</text>
+
+    <!-- Badge 3: MCP Server -->
+    <rect x="410" y="0" width="150" height="42" rx="21" fill="rgba(124,58,237,0.15)" stroke="#7C3AED" stroke-width="1.5"/>
+    <text x="485" y="27" font-family="Inter, sans-serif" font-size="16" font-weight="600" fill="#A78BFA" text-anchor="middle">MCP Server</text>
+  </g>
+
+  <!-- Terminal hint at bottom -->
+  <g transform="translate(80, 480)">
+    <rect x="0" y="0" width="560" height="36" rx="8" fill="rgba(15,23,42,0.8)" stroke="rgba(45,212,191,0.2)" stroke-width="1"/>
+    <text x="16" y="24" font-family="'SFMono-Regular', Consolas, monospace" font-size="15" fill="#2DD4BF">$ vecgrep search "error handling in HTTP middleware"</text>
+  </g>
+
+  <!-- GitHub URL -->
+  <text x="1120" y="600" font-family="Inter, sans-serif" font-size="16" font-weight="500" fill="#64748B" text-anchor="end">github.com/abdul-hamid-achik/vecgrep</text>
+</svg>

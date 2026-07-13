@@ -9,6 +9,13 @@
   --vp-home-hero-image-filter: blur(48px);
   --vp-font-family-base: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --vp-font-family-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+
+  /* Custom design tokens */
+  --vecgrep-glow: 0 0 40px rgba(20, 184, 166, 0.15);
+  --vecgrep-card-border: 1px solid var(--vp-c-divider);
+  --vecgrep-accent-blue: #2563eb;
+  --vecgrep-accent-purple: #7c3aed;
+  --vecgrep-accent-teal: #14b8a6;
 }
 
 .dark {
@@ -18,10 +25,448 @@
   --vp-c-brand-soft: rgba(45, 212, 191, 0.16);
 }
 
+/* ── Feature cards ── */
 .VPHome .VPFeature {
+  border-radius: 12px;
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+
+.VPHome .VPFeature:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--vecgrep-glow);
+  border-color: var(--vp-c-brand-3);
+}
+
+.VPHome .VPFeature .icon {
+  transition: transform 0.3s ease;
+}
+
+.VPHome .VPFeature:hover .icon {
+  transform: scale(1.15);
+}
+
+/* ── Hero animations ── */
+.VPHome .VPHero .VPImage {
+  animation: vecgrep-float 6s ease-in-out infinite;
+}
+
+@keyframes vecgrep-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-12px); }
+}
+
+.VPHome .VPHero .VPImage img {
+  filter: drop-shadow(0 0 24px rgba(20, 184, 166, 0.3));
+}
+
+/* ── Home custom sections ── */
+.vp-home-custom {
+  max-width: 1152px;
+  margin: 0 auto;
+  padding: 0 24px 96px;
+}
+
+.vp-home-custom h2 {
+  border-top: 1px solid var(--vp-c-divider);
+  margin-top: 80px;
+  padding-top: 32px;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-align: center;
+}
+
+/* Section heading gradient underline */
+.vp-home-custom h2::after {
+  content: '';
+  display: block;
+  width: 60px;
+  height: 3px;
+  margin: 12px auto 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--vecgrep-accent-teal), var(--vecgrep-accent-blue), var(--vecgrep-accent-purple));
+}
+
+/* ── Stats banner ── */
+.stats-banner {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  margin: 64px 0 0;
+  padding: 24px 16px;
+  background: var(--vp-c-bg-soft);
+  border-radius: 14px;
+  border: 1px solid var(--vp-c-divider);
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1 1 160px;
+  min-width: 140px;
+  padding: 8px 12px;
+  position: relative;
+}
+
+.stat-item + .stat-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 20%;
+  bottom: 20%;
+  width: 1px;
+  background: var(--vp-c-divider);
+}
+
+.stat-icon {
+  font-size: 24px;
+  margin-bottom: 4px;
+}
+
+.stat-num {
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--vp-c-brand-1);
+  letter-spacing: -0.02em;
+}
+
+.stat-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--vp-c-text-2);
+  margin-top: 6px;
+}
+
+/* ── How it works ── */
+.how-it-works {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  margin: 32px 0;
+}
+
+.how-it-works .step {
+  padding: 28px 24px;
+  border-radius: 12px;
+  border: var(--vecgrep-card-border);
+  background: var(--vp-c-bg-soft);
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+  position: relative;
+}
+
+.how-it-works .step:hover {
+  border-color: var(--vp-c-brand-3);
+  box-shadow: var(--vecgrep-glow);
+  transform: translateY(-3px);
+}
+
+.how-it-works .step h3 {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 12px;
+  padding: 0;
+  border: none;
+  color: var(--vp-c-brand-1);
+}
+
+.how-it-works .step h3::before {
+  content: attr(data-step);
+}
+
+/* Step number badges */
+.how-it-works .step::before {
+  position: absolute;
+  top: -14px;
+  left: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--vecgrep-accent-teal), var(--vecgrep-accent-blue));
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.how-it-works .step:nth-child(1)::before { content: "1"; }
+.how-it-works .step:nth-child(2)::before { content: "2"; }
+.how-it-works .step:nth-child(3)::before { content: "3"; }
+
+.how-it-works .step pre {
+  margin: 0 0 12px;
+  font-size: 13px;
   border-radius: 8px;
 }
 
+/* ── Terminal demo ── */
+.terminal-demo div[class*="language-"],
+.terminal-demo pre {
+  border-radius: 12px;
+  border: 1px solid var(--vp-c-divider);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+}
+
+.dark .terminal-demo div[class*="language-"],
+.dark .terminal-demo pre {
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* ── Why vecgrep ── */
+.why-vecgrep {
+  margin: 32px 0;
+}
+
+.why-vecgrep h3 {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 32px 0 12px;
+  padding: 0;
+  border: none;
+  color: var(--vp-c-text-1);
+}
+
+.why-vecgrep h3:first-child {
+  margin-top: 0;
+}
+
+.why-vecgrep p {
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--vp-c-text-2);
+}
+
+.why-vecgrep h3::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 10px;
+  vertical-align: middle;
+  background: var(--vp-c-brand-3);
+}
+
+/* ── Comparison table ── */
+.comparison-table {
+  overflow-x: auto;
+  margin: 32px 0;
+}
+
+.comparison-table table {
+  display: table;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--vp-c-divider);
+}
+
+.comparison-table th {
+  background: var(--vp-c-bg-soft);
+  font-weight: 700;
+  padding: 14px 20px;
+  text-align: left;
+  font-size: 15px;
+}
+
+.comparison-table th:first-child {
+  width: 40%;
+}
+
+.comparison-table td {
+  padding: 12px 20px;
+  font-size: 14px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.comparison-table td:nth-child(3) {
+  color: var(--vp-c-brand-1);
+  font-weight: 600;
+}
+
+.comparison-table tr:hover td {
+  background: var(--vp-c-brand-soft);
+}
+
+/* ── MCP CTA ── */
+.mcp-cta {
+  padding: 32px 28px;
+  border-radius: 16px;
+  border: 1px solid var(--vp-c-brand-3);
+  background: linear-gradient(135deg, var(--vp-c-brand-soft), transparent);
+  margin: 32px 0;
+}
+
+.mcp-cta p {
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.mcp-cta pre {
+  border-radius: 10px;
+  margin: 16px 0;
+}
+
+.mcp-cta strong {
+  color: var(--vp-c-brand-1);
+}
+
+/* ── Provider matrix ── */
+.provider-matrix {
+  overflow-x: auto;
+  margin: 32px 0;
+}
+
+.provider-matrix table {
+  display: table;
+  width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--vp-c-divider);
+}
+
+.provider-matrix th {
+  background: var(--vp-c-bg-soft);
+  font-weight: 700;
+  padding: 14px 20px;
+  text-align: left;
+}
+
+.provider-matrix td {
+  padding: 12px 20px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.provider-matrix td:first-child {
+  font-weight: 600;
+}
+
+.provider-matrix tr:hover td {
+  background: var(--vp-c-brand-soft);
+}
+
+/* ── FAQ section ── */
+.faq-section {
+  margin: 32px 0;
+  max-width: 800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.faq-section details {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  margin-bottom: 12px;
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  background: var(--vp-c-bg-soft);
+}
+
+.faq-section details:hover {
+  border-color: var(--vp-c-brand-3);
+}
+
+.faq-section details[open] {
+  border-color: var(--vp-c-brand-3);
+  box-shadow: 0 0 20px rgba(20, 184, 166, 0.08);
+}
+
+.faq-section summary {
+  padding: 16px 20px;
+  cursor: pointer;
+  font-size: 15px;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  transition: background 0.2s ease;
+}
+
+.faq-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.faq-section summary::after {
+  content: '+';
+  font-size: 22px;
+  font-weight: 300;
+  color: var(--vp-c-brand-1);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+.faq-section details[open] summary::after {
+  content: '−';
+  transform: rotate(0deg);
+}
+
+.faq-section summary:hover {
+  background: var(--vp-c-brand-soft);
+}
+
+.faq-section details p {
+  padding: 0 20px 16px;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--vp-c-text-2);
+}
+
+/* ── Final CTA ── */
+.final-cta {
+  text-align: center;
+  padding: 48px 28px;
+  border-radius: 16px;
+  border: 1px solid var(--vp-c-divider);
+  background: linear-gradient(180deg, var(--vp-c-brand-soft), var(--vp-c-bg-soft));
+  margin: 32px 0 0;
+}
+
+.final-cta pre {
+  text-align: left;
+  max-width: 640px;
+  margin: 0 auto 24px;
+  border-radius: 12px;
+}
+
+.final-cta p:last-of-type {
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+  font-weight: 500;
+}
+
+.cta-button {
+  display: inline-block;
+  padding: 10px 24px;
+  margin: 0 6px 8px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  transition: all 0.2s ease;
+  border: 2px solid var(--vp-c-brand-3);
+  color: var(--vp-c-brand-1);
+  background: transparent;
+  text-decoration: none !important;
+}
+
+.cta-button:hover {
+  background: var(--vp-c-brand-3);
+  color: #fff !important;
+  transform: translateY(-2px);
+  box-shadow: var(--vecgrep-glow);
+}
+
+/* ── Doc pages ── */
 .VPDoc h2 {
   border-top: 1px solid var(--vp-c-divider);
   margin-top: 40px;
@@ -40,4 +485,68 @@
 
 .vp-doc .custom-block {
   border-radius: 8px;
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .how-it-works {
+    grid-template-columns: 1fr;
+  }
+
+  .vp-home-custom h2 {
+    font-size: 24px;
+  }
+
+  .stats-banner {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .stat-item {
+    flex: 1 1 auto;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 12px;
+    min-width: auto;
+    padding: 8px 16px;
+  }
+
+  .stat-item + .stat-item::before {
+    display: none;
+  }
+
+  .stat-num {
+    font-size: 24px;
+  }
+
+  .stat-icon {
+    font-size: 20px;
+  }
+
+  .mcp-cta,
+  .final-cta {
+    padding: 24px 16px;
+  }
+
+  .faq-section summary {
+    font-size: 14px;
+    padding: 14px 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .vp-home-custom {
+    padding: 0 16px 48px;
+  }
+
+  .vp-home-custom h2 {
+    font-size: 22px;
+    margin-top: 56px;
+  }
+
+  .cta-button {
+    display: block;
+    margin: 0 auto 8px;
+    max-width: 280px;
+  }
 }
