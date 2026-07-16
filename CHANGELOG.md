@@ -7,9 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-07-15
+
 ### Fixed
+- **Hybrid-mode scores were raw Reciprocal Rank Fusion values, not similarities.** With RRF k=60
+  and 0.7/0.3 weights, the maximum reportable score was ~0.0164, so every hybrid result showed
+  0.01–0.02, tiny import-only chunks that top BM25 length normalization outranked substantive
+  code, and `min_score` above 0.02 silently wiped all results. Hybrid search now runs vector and
+  BM25 retrieval separately (3× over-fetch per modality) and fuses in vecgrep with calibrated
+  weighted score fusion: `0.7·clamp01(cosine) + 0.3·(bm25/maxBM25)·substanceFactor`, where chunks
+  under 200 chars have their keyword contribution damped to a 0.3 floor. Scores are now
+  discriminative (real-index spread 0.45–0.69 on near-exact matches) and `min_score` works.
+- Embedder failures in hybrid mode now degrade to keyword-only search **with an explicit
+  warning** carrying the provider error, rendered on every surface — CLI (stderr for machine
+  formats), MCP handlers, daemon RPC, and the CLI daemon fast-path, which previously dropped
+  warnings entirely. Strict `Search` still errors; semantic mode never silently degrades.
+
 - Resolve codemap from the project's fully resolved config in `NewSDKServer` when a project root is known up front. Previously `s.codemap` was built from the zero-value `SDKServerConfig.Codemap` (always `nil`), so `vecgrep serve` reported "Codemap integration: enabled / Status: codemap binary not found" regardless of whether codemap was installed, silently disabling structural re-ranking and impact-based search scoping. The up-front path now mirrors `activateProject`'s existing re-resolution.
 - Add `config.ResolveBinary` and route codemap binary lookup through it (instead of a bare `exec.LookPath`) in `codemapDetect` and `NewCodemapClient`. Falls back to common install directories (`/opt/homebrew/bin`, `$HOME/go/bin`, etc.) when `$PATH` is a minimal subprocess PATH, and stores the resolved absolute path so subsequent `exec.Command` calls don't re-fail a `$PATH` lookup.
+
+### Changed
+- Hybrid fusion ownership moved from veclite to vecgrep; `docs/veclite-integration.md` documents
+  the contract and rationale. `Score` semantics are documented in `internal/search`.
 
 ## [2.2.0] - 2026-06-21
 

@@ -1,6 +1,6 @@
 # VecLite Integration
 
-vecgrep uses VecLite as its local vector-search database. vecgrep owns codebase discovery, chunking, embedding generation, provider configuration, and user workflows. VecLite owns durable vector storage, metadata filtering, BM25, HNSW search, and hybrid result fusion.
+vecgrep uses VecLite as its local vector-search database. vecgrep owns codebase discovery, chunking, embedding generation, provider configuration, user workflows, and hybrid result fusion (weighted score fusion of cosine similarity and normalized BM25 in `internal/db/veclite_backend.go`, producing calibrated 0-1 scores — VecLite's built-in RRF hybrid fusion is intentionally not used because raw reciprocal-rank scores are bounded by ~1/61 and are not meaningful as user-facing relevance). VecLite owns durable vector storage, metadata filtering, BM25, and HNSW search.
 
 ## Current Storage Model
 

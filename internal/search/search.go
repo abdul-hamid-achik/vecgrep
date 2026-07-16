@@ -40,7 +40,11 @@ type Result struct {
 	SymbolName   string  `json:"symbol_name,omitempty"`
 	Language     string  `json:"language"`
 	Distance     float32 `json:"distance"`
-	Score        float32 `json:"score"` // 1 - distance (higher is better)
+	// Score is a 0-1 relevance value, higher is better. Semantic mode: cosine
+	// similarity. Hybrid mode: calibrated weighted fusion of cosine similarity
+	// and normalized BM25 (see db.VecLiteBackend.HybridSearch). Keyword mode:
+	// raw BM25 (unbounded).
+	Score float32 `json:"score"`
 
 	// StructuralScore is codemap's normalized fan-in hub score (0..1) when
 	// structural reranking ran; 0 when codemap was unavailable. Exposed so
@@ -106,8 +110,41 @@ func NewSearcher(database *db.DB, provider embed.Provider) *Searcher {
 	}
 }
 
+// SearchOutcome carries search results plus non-fatal diagnostics that must
+// reach the user, such as a degraded-mode warning when the embedding provider
+// failed at query time and results are keyword-only.
+type SearchOutcome struct {
+	Results []Result
+	// Warnings are human-readable notices about degraded behavior. Callers
+	// that present results MUST surface these — a silently degraded search is
+	// indistinguishable from a healthy one.
+	Warnings []string
+	// Mode is the search mode actually executed, which may differ from the
+	// requested mode when hybrid search degraded to keyword-only.
+	Mode SearchMode
+}
+
 // Search performs a search for the given query using the specified mode.
+// Embedding failures are fatal; use SearchWithOutcome to degrade hybrid
+// searches to keyword-only with an explicit warning instead.
 func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions) ([]Result, error) {
+	outcome, err := s.searchOutcome(ctx, query, opts, false)
+	if err != nil {
+		return nil, err
+	}
+	return outcome.Results, nil
+}
+
+// SearchWithOutcome performs a search like Search, but when the requested
+// mode is hybrid and the embedding provider fails at query time it degrades
+// to keyword-only search and reports the degradation as a warning instead of
+// failing the whole search. Semantic mode never degrades: the caller asked
+// for embeddings explicitly.
+func (s *Searcher) SearchWithOutcome(ctx context.Context, query string, opts SearchOptions) (*SearchOutcome, error) {
+	return s.searchOutcome(ctx, query, opts, true)
+}
+
+func (s *Searcher) searchOutcome(ctx context.Context, query string, opts SearchOptions, degradeOnEmbedError bool) (*SearchOutcome, error) {
 	if query == "" {
 		return nil, fmt.Errorf("query cannot be empty")
 	}
@@ -138,6 +175,8 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		ProjectRoot: opts.ProjectRoot,
 	}
 
+	outcome := &SearchOutcome{Mode: opts.Mode}
+
 	var searchResults []db.SearchResult
 	var err error
 
@@ -166,11 +205,24 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		// Hybrid search: combine vector + text
 		queryEmbedding, embedErr := embedQuery(ctx, s.provider, query)
 		if embedErr != nil {
-			return nil, fmt.Errorf("embed query: %w", embedErr)
-		}
-		searchResults, err = s.db.HybridSearch(queryEmbedding, query, opts.Limit, filterOpts, opts.VectorWeight)
-		if err != nil {
-			return nil, fmt.Errorf("hybrid search: %w", err)
+			if !degradeOnEmbedError {
+				return nil, fmt.Errorf("embed query: %w", embedErr)
+			}
+			// Degrade to keyword-only — but never silently. Keyword-only BM25
+			// scores rank differently (and are unbounded), so the caller must
+			// tell the user semantic ranking was skipped.
+			searchResults, err = s.db.TextSearch(query, opts.Limit, filterOpts)
+			if err != nil {
+				return nil, fmt.Errorf("embed query failed (%v) and keyword fallback failed: %w", embedErr, err)
+			}
+			outcome.Mode = SearchModeKeyword
+			outcome.Warnings = append(outcome.Warnings, fmt.Sprintf(
+				"embedding provider unavailable at query time (%v): results are keyword-only (BM25); semantic ranking was skipped", embedErr))
+		} else {
+			searchResults, err = s.db.HybridSearch(queryEmbedding, query, opts.Limit, filterOpts, opts.VectorWeight)
+			if err != nil {
+				return nil, fmt.Errorf("hybrid search: %w", err)
+			}
 		}
 	}
 
@@ -191,7 +243,8 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		}
 	}
 
-	return results, nil
+	outcome.Results = results
+	return outcome, nil
 }
 
 // SearchWithExplain performs a search and returns diagnostic information.

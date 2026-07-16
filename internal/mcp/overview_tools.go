@@ -314,9 +314,10 @@ func (s *SDKServer) handleBatchSearch(ctx context.Context, req *sdkmcp.CallToolR
 
 	// Search for each query in parallel
 	type queryResult struct {
-		query   string
-		results []search.Result
-		err     error
+		query    string
+		results  []search.Result
+		warnings []string
+		err      error
 	}
 
 	resultsChan := make(chan queryResult, len(input.Queries))
@@ -335,8 +336,12 @@ func (s *SDKServer) handleBatchSearch(ctx context.Context, req *sdkmcp.CallToolR
 				Mode:        search.SearchModeHybrid,
 			}
 
-			results, err := state.searcher.Search(ctx, q, opts)
-			resultsChan <- queryResult{query: q, results: results, err: err}
+			outcome, err := state.searcher.SearchWithOutcome(ctx, q, opts)
+			if err != nil {
+				resultsChan <- queryResult{query: q, err: err}
+				return
+			}
+			resultsChan <- queryResult{query: q, results: outcome.Results, warnings: outcome.Warnings}
 		}(query)
 	}
 
@@ -345,16 +350,30 @@ func (s *SDKServer) handleBatchSearch(ctx context.Context, req *sdkmcp.CallToolR
 
 	// Collect results in order
 	allResults := make(map[string][]search.Result)
+	warningSet := make(map[string]bool)
+	var warnings []string
 	for qr := range resultsChan {
 		if qr.err != nil {
 			continue
 		}
 		allResults[qr.query] = qr.results
+		for _, w := range qr.warnings {
+			if !warningSet[w] {
+				warningSet[w] = true
+				warnings = append(warnings, w)
+			}
+		}
 	}
 
 	// Format output
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# Batch Search Results (%d queries)\n\n", len(input.Queries))
+
+	// Surface degraded-mode diagnostics (e.g. embedder unavailable →
+	// keyword-only results) so a fallback is never silent.
+	for _, w := range warnings {
+		fmt.Fprintf(&sb, "> **Warning:** %s\n\n", w)
+	}
 
 	seen := make(map[int64]bool) // For deduplication
 	totalResults := 0

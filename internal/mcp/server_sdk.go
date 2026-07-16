@@ -889,11 +889,12 @@ func checkEmbeddingProvider(ctx context.Context, p embed.Provider) *sdkmcp.CallT
 
 // formatDaemonSearchResult formats the JSON result from a daemon.search
 // socket call into the same text format as the direct search path. The
-// result JSON has the shape {"results": [...], "mode": "..."}.
+// result JSON has the shape {"results": [...], "mode": "...", "warnings": [...]}.
 func formatDaemonSearchResult(raw json.RawMessage, scopeNote string) string {
 	var resp struct {
-		Results []search.Result `json:"results"`
-		Mode    string          `json:"mode"`
+		Results  []search.Result `json:"results"`
+		Mode     string          `json:"mode"`
+		Warnings []string        `json:"warnings"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return fmt.Sprintf("daemon search result parse error: %v", err)
@@ -903,6 +904,9 @@ func formatDaemonSearchResult(raw json.RawMessage, scopeNote string) string {
 	if scopeNote != "" {
 		sb.WriteString(scopeNote)
 		sb.WriteString("\n\n")
+	}
+	for _, w := range resp.Warnings {
+		fmt.Fprintf(&sb, "> **Warning:** %s\n\n", w)
 	}
 	formatSearchResults(&sb, resp.Results)
 	return sb.String()
@@ -1115,12 +1119,19 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		formatSearchResults(&sb, results)
 		state.annotateSearchHits(ctx, results, input.Query)
 	} else {
-		results, err := readState.searcher.Search(ctx, input.Query, opts)
+		outcome, err := readState.searcher.SearchWithOutcome(ctx, input.Query, opts)
 		if err != nil {
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
 				IsError: true,
 			}, nil, nil
+		}
+		results := outcome.Results
+
+		// Surface degraded-mode diagnostics (e.g. embedder unavailable →
+		// keyword-only results) so a fallback is never silent.
+		for _, w := range outcome.Warnings {
+			fmt.Fprintf(&sb, "> **Warning:** %s\n\n", w)
 		}
 
 		// Expand context lines if requested
@@ -1959,12 +1970,18 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 		sb.WriteString("\n\n")
 	}
 
-	results, err := state.searcher.Search(ctx, input.Query, opts)
+	outcome, err := state.searcher.SearchWithOutcome(ctx, input.Query, opts)
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
 			IsError: true,
 		}, nil, nil
+	}
+	results := outcome.Results
+
+	// Surface degraded-mode diagnostics so a fallback is never silent.
+	for _, w := range outcome.Warnings {
+		fmt.Fprintf(&sb, "> **Warning:** %s\n\n", w)
 	}
 
 	// Expand context lines if requested

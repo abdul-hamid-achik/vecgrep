@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1636,34 +1637,154 @@ func (b *VecLiteBackend) TextSearch(query string, limit int, opts FilterOptions)
 	return b.resultsToSearchResults(results), nil
 }
 
-// HybridSearch combines vector search with VecLite BM25 text search.
-// vectorWeight controls the influence of vector similarity (0-1).
+// Hybrid fusion tuning. The fused score is a calibrated 0-1 relevance value:
+// vectorWeight * cosine similarity + textWeight * normalized BM25. We fuse
+// here instead of delegating to veclite's HybridSearch because veclite fuses
+// with Reciprocal Rank Fusion, whose scores are bounded by 1/(k+1) (~0.016
+// with k=60) — meaningless when surfaced to users as a similarity, and
+// rank-only fusion discards how close a vector match actually was.
+const (
+	// hybridFetchMultiplier over-fetches from each modality so fusion sees
+	// candidates that only one ranker surfaced.
+	hybridFetchMultiplier = 3
+	// hybridMinFetch is the floor for per-modality candidate fetch.
+	hybridMinFetch = 30
+	// substantiveChunkChars is the trimmed content length at which a chunk
+	// receives full keyword weight. BM25 length normalization makes trivial
+	// chunks (a bare `import { z } from "zod"` line, a lone markdown header)
+	// near-unbeatable keyword matches for queries mentioning their tokens, so
+	// smaller chunks have their keyword contribution scaled down linearly.
+	substantiveChunkChars = 200
+	// minSubstanceFactor is the keyword-weight floor for tiny chunks, so an
+	// exact keyword hit in a small chunk can still surface (just not above
+	// substantive bodies with comparable relevance).
+	minSubstanceFactor = 0.3
+)
+
+// HybridSearch combines vector search with VecLite BM25 text search using
+// weighted score fusion. vectorWeight controls the influence of vector
+// similarity (0-1); the remainder is the keyword (BM25) weight. Returned
+// scores are calibrated to 0-1: a result that tops both rankers approaches
+// 1.0, a keyword-only match is capped by the text weight, and a vector-only
+// match is capped by the vector weight.
 func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string, limit int, opts FilterOptions, vectorWeight float32) ([]SearchResult, error) {
 	if len(queryEmbedding) != b.dimensions {
 		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), b.dimensions)
 	}
+	if vectorWeight < 0 {
+		vectorWeight = 0
+	}
+	if vectorWeight > 1 {
+		vectorWeight = 1
+	}
+	textWeight := 1 - vectorWeight
 
 	filters := b.buildNativeFilters(opts)
 
-	textWeight := 1.0 - float64(vectorWeight)
-	if textWeight < 0 {
-		textWeight = 0
+	fetchK := limit * hybridFetchMultiplier
+	if fetchK < hybridMinFetch {
+		fetchK = hybridMinFetch
 	}
 
-	searchOpts := append(b.searchOptions(limit),
-		veclite.WithVectorWeight(float64(vectorWeight)),
-		veclite.WithTextWeight(textWeight),
-	)
+	vectorOpts := b.searchOptions(fetchK)
 	if len(filters) > 0 {
-		searchOpts = append(searchOpts, veclite.WithFilters(filters...))
+		vectorOpts = append(vectorOpts, veclite.WithFilters(filters...))
 	}
-
-	results, err := b.collection().HybridSearch(queryEmbedding, textQuery, searchOpts...)
+	vectorResults, err := b.collection().Search(queryEmbedding, vectorOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	return b.resultsToSearchResults(results), nil
+	textOpts := b.searchOptions(fetchK)
+	if len(filters) > 0 {
+		textOpts = append(textOpts, veclite.WithFilters(filters...))
+	}
+	textResults, err := b.collection().TextSearch(textQuery, textOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	fused := fuseWeightedScores(vectorResults, textResults, float64(vectorWeight), float64(textWeight))
+	if len(fused) > limit {
+		fused = fused[:limit]
+	}
+
+	return b.resultsToSearchResults(fused), nil
+}
+
+// fuseWeightedScores merges vector-similarity results (cosine, higher better)
+// and BM25 keyword results into a single 0-1 score:
+//
+//	score = vectorWeight*clamp01(cosine) + textWeight*(bm25/maxBM25)*substance
+//
+// A record present in only one modality contributes only that component. The
+// substance factor down-weights the keyword component of trivially small
+// chunks (see substantiveChunkChars). Results are sorted by fused score
+// descending with record ID as a deterministic tie-break.
+func fuseWeightedScores(vectorResults, textResults []veclite.Result, vectorWeight, textWeight float64) []veclite.Result {
+	type fusedEntry struct {
+		record *veclite.Record
+		score  float64
+	}
+	entries := make(map[uint64]*fusedEntry, len(vectorResults)+len(textResults))
+
+	for _, r := range vectorResults {
+		sim := float64(r.Score)
+		if sim < 0 {
+			sim = 0
+		} else if sim > 1 {
+			sim = 1
+		}
+		entries[r.Record.ID] = &fusedEntry{record: r.Record, score: vectorWeight * sim}
+	}
+
+	var maxBM25 float64
+	for _, r := range textResults {
+		if s := float64(r.Score); s > maxBM25 {
+			maxBM25 = s
+		}
+	}
+	if maxBM25 > 0 {
+		for _, r := range textResults {
+			norm := float64(r.Score) / maxBM25
+			norm *= chunkSubstanceFactor(r.Record)
+			entry, ok := entries[r.Record.ID]
+			if !ok {
+				entry = &fusedEntry{record: r.Record}
+				entries[r.Record.ID] = entry
+			}
+			entry.score += textWeight * norm
+		}
+	}
+
+	fused := make([]veclite.Result, 0, len(entries))
+	for _, entry := range entries {
+		fused = append(fused, veclite.Result{Record: entry.record, Score: float32(entry.score)})
+	}
+	sort.Slice(fused, func(i, j int) bool {
+		if fused[i].Score != fused[j].Score {
+			return fused[i].Score > fused[j].Score
+		}
+		return fused[i].Record.ID < fused[j].Record.ID
+	})
+	return fused
+}
+
+// chunkSubstanceFactor scales the keyword contribution of a chunk by how
+// substantive its content is: 1.0 at substantiveChunkChars or more, ramping
+// linearly down to minSubstanceFactor for empty content. This keeps 1-line
+// import statements and bare headers from outranking real code bodies purely
+// on BM25 length normalization.
+func chunkSubstanceFactor(record *veclite.Record) float64 {
+	if record == nil {
+		return minSubstanceFactor
+	}
+	content := getStringPayload(record.Payload, "content")
+	n := len(strings.TrimSpace(content))
+	if n >= substantiveChunkChars {
+		return 1.0
+	}
+	return minSubstanceFactor + (1-minSubstanceFactor)*float64(n)/float64(substantiveChunkChars)
 }
 
 func (b *VecLiteBackend) resultsToSearchResults(results []veclite.Result) []SearchResult {

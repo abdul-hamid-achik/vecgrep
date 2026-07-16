@@ -1004,6 +1004,13 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("search failed: %w", err)
 	}
 
+	// Surface degraded-mode diagnostics (e.g. embedder unavailable →
+	// keyword-only results) so a fallback is never silent. Warnings go to
+	// stderr for machine formats so stdout stays a single JSON document.
+	for _, w := range resp.Warnings {
+		noteOut("Warning: %s\n", w)
+	}
+
 	if explain && resp.Diagnostics != nil {
 		// Print explanation. Routed to stderr for machine formats so stdout
 		// stays a single JSON document.
@@ -1181,8 +1188,9 @@ func tryDaemonSearch(
 
 	var resp struct {
 		Result struct {
-			Results []search.Result `json:"results"`
-			Mode    string          `json:"mode"`
+			Results  []search.Result `json:"results"`
+			Mode     string          `json:"mode"`
+			Warnings []string        `json:"warnings"`
 		} `json:"result,omitempty"`
 		Error *struct {
 			Code    int    `json:"code"`
@@ -1194,6 +1202,18 @@ func tryDaemonSearch(
 	}
 	if resp.Error != nil {
 		return false // let the fallback handle the real error
+	}
+
+	// Surface degraded-mode diagnostics (e.g. embedder unavailable →
+	// keyword-only results) so a daemon-served fallback is never silent.
+	// Warnings go to stderr for machine formats so stdout stays a single
+	// JSON document, matching the session search path.
+	for _, w := range resp.Result.Warnings {
+		if isMachineFormat(format) {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		} else {
+			fmt.Printf("Warning: %s\n", w)
+		}
 	}
 
 	printSearchResults(resp.Result.Results, format)

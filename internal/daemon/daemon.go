@@ -392,11 +392,15 @@ func (d *Daemon) handleSearch(ctx context.Context, req *jsonRPCRequest) jsonRPCR
 		return jsonRPCResponse{ID: req.ID, Error: rpcErr}
 	}
 	w.touchActivity()
-	results, mode, err := w.search(ctx, params)
+	results, mode, warnings, err := w.search(ctx, params)
 	if err != nil {
 		return errResp(req, -32603, fmt.Sprintf("search failed: %v", err))
 	}
-	return jsonRPCResponse{ID: req.ID, Result: map[string]any{"results": results, "mode": mode}}
+	result := map[string]any{"results": results, "mode": mode}
+	if len(warnings) > 0 {
+		result["warnings"] = warnings
+	}
+	return jsonRPCResponse{ID: req.ID, Result: result}
 }
 
 func (d *Daemon) handleStats(ctx context.Context, req *jsonRPCRequest) jsonRPCResponse {

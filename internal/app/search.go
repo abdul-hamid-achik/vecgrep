@@ -33,6 +33,10 @@ type SearchResponse struct {
 	Diagnostics *search.SearchExplanation
 	Mode        search.SearchMode
 	Duration    time.Duration
+	// Warnings carries degraded-mode diagnostics (e.g. the embedding provider
+	// failed at query time and results are keyword-only). Renderers must
+	// surface these so a fallback is never silent.
+	Warnings []string
 }
 
 type SimilarTargetKind string
@@ -111,14 +115,21 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (*SearchRespons
 	start := time.Now()
 
 	var (
-		results []search.Result
-		diag    *search.SearchExplanation
-		err     error
+		results  []search.Result
+		diag     *search.SearchExplanation
+		warnings []string
+		err      error
 	)
 	if req.Explain && mode != search.SearchModeKeyword {
 		results, diag, err = searcher.SearchWithExplain(ctx, req.Query, opts)
 	} else {
-		results, err = searcher.Search(ctx, req.Query, opts)
+		var outcome *search.SearchOutcome
+		outcome, err = searcher.SearchWithOutcome(ctx, req.Query, opts)
+		if outcome != nil {
+			results = outcome.Results
+			warnings = outcome.Warnings
+			mode = outcome.Mode
+		}
 		if req.Explain {
 			diag = &search.SearchExplanation{Mode: mode, Duration: time.Since(start)}
 		}
@@ -132,6 +143,7 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (*SearchRespons
 		Diagnostics: diag,
 		Mode:        mode,
 		Duration:    time.Since(start),
+		Warnings:    warnings,
 	}, nil
 }
 

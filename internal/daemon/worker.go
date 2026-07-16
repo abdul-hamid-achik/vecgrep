@@ -182,15 +182,15 @@ func (w *projectWorker) reindexSync(ctx context.Context, req app.IndexRequest) (
 }
 
 // search runs a search against the worker's warm session and returns the
-// results and the resolved mode string.
-func (w *projectWorker) search(ctx context.Context, params searchParams) (any, string, error) {
+// results, the resolved mode string, and any degraded-mode warnings.
+func (w *projectWorker) search(ctx context.Context, params searchParams) (any, string, []string, error) {
 	if !w.beginOperation() {
-		return nil, "", errWorkerClosing
+		return nil, "", nil, errWorkerClosing
 	}
 	defer w.endOperation()
 	mode := app.ParseSearchMode(params.Mode, w.cfg.Search.DefaultMode)
 	searcher := search.NewSearcher(w.session.DB, w.session.Provider)
-	results, err := searcher.Search(ctx, params.Query, search.SearchOptions{
+	outcome, err := searcher.SearchWithOutcome(ctx, params.Query, search.SearchOptions{
 		Limit:       params.Limit,
 		Language:    params.Language,
 		Languages:   params.Languages,
@@ -206,9 +206,9 @@ func (w *projectWorker) search(ctx context.Context, params searchParams) (any, s
 		Mode:        mode,
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	return results, string(mode), nil
+	return outcome.Results, string(outcome.Mode), outcome.Warnings, nil
 }
 
 // stats returns index statistics for the worker's project.
