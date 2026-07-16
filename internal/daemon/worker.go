@@ -191,19 +191,21 @@ func (w *projectWorker) search(ctx context.Context, params searchParams) (any, s
 	mode := app.ParseSearchMode(params.Mode, w.cfg.Search.DefaultMode)
 	searcher := search.NewSearcher(w.session.DB, w.session.Provider)
 	outcome, err := searcher.SearchWithOutcome(ctx, params.Query, search.SearchOptions{
-		Limit:       params.Limit,
-		Language:    params.Language,
-		Languages:   params.Languages,
-		ChunkType:   params.ChunkType,
-		ChunkTypes:  params.ChunkTypes,
-		FilePattern: params.FilePattern,
-		Directory:   params.Directory,
-		MinLine:     params.MinLine,
-		MaxLine:     params.MaxLine,
-		MinScore:    params.MinScore,
-		FilePaths:   params.FilePaths,
-		ProjectRoot: w.session.ProjectRoot,
-		Mode:        mode,
+		Limit:        params.Limit,
+		Language:     params.Language,
+		Languages:    params.Languages,
+		ChunkType:    params.ChunkType,
+		ChunkTypes:   params.ChunkTypes,
+		FilePattern:  params.FilePattern,
+		Directory:    params.Directory,
+		MinLine:      params.MinLine,
+		MaxLine:      params.MaxLine,
+		MinScore:     params.MinScore,
+		FilePaths:    params.FilePaths,
+		ProjectRoot:  w.session.ProjectRoot,
+		Mode:         mode,
+		VectorWeight: w.cfg.Search.VectorWeight,
+		TextWeight:   w.cfg.Search.TextWeight,
 	})
 	if err != nil {
 		return nil, "", nil, err

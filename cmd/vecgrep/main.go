@@ -90,10 +90,10 @@ Returns the most relevant code chunks ranked by similarity.
 
 Scores are 0-1 similarities in hybrid mode (calibrated cosine+BM25 fusion;
 good matches typically land around 0.45-0.69) and semantic mode (raw cosine).
-Keyword mode returns raw BM25 scores, which are unbounded. If the embedding
-provider is unreachable, hybrid search degrades to keyword-only with an
-explicit warning; degraded results carry raw BM25 scores, so a 0-1
---min-score threshold filters nothing after degradation.`,
+Keyword mode normalizes BM25 to 0-1 within each result set (top hit = 1.0),
+so --min-score applies in every mode. If the embedding provider is
+unreachable, hybrid search degrades to keyword-only with an explicit warning;
+degraded results carry the same normalized keyword scores.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runSearch,
 }
@@ -458,7 +458,7 @@ func init() {
 	searchCmd.Flags().Bool("explain", false, "show search diagnostics")
 	searchCmd.Flags().StringSlice("scope-files", nil, "restrict search to these relative paths (comma-separated)")
 	searchCmd.Flags().String("symbol", "", "scope search to a symbol's blast radius via codemap impact")
-	searchCmd.Flags().Float32("min-score", 0, "drop results with score below this threshold (0-1 in hybrid/semantic modes; keyword scores are raw BM25, where 0-1 thresholds are not meaningful)")
+	searchCmd.Flags().Float32("min-score", 0, "drop results with score below this threshold (0-1 in all modes; keyword-mode scores are BM25 normalized to 0-1 within each result set)")
 
 	// Serve command flags
 	serveCmd.Flags().Bool("mcp", false, "start MCP server (stdio)")

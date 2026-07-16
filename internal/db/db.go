@@ -156,9 +156,11 @@ func (db *DB) TextSearch(query string, limit int, opts FilterOptions) ([]SearchR
 }
 
 // HybridSearch combines vector search with text filtering.
-// vectorWeight controls the influence of vector similarity (0-1).
-func (db *DB) HybridSearch(queryEmbedding []float32, textQuery string, limit int, opts FilterOptions, vectorWeight float32) ([]SearchResult, error) {
-	return db.backend.HybridSearch(queryEmbedding, textQuery, limit, opts, vectorWeight)
+// vectorWeight controls the influence of vector similarity (0-1) and
+// textWeight the influence of keyword (BM25) matching; a textWeight <= 0
+// derives it as 1-vectorWeight (see VecLiteBackend.HybridSearch).
+func (db *DB) HybridSearch(queryEmbedding []float32, textQuery string, limit int, opts FilterOptions, vectorWeight, textWeight float32) ([]SearchResult, error) {
+	return db.backend.HybridSearch(queryEmbedding, textQuery, limit, opts, vectorWeight, textWeight)
 }
 
 // VecVersion returns the vector backend version info.

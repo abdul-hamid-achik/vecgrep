@@ -43,7 +43,8 @@ type Result struct {
 	// Score is a 0-1 relevance value, higher is better. Semantic mode: cosine
 	// similarity. Hybrid mode: calibrated weighted fusion of cosine similarity
 	// and normalized BM25 (see db.VecLiteBackend.HybridSearch). Keyword mode:
-	// raw BM25 (unbounded).
+	// BM25 normalized to 0-1 within the result set (top hit = 1.0); Distance
+	// keeps the raw BM25 value.
 	Score float32 `json:"score"`
 
 	// StructuralScore is codemap's normalized fan-in hub score (0..1) when
@@ -208,43 +209,68 @@ func (s *Searcher) searchOutcome(ctx context.Context, query string, opts SearchO
 			if !degradeOnEmbedError {
 				return nil, fmt.Errorf("embed query: %w", embedErr)
 			}
-			// Degrade to keyword-only — but never silently. Keyword-only BM25
-			// scores rank differently (and are unbounded), so the caller must
-			// tell the user semantic ranking was skipped.
+			// Degrade to keyword-only — but never silently. Keyword ranking
+			// differs from hybrid ranking, so the caller must tell the user
+			// semantic ranking was skipped.
 			searchResults, err = s.db.TextSearch(query, opts.Limit, filterOpts)
 			if err != nil {
 				return nil, fmt.Errorf("embed query failed (%v) and keyword fallback failed: %w", embedErr, err)
 			}
 			outcome.Mode = SearchModeKeyword
 			outcome.Warnings = append(outcome.Warnings, fmt.Sprintf(
-				"embedding provider unavailable at query time (%v): results are keyword-only (BM25); semantic ranking was skipped", embedErr))
+				"embedding provider unavailable at query time (%v): results are keyword-only (BM25 normalized to 0-1 within this result set; top hit = 1.0); semantic ranking was skipped", embedErr))
 		} else {
-			searchResults, err = s.db.HybridSearch(queryEmbedding, query, opts.Limit, filterOpts, opts.VectorWeight)
+			searchResults, err = s.db.HybridSearch(queryEmbedding, query, opts.Limit, filterOpts, opts.VectorWeight, opts.TextWeight)
 			if err != nil {
 				return nil, fmt.Errorf("hybrid search: %w", err)
 			}
 		}
 	}
 
-	// Convert to Result format
+	outcome.Results = convertOutcomeResults(searchResults, outcome.Mode, opts.MinScore, opts.Limit)
+	return outcome, nil
+}
+
+// convertOutcomeResults converts raw backend results to Results, applying
+// keyword-mode score normalization, the MinScore filter, and the limit.
+//
+// Raw BM25 scores are unbounded and only comparable within one result set, so
+// keyword mode (including hybrid searches that degraded to keyword-only)
+// normalizes Score by the set's maximum BM25 value — the top hit scores 1.0 —
+// mirroring the bm25/maxBM25 normalization hybrid fusion applies in
+// db.fuseWeightedScores. This makes MinScore meaningful for keyword results;
+// Distance keeps the raw BM25 value.
+func convertOutcomeResults(searchResults []db.SearchResult, mode SearchMode, minScore float32, limit int) []Result {
+	var maxBM25 float32
+	if mode == SearchModeKeyword {
+		for _, sr := range searchResults {
+			if sr.Distance > maxBM25 {
+				maxBM25 = sr.Distance
+			}
+		}
+	}
+
 	results := make([]Result, 0, len(searchResults))
 	for _, sr := range searchResults {
 		result := searchResultToResult(sr)
 
+		if mode == SearchModeKeyword && maxBM25 > 0 {
+			result.Score /= maxBM25
+		}
+
 		// Apply minimum score filter
-		if opts.MinScore > 0 && result.Score < opts.MinScore {
+		if minScore > 0 && result.Score < minScore {
 			continue
 		}
 
 		results = append(results, result)
 
-		if len(results) >= opts.Limit {
+		if len(results) >= limit {
 			break
 		}
 	}
 
-	outcome.Results = results
-	return outcome, nil
+	return results
 }
 
 // SearchWithExplain performs a search and returns diagnostic information.

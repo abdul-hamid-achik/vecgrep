@@ -1659,15 +1659,22 @@ const (
 	// exact keyword hit in a small chunk can still surface (just not above
 	// substantive bodies with comparable relevance).
 	minSubstanceFactor = 0.3
+	// hybridWeightSumEpsilon is the tolerance before explicit vector/text
+	// weights that don't sum to 1 are normalized by their sum, keeping fused
+	// scores a calibrated 0-1 relevance value.
+	hybridWeightSumEpsilon = 1e-3
 )
 
 // HybridSearch combines vector search with VecLite BM25 text search using
 // weighted score fusion. vectorWeight controls the influence of vector
-// similarity (0-1); the remainder is the keyword (BM25) weight. Returned
-// scores are calibrated to 0-1: a result that tops both rankers approaches
-// 1.0, a keyword-only match is capped by the text weight, and a vector-only
-// match is capped by the vector weight.
-func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string, limit int, opts FilterOptions, vectorWeight float32) ([]SearchResult, error) {
+// similarity (0-1) and textWeight the influence of keyword (BM25) matching;
+// a textWeight <= 0 (the zero value for configs that never set it) derives
+// the keyword weight as 1-vectorWeight, and explicit weights that don't sum
+// to 1 are normalized by their sum. Returned scores are calibrated to 0-1: a
+// result that tops both rankers approaches 1.0, a keyword-only match is
+// capped by the text weight, and a vector-only match is capped by the vector
+// weight.
+func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string, limit int, opts FilterOptions, vectorWeight, textWeight float32) ([]SearchResult, error) {
 	if len(queryEmbedding) != b.dimensions {
 		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, expected %d", len(queryEmbedding), b.dimensions)
 	}
@@ -1677,7 +1684,13 @@ func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string
 	if vectorWeight > 1 {
 		vectorWeight = 1
 	}
-	textWeight := 1 - vectorWeight
+	if textWeight <= 0 {
+		textWeight = 1 - vectorWeight
+	}
+	if sum := vectorWeight + textWeight; sum > 0 && (sum < 1-hybridWeightSumEpsilon || sum > 1+hybridWeightSumEpsilon) {
+		vectorWeight /= sum
+		textWeight /= sum
+	}
 
 	filters := b.buildNativeFilters(opts)
 

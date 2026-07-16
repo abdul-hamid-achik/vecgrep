@@ -128,7 +128,7 @@ VecLite v0.16.0 shipped named vector spaces. The vecgrep integration can now sta
 - optionally add other spaces later, such as documentation summaries or symbol-level embeddings
 - keep chunking and provider orchestration in vecgrep
 
-Adoption is incremental. The current vecgrep build pins veclite v0.17.0 and uses the single-vector default space; named spaces remain an opt-in capability for a future vecgrep release rather than a runtime requirement. For incompatible embedding profiles before that opt-in, vecgrep still uses a full re-index.
+Adoption is incremental. The current vecgrep build pins veclite v0.24.0 (see `go.mod` for the authoritative pinned version) and, as of that version, still uses the single-vector default space; named spaces remain an opt-in capability for a future vecgrep release rather than a runtime requirement. For incompatible embedding profiles before that opt-in, vecgrep still uses a full re-index.
 
 ## Related Repos
 

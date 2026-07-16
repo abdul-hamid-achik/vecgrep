@@ -172,7 +172,7 @@ vecgrep search <query> [options]
 | `semantic` | Pure vector similarity search |
 | `keyword` | Text-based search using VecLite BM25 |
 
-**Scores:** hybrid mode returns a calibrated 0–1 similarity — `0.7·cosine + 0.3·normalized BM25`, with the keyword contribution of chunks under 200 characters damped toward a 0.3 floor so import-only snippets don't outrank real code on BM25 length bias. Good hybrid matches typically land around 0.45–0.69. Semantic mode returns raw cosine similarity (0–1). Keyword mode returns raw BM25 scores, which are unbounded and not comparable to the other modes. If the embedding provider is unreachable at query time, hybrid degrades to keyword-only with an explicit warning on every surface (CLI, MCP, daemon) — degraded results carry raw BM25 scores, so a 0–1 `--min-score` threshold effectively filters nothing after degradation.
+**Scores:** hybrid mode returns a calibrated 0–1 similarity — `0.7·cosine + 0.3·normalized BM25`, with the keyword contribution of chunks under 200 characters damped toward a 0.3 floor so import-only snippets don't outrank real code on BM25 length bias. Good hybrid matches typically land around 0.45–0.69. Semantic mode returns raw cosine similarity (0–1). Keyword mode normalizes BM25 to 0–1 within each result set (the top hit scores 1.0), so scores are comparable within one search but not across queries; JSON output keeps the raw BM25 value in `distance`. If the embedding provider is unreachable at query time, hybrid degrades to keyword-only with an explicit warning on every surface (CLI, MCP, daemon) — degraded results carry the same per-result-set normalized keyword scores, so `--min-score` keeps working after degradation.
 
 **Options:**
 
@@ -189,7 +189,7 @@ vecgrep search <query> [options]
 | `--file` | Filter by file pattern (glob) |
 | `--dir` | Filter by directory prefix |
 | `--lines` | Filter by line range (e.g., `1-100`) |
-| `--min-score` | Drop results scoring below this threshold (0–1 in hybrid/semantic; not meaningful for raw-BM25 keyword scores) |
+| `--min-score` | Drop results scoring below this threshold (0–1 in all modes; keyword scores are BM25 normalized per result set) |
 
 **Examples:**
 
@@ -441,7 +441,7 @@ codemap:
 
 ### Vector Backend
 
-vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.23.0 as its vector storage backend with:
+vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) as its vector storage backend — the version pinned in `go.mod` (v0.24.0 at the time of writing) — with:
 - **Cosine similarity** - Returns scores from 0.0 (orthogonal) to 1.0 (identical)
 - **HNSW indexing** - Fast approximate nearest neighbor search
 - **Native filtering** - Glob patterns, prefix matching, range queries
@@ -570,7 +570,7 @@ Global agent memory for storing and recalling notes across sessions. Memory is s
 | `directory` | string | Filter by directory prefix |
 | `min_line` | int | Filter by minimum start line |
 | `max_line` | int | Filter by maximum start line |
-| `min_score` | float | Drop matches below this score (0–1 in hybrid/semantic; keyword scores are raw BM25, so a 0–1 threshold is not meaningful) |
+| `min_score` | float | Drop matches below this score (0–1 in all modes; keyword scores are BM25 normalized per result set) |
 
 **Overview Tool Parameters:**
 

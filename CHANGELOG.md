@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-07-16
+
+### Fixed
+- Keyword-mode scores (including hybrid searches degraded to keyword-only by an unavailable
+  embedder) are now BM25 normalized to 0–1 within each result set (top hit = 1.0), mirroring the
+  `bm25/maxBM25` normalization hybrid fusion already applied, so `min_score` works in keyword
+  mode instead of silently filtering nothing. The raw BM25 value is still reported as `distance`.
+- Honor `search.text_weight`: hybrid search previously derived the keyword weight as
+  `1 - vector_weight` and silently ignored the configured text weight. An unset (zero) text
+  weight keeps the historical derivation; explicit weights that don't sum to 1 are normalized by
+  their sum so fused scores stay a calibrated 0–1 value. The daemon worker and MCP handlers now
+  pass the project's configured `vector_weight`/`text_weight` too, instead of always searching
+  with the built-in defaults.
+
 ## [2.18.0] - 2026-07-15
 
 ### Fixed
@@ -23,12 +37,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   formats), MCP handlers, daemon RPC, and the CLI daemon fast-path, which previously dropped
   warnings entirely. Strict `Search` still errors; semantic mode never silently degrades.
 
-- Resolve codemap from the project's fully resolved config in `NewSDKServer` when a project root is known up front. Previously `s.codemap` was built from the zero-value `SDKServerConfig.Codemap` (always `nil`), so `vecgrep serve` reported "Codemap integration: enabled / Status: codemap binary not found" regardless of whether codemap was installed, silently disabling structural re-ranking and impact-based search scoping. The up-front path now mirrors `activateProject`'s existing re-resolution.
-- Add `config.ResolveBinary` and route codemap binary lookup through it (instead of a bare `exec.LookPath`) in `codemapDetect` and `NewCodemapClient`. Falls back to common install directories (`/opt/homebrew/bin`, `$HOME/go/bin`, etc.) when `$PATH` is a minimal subprocess PATH, and stores the resolved absolute path so subsequent `exec.Command` calls don't re-fail a `$PATH` lookup.
-
 ### Changed
 - Hybrid fusion ownership moved from veclite to vecgrep; `docs/veclite-integration.md` documents
   the contract and rationale. `Score` semantics are documented in `internal/search`.
+
+## [2.17.0] - 2026-07-13
+
+### Added
+- Trusted structural ingestion and freshness tracking for codemap-provided symbol chunks.
+- `vecgrep projects prune` — clean stale entries from the global project registry.
+- Homebrew install method documented on the docs landing page, quick-start, and README.
+
+### Changed
+- Adopt veclite v0.24.0 and enable the write-ahead log for writers.
+- Optimize indexing and embedding workflows.
+- Expand the embedding relevance corpus to 78 documents / 66 queries.
+- Overhaul the docs landing page and add SEO infrastructure.
+
+### Fixed
+- Make Ollama truncation warnings truthful.
+
+## [2.16.0] - 2026-07-09
+
+### Added
+- Memory ranking intelligence and search affordances.
+
+### Changed
+- Bump veclite dependency to v0.23.0.
+
+## [2.15.0] - 2026-07-06
+
+### Added
+- Machine-consumer contracts for search and memory recall.
+
+## [2.14.1] - 2026-06-30
+
+### Fixed
+- Resolve codemap from the project's fully resolved config in `NewSDKServer` when a project root is known up front. Previously `s.codemap` was built from the zero-value `SDKServerConfig.Codemap` (always `nil`), so `vecgrep serve` reported "Codemap integration: enabled / Status: codemap binary not found" regardless of whether codemap was installed, silently disabling structural re-ranking and impact-based search scoping. The up-front path now mirrors `activateProject`'s existing re-resolution.
+- Add `config.ResolveBinary` and route codemap binary lookup through it (instead of a bare `exec.LookPath`) in `codemapDetect` and `NewCodemapClient`. Falls back to common install directories (`/opt/homebrew/bin`, `$HOME/go/bin`, etc.) when `$PATH` is a minimal subprocess PATH, and stores the resolved absolute path so subsequent `exec.Command` calls don't re-fail a `$PATH` lookup.
+
+## [2.14.0] - 2026-06-29
+
+### Added
+- Studio read-only fallback with daemon-delegated reindex.
+- `vecgrep index` delegates to a running daemon hub instead of opening a second write handle.
+
+### Changed
+- Bump veclite dependency to v0.22.0 (lock-free read-only opens).
+- `go fmt` client/Studio files so GoReleaser no longer fails on a dirty tree.
+
+## [2.13.0] - 2026-06-28
+
+### Added
+- Multi-project daemon hub — one socket with lazy per-project workers.
+
+## [2.12.0] - 2026-06-27
+
+### Fixed
+- Don't treat the global `~/.vecgrep` directory as a project-root marker.
+
+## [2.11.0] - 2026-06-27
+
+### Changed
+- Pipelined indexing with all-or-nothing per-file inserts and a live progress bar.
+
+## [2.10.2] - 2026-06-27
+
+### Fixed
+- Parse codemap v0.17.0 impact output and auto-enable codemap when it is installed.
+
+## [2.10.1] - 2026-06-27
+
+### Fixed
+- Resolve MCP/daemon index lock contention and concurrency races.
+
+## [2.10.0] - 2026-06-26
+
+### Added
+- Dedicated tests for `mcpSession` and `daemonClient`.
+
+### Changed
+- Lock-free MCP initialization with a lazy dual-handle session.
+
+## [2.9.0] - 2026-06-25
+
+### Added
+- codemap blast-radius investigation flow for scoped search.
+
+## [2.8.0] - 2026-06-25
+
+### Added
+- fcheap integration, plus indexing speed, UX, and DX improvements.
+
+### Fixed
+- Data race in the `EmbedBatchFallsBackOn404` test.
+
+## [2.7.1] - 2026-06-24
+
+### Fixed
+- Clear the line on verbose index progress so leftover characters no longer linger.
+
+## [2.7.0] - 2026-06-24
+
+### Added
+- Ollama native batch embedding endpoint for 8–16× faster indexing.
+- `vecgrep memory recall` / `vecgrep memory remember` CLI (C5 contract with exact tag-AND matching).
+- codemap integration milestones wired against the real CLI contract: annotate targeting (F3), blast-radius decision (F2), and status cross-read (G4).
+
+## [2.6.0] - 2026-06-24
+
+### Added
+- codemap integration, per-branch index switching, and a background daemon.
+
+### Fixed
+- Data race in throttle dedup; the test mockProvider is now thread-safe.
+
+## [2.5.0] - 2026-06-24
+
+### Changed
+- Gradient progress bar for the `vecgrep index` CLI.
+
+## [2.4.0] - 2026-06-23
+
+### Added
+- Live progress bar for the `vecgrep index` CLI.
+
+## [2.3.1] - 2026-06-23
+
+### Fixed
+- `vecgrep reset --force` handles a locked database gracefully.
+
+## [2.3.0] - 2026-06-23
+
+### Added
+- Use veclite `WithSharedRead` so CLI reads work while Studio holds the database open.
 
 ## [2.2.0] - 2026-06-21
 
@@ -183,6 +325,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable chunk size and overlap
 - Ignore patterns for excluding files from indexing
 
+[2.18.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.17.0...v2.18.0
+[2.17.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.16.0...v2.17.0
+[2.16.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.15.0...v2.16.0
+[2.15.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.14.1...v2.15.0
+[2.14.1]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.14.0...v2.14.1
+[2.14.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.13.0...v2.14.0
+[2.13.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.12.0...v2.13.0
+[2.12.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.11.0...v2.12.0
+[2.11.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.10.2...v2.11.0
+[2.10.2]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.10.1...v2.10.2
+[2.10.1]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.10.0...v2.10.1
+[2.10.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.9.0...v2.10.0
+[2.9.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.8.0...v2.9.0
+[2.8.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.7.1...v2.8.0
+[2.7.1]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.7.0...v2.7.1
+[2.7.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.6.0...v2.7.0
+[2.6.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.5.0...v2.6.0
+[2.5.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.4.0...v2.5.0
+[2.4.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.3.1...v2.4.0
+[2.3.1]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.3.0...v2.3.1
+[2.3.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.0.1...v2.1.0
 [2.0.1]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.0.0...v2.0.1

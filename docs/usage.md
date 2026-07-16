@@ -52,7 +52,7 @@ vecgrep search <query> [options]
 | `--lines` | Filter by line range, such as `1-100` |
 | `--scope-files` | Restrict search to these relative paths (comma-separated) |
 | `--symbol` | Scope search to a symbol's blast radius via codemap impact |
-| `--min-score` | Drop results scoring below this threshold (0-1 in hybrid/semantic; not meaningful for raw-BM25 keyword scores) |
+| `--min-score` | Drop results scoring below this threshold (0-1 in all modes; keyword scores are BM25 normalized per result set) |
 
 ### Scores
 
@@ -63,16 +63,17 @@ What the `score` field means depends on the mode:
   floor so import-only snippets don't outrank real code on BM25 length bias.
   Good matches typically land around 0.45-0.69.
 - **semantic**: raw cosine similarity, 0-1.
-- **keyword**: raw BM25, unbounded — not comparable to the other modes, so a 0-1
-  `--min-score` threshold is not meaningful here.
+- **keyword**: BM25 normalized to 0-1 within the result set — the top hit scores
+  1.0, so `--min-score` applies, but scores are not comparable across queries.
+  JSON output keeps the raw BM25 value in `distance`.
 
 If the embedding provider is unreachable at query time, hybrid search degrades
 to keyword-only instead of failing — never silently. A warning carrying the
 provider error is printed with the results (on stderr for machine formats, so
-JSON output stays parseable), and the degraded results carry raw BM25 scores.
-Because of the scale change, a calibrated `--min-score` threshold is
-effectively a no-op after degradation. Semantic mode never degrades: it errors
-when the provider is unavailable.
+JSON output stays parseable), and the degraded results carry the same
+per-result-set normalized keyword scores, so `--min-score` keeps working after
+degradation. Semantic mode never degrades: it errors when the provider is
+unavailable.
 
 `-f json` and `-f compact` emit a single machine-parseable document on stdout;
 scope notes and `--explain` diagnostics are written to stderr so they never

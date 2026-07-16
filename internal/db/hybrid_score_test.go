@@ -76,7 +76,7 @@ func hybridTestFixture(t *testing.T) (*DB, []float32) {
 func TestHybridSearchScoresAreDiscriminative(t *testing.T) {
 	database, queryEmbedding := hybridTestFixture(t)
 
-	results, err := database.HybridSearch(queryEmbedding, "sessionStorage zod schema validation", 10, FilterOptions{}, 0.7)
+	results, err := database.HybridSearch(queryEmbedding, "sessionStorage zod schema validation", 10, FilterOptions{}, 0.7, 0.3)
 	if err != nil {
 		t.Fatalf("HybridSearch failed: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestHybridSearchPrefersSubstantiveChunks(t *testing.T) {
 	database, queryEmbedding := hybridTestFixture(t)
 
 	// Keyword that only the import chunk and the substantive body share.
-	results, err := database.HybridSearch(queryEmbedding, "zod", 10, FilterOptions{}, 0.7)
+	results, err := database.HybridSearch(queryEmbedding, "zod", 10, FilterOptions{}, 0.7, 0.3)
 	if err != nil {
 		t.Fatalf("HybridSearch failed: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestHybridSearchVectorOnlyAndKeywordOnlyContributions(t *testing.T) {
 	database, queryEmbedding := hybridTestFixture(t)
 
 	// "add" appears only in math.ts, which is vector-orthogonal to the query.
-	results, err := database.HybridSearch(queryEmbedding, "add numbers", 10, FilterOptions{}, 0.7)
+	results, err := database.HybridSearch(queryEmbedding, "add numbers", 10, FilterOptions{}, 0.7, 0.3)
 	if err != nil {
 		t.Fatalf("HybridSearch failed: %v", err)
 	}
@@ -274,6 +274,67 @@ func TestHybridSearchVectorOnlyAndKeywordOnlyContributions(t *testing.T) {
 			if r.Distance > 0.7001 {
 				t.Errorf("vector-only match scored %.4f, want <= vector weight 0.7", r.Distance)
 			}
+		}
+	}
+}
+
+// keywordOnlyScore runs a hybrid search whose keywords only match math.ts
+// (vector-orthogonal to the query) and returns its fused score, which is a
+// pure textWeight * normalizedBM25 * substance contribution.
+func keywordOnlyScore(t *testing.T, database *DB, queryEmbedding []float32, vectorWeight, textWeight float32) float32 {
+	t.Helper()
+	results, err := database.HybridSearch(queryEmbedding, "add numbers", 10, FilterOptions{}, vectorWeight, textWeight)
+	if err != nil {
+		t.Fatalf("HybridSearch failed: %v", err)
+	}
+	for _, r := range results {
+		if r.Chunk != nil && r.Chunk.RelativePath == "math.ts" {
+			return r.Distance
+		}
+	}
+	t.Fatal("keyword-only match math.ts missing from results")
+	return 0
+}
+
+// TestHybridSearchHonorsExplicitTextWeight is a regression test for the
+// explicit text weight being silently ignored: HybridSearch derived the
+// keyword weight as 1-vectorWeight regardless of search.text_weight. A larger
+// explicit text weight must raise a keyword-only match's fused score.
+func TestHybridSearchHonorsExplicitTextWeight(t *testing.T) {
+	database, queryEmbedding := hybridTestFixture(t)
+
+	derived := keywordOnlyScore(t, database, queryEmbedding, 0.5, 0)    // derived text weight 0.5
+	explicit := keywordOnlyScore(t, database, queryEmbedding, 0.5, 0.5) // same weight, explicit
+	if derived != explicit {
+		t.Errorf("explicit textWeight=0.5 scored %.4f, derived scored %.4f; want identical", explicit, derived)
+	}
+
+	low := keywordOnlyScore(t, database, queryEmbedding, 0.7, 0.3)
+	high := keywordOnlyScore(t, database, queryEmbedding, 0.3, 0.7)
+	if high <= low {
+		t.Errorf("keyword-only match scored %.4f with textWeight=0.7, want > %.4f (textWeight=0.3); explicit text weight ignored?", high, low)
+	}
+}
+
+// TestHybridSearchNormalizesWeightSum verifies weights that don't sum to 1
+// are normalized by their sum so fused scores stay a calibrated 0-1 value: a
+// keyword-only match must be capped by the normalized text weight.
+func TestHybridSearchNormalizesWeightSum(t *testing.T) {
+	database, queryEmbedding := hybridTestFixture(t)
+
+	// 0.7 + 0.9 = 1.6 → normalized to 0.4375 vector / 0.5625 text.
+	score := keywordOnlyScore(t, database, queryEmbedding, 0.7, 0.9)
+	if score > 0.5626 {
+		t.Errorf("keyword-only match scored %.4f, want <= normalized text weight 0.5625", score)
+	}
+
+	results, err := database.HybridSearch(queryEmbedding, "sessionStorage zod schema validation", 10, FilterOptions{}, 0.7, 0.9)
+	if err != nil {
+		t.Fatalf("HybridSearch failed: %v", err)
+	}
+	for i, r := range results {
+		if r.Distance < 0 || r.Distance > 1.0001 {
+			t.Errorf("result %d score %.4f outside [0,1] with unnormalized weight sum 1.6", i, r.Distance)
 		}
 	}
 }
