@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.19.1] - 2026-07-16
+
+### Fixed
+
+- **Daemon liveness probe no longer hangs on a wedged socket.** `IsRunning`
+  dialed the daemon socket with no deadline, so a wedged daemon (or a foreign
+  process squatting on the path) blocked interactive callers — studio startup
+  and test runs — indefinitely. The whole probe (dial + ping + response) is
+  now bounded at 2 seconds and reports not-running on expiry.
+- **`go install ...@latest` no longer resolves to the year-old v0.31.0
+  snapshot.** All stale 0.x/1.x tags are retracted in go.mod (carried by a
+  v1.4.0 tombstone tag), so Go tooling falls back to the current default
+  branch; Homebrew remains the supported channel for versioned builds.
+
 ## [2.19.0] - 2026-07-16
 
 ### Fixed

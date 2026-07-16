@@ -2,6 +2,17 @@ module github.com/abdul-hamid-achik/vecgrep
 
 go 1.25.5
 
+// The module's real releases follow the 2.x series but the module path has no
+// /v2 suffix, so Go tooling cannot select those tags; every 0.x/1.x tag below
+// is a stale prototype snapshot — until now `go install ...@latest` fetched
+// v0.31.0. Retracting them all (including the v1.4.0 tombstone that carries
+// this directive) makes @latest build the current default branch instead.
+// Install via Homebrew for versioned builds.
+retract (
+	[v0.1.0, v0.31.0]
+	[v1.0.0, v1.4.0]
+)
+
 require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.7

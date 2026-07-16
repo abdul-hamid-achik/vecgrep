@@ -611,6 +611,11 @@ func ReadState(dataDir string) (*DaemonState, error) {
 	return &state, nil
 }
 
+// isRunningTimeout bounds the whole IsRunning liveness probe (dial + ping +
+// response). A wedged or foreign socket that accepts connections but never
+// answers must report not-running instead of blocking the caller forever.
+const isRunningTimeout = 2 * time.Second
+
 // IsRunning checks if a daemon is listening on the given data directory's socket
 // (the global data dir for the hub).
 func IsRunning(dataDir string) bool {
@@ -619,11 +624,12 @@ func IsRunning(dataDir string) bool {
 		return false
 	}
 	socketPath := filepath.Join(dataDir, "daemon.sock")
-	conn, err := net.Dial("unix", socketPath)
+	conn, err := net.DialTimeout("unix", socketPath, isRunningTimeout)
 	if err != nil {
 		return false // socket doesn't respond → stale lock
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(isRunningTimeout))
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
 	if err := enc.Encode(jsonRPCRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "daemon.ping"}); err != nil {

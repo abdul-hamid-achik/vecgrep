@@ -163,6 +163,45 @@ func TestIsRunningStaleLock(t *testing.T) {
 	}
 }
 
+func TestIsRunningWedgedSocket(t *testing.T) {
+	// A socket that accepts connections but never answers the ping (a wedged
+	// daemon, or a foreign process squatting on the path) must report
+	// not-running within the probe deadline instead of blocking forever —
+	// IsRunning is on interactive paths (studio startup, CLI status).
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "daemon.lock"), []byte("99999\n"), 0644); err != nil {
+		t.Fatalf("write lock file: %v", err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(tmpDir, "daemon.sock"))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Hold the connection open without ever writing a response.
+			go func(c net.Conn) {
+				<-done
+				c.Close()
+			}(conn)
+		}
+	}()
+
+	start := time.Now()
+	if IsRunning(tmpDir) {
+		t.Fatal("expected IsRunning=false against a socket that never responds")
+	}
+	if elapsed := time.Since(start); elapsed > isRunningTimeout+2*time.Second {
+		t.Fatalf("IsRunning took %v, expected it to give up within ~%v", elapsed, isRunningTimeout)
+	}
+}
+
 func TestDaemonStateJSONRoundTrip(t *testing.T) {
 	original := DaemonState{
 		ProjectRoot:  "/home/user/project",
