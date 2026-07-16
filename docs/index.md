@@ -122,7 +122,7 @@ Done in 14.2s
 $ vecgrep search "database connection pooling"
 Results (hybrid mode, top 5):
 
-  0.89  internal/db/pool.go:42-68
+  0.68  internal/db/pool.go:42-68
         func (p *ConnectionPool) acquire(ctx context.Context) (*Conn, error) {
           p.mu.Lock()
           defer p.mu.Unlock()
@@ -130,13 +130,13 @@ Results (hybrid mode, top 5):
           case conn := <-p.free:
         ...
 
-  0.84  internal/db/pool.go:112-135
+  0.61  internal/db/pool.go:112-135
         func (p *ConnectionPool) release(conn *Conn) {
           p.mu.Lock()
           defer p.mu.Unlock()
         ...
 
-  0.78  internal/config/resolution.go:88-104
+  0.53  internal/config/resolution.go:88-104
         // resolveDatabaseConfig merges project and global DB settings
         ...
 

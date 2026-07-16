@@ -26,6 +26,20 @@ The server communicates over stdio.
 | `vecgrep_batch_search` | Run multiple searches |
 | `vecgrep_related_files` | Find related files |
 
+## Scores and Degraded Mode
+
+`vecgrep_search` scores are calibrated 0-1 similarities in hybrid mode (good
+matches typically land around 0.45-0.69) and raw cosine similarities in
+semantic mode; keyword mode returns raw BM25 scores, which are unbounded.
+`min_score` expects the 0-1 scale, so it is only meaningful for hybrid and
+semantic searches.
+
+If the embedding provider is unavailable at query time, hybrid search degrades
+to keyword-only and the tool result includes an explicit warning carrying the
+provider error. Degraded results carry raw BM25 scores — a different scale —
+so `min_score` is effectively a no-op after degradation. Semantic mode never
+degrades; it returns an error instead.
+
 ## Claude Code
 
 Add vecgrep globally:

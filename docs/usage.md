@@ -52,7 +52,27 @@ vecgrep search <query> [options]
 | `--lines` | Filter by line range, such as `1-100` |
 | `--scope-files` | Restrict search to these relative paths (comma-separated) |
 | `--symbol` | Scope search to a symbol's blast radius via codemap impact |
-| `--min-score` | Drop results with score below this threshold (0-1) |
+| `--min-score` | Drop results scoring below this threshold (0-1 in hybrid/semantic; not meaningful for raw-BM25 keyword scores) |
+
+### Scores
+
+What the `score` field means depends on the mode:
+
+- **hybrid** (default): a calibrated 0-1 similarity — `0.7·cosine + 0.3·normalized BM25`.
+  The keyword contribution of chunks under 200 characters is damped toward a 0.3
+  floor so import-only snippets don't outrank real code on BM25 length bias.
+  Good matches typically land around 0.45-0.69.
+- **semantic**: raw cosine similarity, 0-1.
+- **keyword**: raw BM25, unbounded — not comparable to the other modes, so a 0-1
+  `--min-score` threshold is not meaningful here.
+
+If the embedding provider is unreachable at query time, hybrid search degrades
+to keyword-only instead of failing — never silently. A warning carrying the
+provider error is printed with the results (on stderr for machine formats, so
+JSON output stays parseable), and the degraded results carry raw BM25 scores.
+Because of the scale change, a calibrated `--min-score` threshold is
+effectively a no-op after degradation. Semantic mode never degrades: it errors
+when the provider is unavailable.
 
 `-f json` and `-f compact` emit a single machine-parseable document on stdout;
 scope notes and `--explain` diagnostics are written to stderr so they never
@@ -97,7 +117,7 @@ vecgrep similar --text "func handleError(err error)" --min-score=0.25 -f json
 
 `similar` also supports `--min-score` and the same `-f` formats as `search`
 (the `json-envelope` index block reflects the whole project, not the similar
-target's scope).
+target's scope). `similar` scores are cosine similarities (0-1).
 
 ## Status and Maintenance
 

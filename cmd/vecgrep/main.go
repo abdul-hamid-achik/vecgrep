@@ -86,7 +86,14 @@ var searchCmd = &cobra.Command{
 	Use:   "search <query>",
 	Short: "Search the codebase semantically",
 	Long: `Search the indexed codebase using natural language queries.
-Returns the most relevant code chunks ranked by similarity.`,
+Returns the most relevant code chunks ranked by similarity.
+
+Scores are 0-1 similarities in hybrid mode (calibrated cosine+BM25 fusion;
+good matches typically land around 0.45-0.69) and semantic mode (raw cosine).
+Keyword mode returns raw BM25 scores, which are unbounded. If the embedding
+provider is unreachable, hybrid search degrades to keyword-only with an
+explicit warning; degraded results carry raw BM25 scores, so a 0-1
+--min-score threshold filters nothing after degradation.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runSearch,
 }
@@ -451,7 +458,7 @@ func init() {
 	searchCmd.Flags().Bool("explain", false, "show search diagnostics")
 	searchCmd.Flags().StringSlice("scope-files", nil, "restrict search to these relative paths (comma-separated)")
 	searchCmd.Flags().String("symbol", "", "scope search to a symbol's blast radius via codemap impact")
-	searchCmd.Flags().Float32("min-score", 0, "drop results with score below this threshold (0-1)")
+	searchCmd.Flags().Float32("min-score", 0, "drop results with score below this threshold (0-1 in hybrid/semantic modes; keyword scores are raw BM25, where 0-1 thresholds are not meaningful)")
 
 	// Serve command flags
 	serveCmd.Flags().Bool("mcp", false, "start MCP server (stdio)")
@@ -468,7 +475,7 @@ func init() {
 	similarCmd.Flags().String("lines", "", "filter by line range (e.g., '1-100')")
 	similarCmd.Flags().Bool("exclude-same-file", false, "exclude results from the same file as the source")
 	similarCmd.Flags().StringP("text", "T", "", "find code similar to this text snippet")
-	similarCmd.Flags().Float32("min-score", 0, "drop results with score below this threshold (0-1)")
+	similarCmd.Flags().Float32("min-score", 0, "drop results with cosine similarity below this threshold (0-1)")
 
 	// Status command flags
 	statusCmd.Flags().StringP("format", "f", "default", "output format (default, json)")

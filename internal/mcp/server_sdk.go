@@ -49,7 +49,7 @@ type SearchInput struct {
 	Symbol       string   `json:"symbol,omitempty" jsonschema:"When set, uses codemap impact to compute the blast radius of this symbol and scopes the search to affected files. Falls back to unscoped search if codemap is unavailable."`
 	MinLine      int      `json:"min_line,omitempty" jsonschema:"Filter by minimum start line."`
 	MaxLine      int      `json:"max_line,omitempty" jsonschema:"Filter by maximum start line."`
-	MinScore     float32  `json:"min_score,omitempty" jsonschema:"Drop matches below this score (0-1)."`
+	MinScore     float32  `json:"min_score,omitempty" jsonschema:"Drop matches below this score. Hybrid and semantic scores are 0-1 similarities; keyword scores (including hybrid degraded by an unavailable embedder) are raw BM25 on a different scale, where a 0-1 threshold is not meaningful."`
 	Mode         string   `json:"mode,omitempty" jsonschema:"Search mode: 'semantic' (vector only), 'keyword' (text only), or 'hybrid' (combined, default)."`
 	Explain      bool     `json:"explain,omitempty" jsonschema:"Return search diagnostics including timing and index info."`
 	ContextLines int      `json:"context_lines,omitempty" jsonschema:"Number of lines to include before and after each result (default: 0)."`
@@ -366,7 +366,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_search",
-		Description: "Perform semantic search across the indexed codebase. Auto-detects the project from current directory. Supports three search modes: 'semantic' (vector similarity), 'keyword' (text matching), or 'hybrid' (combined, default). Returns code chunks ranked by relevance.",
+		Description: "Perform semantic search across the indexed codebase. Auto-detects the project from current directory. Supports three search modes: 'semantic' (vector similarity), 'keyword' (text matching), or 'hybrid' (combined, default). Returns code chunks ranked by relevance. Scores are 0-1 similarities in hybrid mode (calibrated cosine+BM25 fusion; good matches typically 0.45-0.69) and semantic mode (raw cosine); keyword mode returns raw BM25 scores (unbounded, different scale). If the embedding provider is unavailable, hybrid degrades to keyword-only and the result starts with an explicit warning — degraded scores are raw BM25, so min_score is effectively a no-op there.",
 	}, s.handleSearch)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{

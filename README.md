@@ -172,6 +172,8 @@ vecgrep search <query> [options]
 | `semantic` | Pure vector similarity search |
 | `keyword` | Text-based search using VecLite BM25 |
 
+**Scores:** hybrid mode returns a calibrated 0–1 similarity — `0.7·cosine + 0.3·normalized BM25`, with the keyword contribution of chunks under 200 characters damped toward a 0.3 floor so import-only snippets don't outrank real code on BM25 length bias. Good hybrid matches typically land around 0.45–0.69. Semantic mode returns raw cosine similarity (0–1). Keyword mode returns raw BM25 scores, which are unbounded and not comparable to the other modes. If the embedding provider is unreachable at query time, hybrid degrades to keyword-only with an explicit warning on every surface (CLI, MCP, daemon) — degraded results carry raw BM25 scores, so a 0–1 `--min-score` threshold effectively filters nothing after degradation.
+
 **Options:**
 
 | Flag | Description |
@@ -187,6 +189,7 @@ vecgrep search <query> [options]
 | `--file` | Filter by file pattern (glob) |
 | `--dir` | Filter by directory prefix |
 | `--lines` | Filter by line range (e.g., `1-100`) |
+| `--min-score` | Drop results scoring below this threshold (0–1 in hybrid/semantic; not meaningful for raw-BM25 keyword scores) |
 
 **Examples:**
 
@@ -444,7 +447,7 @@ vecgrep uses [veclite](https://github.com/abdul-hamid-achik/veclite) v0.23.0 as 
 - **Native filtering** - Glob patterns, prefix matching, range queries
 - **Batch operations** - Efficient bulk indexing
 
-vecgrep owns code chunking and embedding generation. VecLite owns storage, filtering, BM25, vector search, and hybrid fusion. Current VecLite collections store one vector per record, so changing embedding provider, model, dimensions, distance metric, or chunking strategy requires a full re-index. vecgrep enforces this with an embedding profile stored in VecLite collection metadata and reports profile status in `vecgrep status` and Studio. See `docs/veclite-integration.md` for the integration contract and named-vector compatibility.
+vecgrep owns code chunking, embedding generation, and hybrid result fusion (calibrated weighted fusion of cosine similarity and normalized BM25 — VecLite's built-in RRF fusion is intentionally not used because raw reciprocal-rank scores are not meaningful as user-facing relevance). VecLite owns storage, filtering, BM25, and vector search. Current VecLite collections store one vector per record, so changing embedding provider, model, dimensions, distance metric, or chunking strategy requires a full re-index. vecgrep enforces this with an embedding profile stored in VecLite collection metadata and reports profile status in `vecgrep status` and Studio. See `docs/veclite-integration.md` for the integration contract and named-vector compatibility.
 
 ### Configuration Sources
 
@@ -567,6 +570,7 @@ Global agent memory for storing and recalling notes across sessions. Memory is s
 | `directory` | string | Filter by directory prefix |
 | `min_line` | int | Filter by minimum start line |
 | `max_line` | int | Filter by maximum start line |
+| `min_score` | float | Drop matches below this score (0–1 in hybrid/semantic; keyword scores are raw BM25, so a 0–1 threshold is not meaningful) |
 
 **Overview Tool Parameters:**
 

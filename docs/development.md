@@ -111,7 +111,8 @@ vecgrep follows a layered architecture with clear separation of concerns:
    ```
    - Query text is embedded using the same provider for semantic and hybrid modes
    - Keyword mode uses VecLite BM25 without generating a query embedding
-   - Vector similarity and BM25 results are ranked or fused by the selected search mode
+   - Hybrid mode runs vector and BM25 retrieval separately (over-fetching per modality) and fuses them in vecgrep with calibrated weighted score fusion (`fuseWeightedScores` in `internal/db/veclite_backend.go`), producing 0-1 scores; a substance factor damps the keyword contribution of chunks under 200 characters
+   - If the embedding provider fails at query time, hybrid search degrades to keyword-only with an explicit warning (`SearchOutcome.Warnings` in `internal/search`); semantic mode errors instead — it never silently degrades
 
 ---
 
