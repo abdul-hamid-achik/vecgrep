@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-07-18
+
+### Added
+
+- **Shared index readiness envelope** (`app.Readiness`) with machine states
+  `empty`, `profile_mismatch`, `unknown`, `stale`, and `ready`, plus stable
+  next-action strings for agents (`vecgrep_index` / `vecgrep_index force:true`).
+- **MCP `vecgrep_ensure`** with modes `check` (default), `index_if_empty`, and
+  `force_rebuild` so agents can fix readiness explicitly without silent
+  auto-index on every search.
+- **Phase-aware index progress**: walk ticks report `WalkedFiles`,
+  `QueuedFiles`, `WalkComplete`, and `Phase` so UIs can show discovery vs
+  embedding without a shrinking percentage.
+
+### Changed
+
+- **MCP search gates readiness before the daemon path.** Empty indexes and
+  embedding profile mismatches return `IsError` with a parseable readiness
+  block instead of looking like “No results found.” True zero-hits on a
+  searchable index remain success.
+- **MCP `vecgrep_status` always attaches readiness** (state, action, profile
+  IDs when mismatched) alongside stats and freshness.
+- **CLI and Studio progress** use discover counters (`embed N · queued Q ·
+  walked W`) until the walk completes, then an honest percent/ETA. Studio keeps
+  existing results visible during reindex via a footer strip; empty projects
+  show a first-index CTA (`press r`).
+- **Multi-client lock messages** on `vecgrep index` and MCP write failures
+  mention studio / CLI index / MCP serve / daemon, not only the daemon.
+- MCP server instructions document the agent loop:
+  `status|ensure → fix action → search`.
+
+### Fixed
+
+- Profile-mismatch guidance no longer collapses into “force for freshness”
+  alone; agents get stored vs active profile IDs and `force:true`.
+- Incremental discover-while-embed no longer drives a false progress
+  percentage while `TotalFiles` is still growing.
+
 ## [2.19.1] - 2026-07-16
 
 ### Fixed
