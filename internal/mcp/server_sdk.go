@@ -61,6 +61,13 @@ type IndexInput struct {
 	Force bool     `json:"force,omitempty" jsonschema:"Force re-indexing of all files even if unchanged."`
 }
 
+// EnsureInput is the input for vecgrep_ensure.
+type EnsureInput struct {
+	Path string `json:"path,omitempty" jsonschema:"Optional project path to activate (absolute). Defaults to auto-detect/cwd."`
+	// Mode: check (default) | index_if_empty | force_rebuild
+	Mode string `json:"mode,omitempty" jsonschema:"check (default): report readiness only. index_if_empty: index only when empty. force_rebuild: full reindex when empty, profile_mismatch, or unknown freshness."`
+}
+
 // InvestigateInput is the input for vecgrep_investigate.
 type InvestigateInput struct {
 	Symbol       string `json:"symbol" jsonschema:"The symbol to compute the blast radius for (e.g., 'pkg.FuncName' or 'FuncName'). codemap impact finds all files transitively affected by a change to this symbol."`
@@ -352,10 +359,11 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Name:    "vecgrep",
 		Version: version.Version,
 	}, &sdkmcp.ServerOptions{
-		Instructions: "vecgrep provides semantic code search using vector embeddings. " +
-			"By default, project data is stored centrally in ~/.vecgrep/projects/ so no .vecgrep folder is created in your project. " +
-			"For projects with existing index (local or global), just use vecgrep_search directly - it auto-detects the project. " +
-			"For new projects, run vecgrep_init with the project path, then vecgrep_index to index the codebase.",
+		Instructions: "vecgrep: local semantic code search. Workflow: (1) vecgrep_status or vecgrep_ensure mode:check — read readiness.state/action; " +
+			"(2) if action is non-null, call vecgrep_index / vecgrep_index force:true, or vecgrep_ensure mode:index_if_empty|force_rebuild; " +
+			"(3) then vecgrep_search. Empty or profile_mismatch search returns IsError with readiness — not \"no results\". " +
+			"Ready + zero hits is success. Search auto-detects the project; vecgrep_init only for first-time register or path switch. " +
+			"Data defaults to ~/.vecgrep/projects/.",
 	})
 
 	// Register tools using typed handlers
@@ -365,18 +373,30 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 	}, s.handleInit)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
-		Name:        "vecgrep_search",
-		Description: "Perform semantic search across the indexed codebase. Auto-detects the project from current directory. Supports three search modes: 'semantic' (vector similarity), 'keyword' (text matching), or 'hybrid' (combined, default). Returns code chunks ranked by relevance. Scores are 0-1 similarities in hybrid mode (calibrated cosine+BM25 fusion; good matches typically 0.45-0.69) and semantic mode (raw cosine); keyword mode normalizes BM25 to 0-1 within each result set (top hit = 1.0), so min_score applies in every mode. If the embedding provider is unavailable, hybrid degrades to keyword-only and the result starts with an explicit warning — degraded results carry the same normalized keyword scores.",
+		Name: "vecgrep_search",
+		Description: "Perform semantic search across the indexed codebase. Auto-detects the project from current directory. " +
+			"Fails with IsError and a readiness payload if the index is empty or the embedding profile mismatches — that is not \"no results\". " +
+			"Success with zero hits means no match on a searchable index. " +
+			"Supports modes: 'semantic', 'keyword', or 'hybrid' (default). " +
+			"If the embedding provider is unavailable, hybrid degrades to keyword-only with an explicit warning.",
 	}, s.handleSearch)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_index",
-		Description: "Index files in the project for semantic search. Only indexes files that have changed since the last index.",
+		Description: "Index files in the project for semantic search. Only indexes files that have changed since the last index. Use force:true on profile_mismatch or unknown freshness; default incremental when stale.",
 	}, s.handleIndex)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
+		Name: "vecgrep_ensure",
+		Description: "Agent readiness helper. Modes: check (default) returns readiness only; " +
+			"index_if_empty indexes only when the index is empty; " +
+			"force_rebuild runs a full reindex when empty, profile_mismatch, or unknown freshness. " +
+			"Never silent-auto-indexes on every search — call this explicitly.",
+	}, s.handleEnsure)
+
+	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_status",
-		Description: "Get index statistics and conservative freshness evidence. Freshness is proven from raw source hashes, the last successful ingestion receipt, and codemap's bounded structural manifest when applicable; legacy or mismatched evidence reports unknown.",
+		Description: "Get index statistics, readiness.state/action, and conservative freshness evidence. Always call this before trusting search when unsure the index is searchable. Freshness is proven from raw source hashes, the last successful ingestion receipt, and codemap's bounded structural manifest when applicable.",
 	}, s.handleStatus)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -840,6 +860,53 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	}, nil, nil
 }
 
+// writeReadiness appends a machine-parseable readiness JSON object for agents.
+func writeReadiness(sb *strings.Builder, r app.Readiness) {
+	if sb == nil {
+		return
+	}
+	sb.WriteString("\nreadiness: ")
+	sb.WriteString(r.JSON())
+	sb.WriteString("\n")
+	if r.Action != "" {
+		fmt.Fprintf(sb, "action: %s\n", r.Action)
+	}
+	if r.Reason != "" {
+		fmt.Fprintf(sb, "reason: %s\n", r.Reason)
+	}
+}
+
+// readinessToolError returns an IsError tool result when the index is not
+// searchable (empty or profile mismatch). Second value is the readiness struct.
+func readinessToolError(r app.Readiness) (*sdkmcp.CallToolResult, any, error) {
+	var sb strings.Builder
+	switch r.State {
+	case app.ReadinessEmpty:
+		sb.WriteString("Index is empty (never indexed or reset). Not searchable.\n")
+	case app.ReadinessProfileMismatch:
+		sb.WriteString("Embedding profile mismatch. Vector search is invalid until rebuild.\n")
+	default:
+		sb.WriteString("Index is not searchable.\n")
+	}
+	writeReadiness(&sb, r)
+	if r.Action != "" {
+		fmt.Fprintf(&sb, "\nNext: call %s\n", r.Action)
+	}
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+		IsError: true,
+	}, r, nil
+}
+
+// serviceFromRead builds an ephemeral app.Service over a leased RO database.
+func serviceFromRead(readState projectReadSnapshot) *app.Service {
+	return app.NewService(&app.Session{
+		ProjectRoot: readState.projectRoot,
+		Config:      readState.cfg,
+		DB:          readState.database,
+	})
+}
+
 func checkEmbeddingProvider(ctx context.Context, p embed.Provider) *sdkmcp.CallToolResult {
 	if p == nil {
 		return &sdkmcp.CallToolResult{
@@ -989,7 +1056,31 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	}
 	defer state.release()
 	s.observeStateSnapshot("search", state.projectStateSnapshot)
+
+	// Readiness gate runs BEFORE daemon search so empty / profile-mismatch
+	// indexes never look like "No results found" on a warm daemon path.
+	readState, err := state.acquireRead(ctx)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+	readiness, readinessErr := serviceFromRead(readState).Readiness(ctx)
+	if readinessErr != nil {
+		readState.release()
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to compute index readiness: %v", readinessErr)}},
+			IsError: true,
+		}, nil, nil
+	}
+	if readiness.BlocksSearch() {
+		readState.release()
+		return readinessToolError(readiness)
+	}
+
 	if errResult := checkEmbeddingProvider(ctx, state.provider); errResult != nil {
+		readState.release()
 		return errResult, nil, nil
 	}
 
@@ -1053,6 +1144,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	}
 
 	var sb strings.Builder
+	writeReadiness(&sb, readiness)
 
 	// Report scoping status so the caller knows whether codemap was used
 	if scopeNote != "" {
@@ -1060,8 +1152,11 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		sb.WriteString("\n\n")
 	}
 
-	// Try daemon socket first (warm session, no lock needed)
+	// Prefer the daemon for the actual query when available (warm session).
+	// Release the readiness RO lease first so we do not hold a local lock
+	// across the socket round-trip; re-acquire RO only if the daemon fails.
 	if dc := state.daemon; dc != nil && dc.available() {
+		readState.release()
 		params := daemonSearchParams{
 			Query:       input.Query,
 			Limit:       opts.Limit,
@@ -1080,18 +1175,21 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		}
 		rawResult, dErr := dc.search(ctx, params)
 		if dErr == nil {
+			var body strings.Builder
+			writeReadiness(&body, readiness)
+			body.WriteString(formatDaemonSearchResult(rawResult, scopeNote))
 			return &sdkmcp.CallToolResult{
-				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: formatDaemonSearchResult(rawResult, scopeNote)}},
-			}, nil, nil
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: body.String()}},
+			}, readiness, nil
 		}
-		// fall through to RO session on daemon error
-	}
-	readState, err := state.acquireRead(ctx)
-	if err != nil {
-		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
-			IsError: true,
-		}, nil, nil
+		// Daemon failed: re-open RO for the local search path.
+		readState, err = state.acquireRead(ctx)
+		if err != nil {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
+				IsError: true,
+			}, readiness, nil
+		}
 	}
 	defer readState.release()
 	s.observeReadSnapshot("search", readState)
@@ -1103,7 +1201,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
 				IsError: true,
-			}, nil, nil
+			}, readiness, nil
 		}
 
 		// Add explanation to output
@@ -1129,7 +1227,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Search error: %v", err)}},
 				IsError: true,
-			}, nil, nil
+			}, readiness, nil
 		}
 		results := outcome.Results
 
@@ -1153,7 +1251,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
-	}, nil, nil
+	}, readiness, nil
 }
 
 // formatSearchResults formats search results into markdown, including match
@@ -1161,8 +1259,9 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 // agent knows why each hit ranked where it did and what to do next.
 func formatSearchResults(sb *strings.Builder, results []search.Result) {
 	if len(results) == 0 {
+		// True no-match on a searchable index (readiness already gated empty/mismatch).
 		sb.WriteString("No results found.\n")
-		sb.WriteString("\nNext steps: try mode:\"keyword\" for exact identifiers, broaden the query phrasing, or check vecgrep_status to confirm the index is fresh.\n")
+		sb.WriteString("\nNext steps: try mode:\"keyword\" for exact identifiers, or broaden the query phrasing.\n")
 		return
 	}
 
@@ -1202,6 +1301,132 @@ func formatSearchResults(sb *strings.Builder, results []search.Result) {
 		fmt.Fprintf(sb, "Next steps: vecgrep_similar file_location:\"%s:%d\" for related code; codemap_symbol_at to resolve the enclosing symbol.\n",
 			top.RelativePath, top.StartLine)
 	}
+}
+
+// handleEnsure makes project readiness agent-friendly without silent auto-index
+// on every search. Modes: check | index_if_empty | force_rebuild.
+func (s *SDKServer) handleEnsure(ctx context.Context, req *sdkmcp.CallToolRequest, input EnsureInput) (*sdkmcp.CallToolResult, any, error) {
+	mode := strings.ToLower(strings.TrimSpace(input.Mode))
+	if mode == "" {
+		mode = "check"
+	}
+	switch mode {
+	case "check", "index_if_empty", "force_rebuild":
+	default:
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "invalid mode: use check, index_if_empty, or force_rebuild"}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	// Optional path activation (same as init without force/local).
+	if strings.TrimSpace(input.Path) != "" {
+		actResult, _, actErr := s.activateProject(ctx, input.Path)
+		if actErr != nil {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to activate project: %v", actErr)}},
+				IsError: true,
+			}, nil, nil
+		}
+		if actResult != nil && actResult.IsError {
+			return actResult, nil, nil
+		}
+	} else if err := s.ensureInitialized(ctx); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	readState, err := s.acquireProjectReadSnapshot(ctx)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+	readiness, readinessErr := serviceFromRead(readState).Readiness(ctx)
+	readState.release()
+	if readinessErr != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to compute readiness: %v", readinessErr)}},
+			IsError: true,
+		}, nil, nil
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "mode: %s\n", mode)
+	writeReadiness(&sb, readiness)
+
+	needIndex := false
+	force := false
+	switch mode {
+	case "check":
+		// readiness only
+	case "index_if_empty":
+		if readiness.State == app.ReadinessEmpty {
+			needIndex = true
+		}
+	case "force_rebuild":
+		switch readiness.State {
+		case app.ReadinessEmpty, app.ReadinessProfileMismatch, app.ReadinessUnknown:
+			needIndex = true
+			force = true
+		}
+	}
+
+	if !needIndex {
+		if readiness.BlocksSearch() {
+			fmt.Fprintf(&sb, "\nNot searchable. Next: call %s\n", readiness.Action)
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+				IsError: true,
+			}, readiness, nil
+		}
+		sb.WriteString("\nReady for search (or searchable with attached readiness).\n")
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+		}, readiness, nil
+	}
+
+	sb.WriteString("\nIndexing…\n")
+	indexResult, _, indexErr := s.handleIndex(ctx, req, IndexInput{Force: force})
+	if indexErr != nil {
+		return indexResult, readiness, indexErr
+	}
+	if indexResult != nil && indexResult.IsError {
+		// Surface index failure with prior readiness context.
+		var out strings.Builder
+		out.WriteString(sb.String())
+		if len(indexResult.Content) > 0 {
+			if tc, ok := indexResult.Content[0].(*sdkmcp.TextContent); ok {
+				out.WriteString(tc.Text)
+			}
+		}
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: out.String()}},
+			IsError: true,
+		}, readiness, nil
+	}
+
+	// Recompute readiness after index.
+	readState, err = s.acquireProjectReadSnapshot(ctx)
+	if err == nil {
+		if after, aerr := serviceFromRead(readState).Readiness(ctx); aerr == nil {
+			readiness = after
+		}
+		readState.release()
+	}
+	if indexResult != nil && len(indexResult.Content) > 0 {
+		if tc, ok := indexResult.Content[0].(*sdkmcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+			sb.WriteString("\n")
+		}
+	}
+	writeReadiness(&sb, readiness)
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+	}, readiness, nil
 }
 
 // handleIndex handles the vecgrep_index tool.
@@ -1303,21 +1528,19 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 		}, nil, nil
 	}
 
-	// The daemon branch needs only the immutable client/root pair. If it fails,
-	// acquireProjectReadSnapshot below captures a fresh, coherent direct-read
-	// activation instead of mixing this snapshot with independently read fields.
-	state := s.snapshotProjectState()
-	if dc := state.daemon; dc != nil && dc.available() {
-		if rawStats, dErr := dc.stats(ctx); dErr == nil {
-			return &sdkmcp.CallToolResult{
-				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: formatStatsResult(rawStats, state.projectRoot)}},
-			}, nil, nil
-		}
-		// fall through to RO session
-	}
-
+	// Prefer a local RO lease so readiness includes profile + IndexMeta even
+	// when the daemon can serve stats. Daemon-only stats omit profile state.
 	readState, err := s.acquireProjectReadSnapshot(ctx)
 	if err != nil {
+		// Fall back to daemon stats when the local index is locked for read.
+		state := s.snapshotProjectState()
+		if dc := state.daemon; dc != nil && dc.available() {
+			if rawStats, dErr := dc.stats(ctx); dErr == nil {
+				return &sdkmcp.CallToolResult{
+					Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: formatStatsResult(rawStats, state.projectRoot)}},
+				}, nil, nil
+			}
+		}
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
 			IsError: true,
@@ -1353,15 +1576,13 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 		}
 	}
 
-	// The same leased database and activation config drive freshness; opening a
-	// second RO handle or reloading config by a newly activated root would tear
-	// one status response across projects.
-	freshnessService := app.NewService(&app.Session{
-		ProjectRoot: readState.projectRoot,
-		Config:      readState.cfg,
-		DB:          readState.database,
-	})
-	freshness, pending, freshnessErr := freshnessService.IndexFreshness(ctx)
+	// The same leased database and activation config drive readiness + freshness.
+	statusService := serviceFromRead(readState)
+	readiness, readinessErr := statusService.Readiness(ctx)
+	if readinessErr == nil {
+		writeReadiness(&sb, readiness)
+	}
+	freshness, pending, freshnessErr := statusService.IndexFreshness(ctx)
 	if freshnessErr == nil {
 		writeFreshnessStatus(&sb, freshness, pending)
 	}
@@ -1371,9 +1592,13 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 		writeCodemapStatusFor(ctx, &sb, readState.codemap, readState.projectRoot)
 	}
 
+	var structured any
+	if readinessErr == nil {
+		structured = readiness
+	}
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
-	}, nil, nil
+	}, structured, nil
 }
 
 // writeCodemapStatus reports the peer codemap graph's state (G4 cross-read):

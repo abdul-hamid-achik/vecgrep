@@ -83,15 +83,66 @@ func DefaultIndexerConfig() IndexerConfig {
 	}
 }
 
+// ProgressPhase is a coarse stage label for UI consumers.
+type ProgressPhase string
+
+const (
+	// PhaseDiscover: walk still running; queued total may grow. Do not show %.
+	PhaseDiscover ProgressPhase = "discover"
+	// PhaseEmbed: walk finished; QueuedFiles/TotalFiles is fixed. % is honest.
+	PhaseEmbed ProgressPhase = "embed"
+)
+
 // Progress represents indexing progress information.
+//
+// TotalFiles is kept as an alias of QueuedFiles (files sent to the embed
+// pipeline) for backward compatibility with CLI/Studio consumers.
+// Percent-complete is only meaningful when WalkComplete is true.
 type Progress struct {
-	TotalFiles     int
+	// WalkedFiles is how many regular files the walker considered (including skips).
+	WalkedFiles int
+	// QueuedFiles is files sent to the embed pipeline (needs work).
+	QueuedFiles int
+	// TotalFiles is the same as QueuedFiles (legacy field name).
+	TotalFiles int
+	// ProcessedFiles is files finished through the embed/insert path.
 	ProcessedFiles int
-	SkippedFiles   int
-	TotalChunks    int
-	CurrentFile    string
-	StartTime      time.Time
-	Errors         []error
+	// SkippedFiles is unchanged/filtered files not queued for embed.
+	SkippedFiles int
+	TotalChunks  int
+	CurrentFile  string
+	// WalkComplete is true after the walker has finished (QueuedFiles is final).
+	WalkComplete bool
+	// Phase is discover while walking, embed once the walk is complete.
+	Phase     ProgressPhase
+	StartTime time.Time
+	Errors    []error
+}
+
+// HonestPercent reports completion as Processed/Queued only after the walk
+// finishes. Returns 0 when percent would be misleading.
+func (p Progress) HonestPercent() float64 {
+	if !p.WalkComplete {
+		return 0
+	}
+	queued := p.QueuedFiles
+	if queued <= 0 {
+		queued = p.TotalFiles
+	}
+	if queued <= 0 {
+		if p.WalkComplete {
+			return 1
+		}
+		return 0
+	}
+	pct := float64(p.ProcessedFiles) / float64(queued)
+	if pct < 0 {
+		return 0
+	}
+	if pct > 1 {
+		return 1
+	}
+	return pct
 }
 
 // ProgressCallback is called during indexing to report progress.
@@ -404,9 +455,54 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 	// read by the results collector.
 	var totalDiscovered int64 // files queued for indexing
 	var skippedCount int64    // files skipped (unchanged)
+	var walkedCount int64     // files considered by the walker
+	var processedCount int64  // files finished embed/insert
+	var chunksCount int64
+	var walkComplete atomic.Bool
+	var currentFile atomic.Value // string
+	currentFile.Store("")
 	var scan *fullScanState
 	if deleteExisting && len(paths) == 0 {
 		scan = newFullScanState()
+	}
+
+	// progressMu serializes Progress callbacks (walker ticks + result ticks).
+	var progressMu sync.Mutex
+	var progressErrors []error
+	emitProgress := func() {
+		if idx.progress == nil {
+			return
+		}
+		queued := int(atomic.LoadInt64(&totalDiscovered))
+		skipped := int(atomic.LoadInt64(&skippedCount))
+		walked := int(atomic.LoadInt64(&walkedCount))
+		processed := int(atomic.LoadInt64(&processedCount))
+		chunks := int(atomic.LoadInt64(&chunksCount))
+		done := walkComplete.Load()
+		phase := PhaseDiscover
+		if done {
+			phase = PhaseEmbed
+		}
+		cur, _ := currentFile.Load().(string)
+		progressMu.Lock()
+		errs := progressErrors
+		progressMu.Unlock()
+		p := Progress{
+			WalkedFiles:    walked,
+			QueuedFiles:    queued,
+			TotalFiles:     queued,
+			ProcessedFiles: processed,
+			SkippedFiles:   skipped,
+			TotalChunks:    chunks,
+			CurrentFile:    cur,
+			WalkComplete:   done,
+			Phase:          phase,
+			StartTime:      startTime,
+			Errors:         errs,
+		}
+		progressMu.Lock()
+		idx.progress(p)
+		progressMu.Unlock()
 	}
 
 	// Stage 1: chunk workers. Read + chunk each changed file and emit one item
@@ -458,10 +554,13 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 	go func() {
 		var err error
 		if prepared != nil {
-			err = feedPreparedFiles(ctx, *prepared, existingHashes, scan, fileChan, &totalDiscovered, &skippedCount)
+			err = feedPreparedFiles(ctx, *prepared, existingHashes, scan, fileChan, &totalDiscovered, &skippedCount, &walkedCount, emitProgress)
 		} else {
-			err = idx.walkAndFilterStructural(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, structural, scan, sourceBudget, sourceBudgetBytes, fileChan, &totalDiscovered, &skippedCount)
+			err = idx.walkAndFilterStructural(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, structural, scan, sourceBudget, sourceBudgetBytes, fileChan, &totalDiscovered, &skippedCount, &walkedCount, emitProgress)
 		}
+		walkComplete.Store(true)
+		// Emit a final discover→embed transition tick so UIs drop false % mode.
+		emitProgress()
 		close(fileChan)
 		walkErrCh <- err
 	}()
@@ -469,8 +568,10 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 	result := &IndexResult{}
 	if structuralWarning != nil {
 		result.Errors = append(result.Errors, structuralWarning)
+		progressMu.Lock()
+		progressErrors = append(progressErrors, structuralWarning)
+		progressMu.Unlock()
 	}
-	progress := Progress{StartTime: startTime}
 
 	// Incremental sync thresholds (fall back to defaults when unset).
 	syncInterval := idx.config.SyncInterval
@@ -485,25 +586,25 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 	lastSyncTime := time.Now()
 	synced := false
 
+	// Cold-start tick so the UI leaves "idle" even before the first file finishes.
+	emitProgress()
+
 	for r := range resultsChan {
 		result.FilesProcessed++
 		result.ChunksCreated += r.chunksCreated
 		result.Ingestion.add(r.ingestion)
+		atomic.StoreInt64(&processedCount, int64(result.FilesProcessed))
+		atomic.StoreInt64(&chunksCount, int64(result.ChunksCreated))
+		currentFile.Store(r.path)
 
 		if r.err != nil {
 			result.Errors = append(result.Errors, r.err)
+			progressMu.Lock()
+			progressErrors = append(progressErrors, r.err)
+			progressMu.Unlock()
 		}
 
-		progress.ProcessedFiles = result.FilesProcessed
-		progress.TotalChunks = result.ChunksCreated
-		progress.CurrentFile = r.path
-		progress.Errors = result.Errors
-		progress.TotalFiles = int(atomic.LoadInt64(&totalDiscovered))
-		progress.SkippedFiles = int(atomic.LoadInt64(&skippedCount))
-
-		if idx.progress != nil {
-			idx.progress(progress)
-		}
+		emitProgress()
 
 		// Incremental DB sync: flush periodically so a long indexing
 		// run is crash-resilient and search can see partial progress.
@@ -1052,19 +1153,31 @@ func structuralPathSelected(absRoot, relativePath string, paths []string) bool {
 	return false
 }
 
-func feedPreparedFiles(ctx context.Context, files []fileInfo, existingHashes map[string]string, scan *fullScanState, fileChan chan<- fileInfo, totalDiscovered, skippedCount *int64) error {
+// walkTick is an optional progress callback invoked from the walker (throttled).
+type walkTick func()
+
+func feedPreparedFiles(ctx context.Context, files []fileInfo, existingHashes map[string]string, scan *fullScanState, fileChan chan<- fileInfo, totalDiscovered, skippedCount, walkedCount *int64, tick walkTick) error {
 	for _, file := range files {
+		if walkedCount != nil {
+			atomic.AddInt64(walkedCount, 1)
+		}
 		if scan != nil {
 			scan.observe(file.relativePath)
 		}
 		if existingHash, exists := existingHashes[file.relativePath]; exists && existingHash == file.hash {
 			atomic.AddInt64(skippedCount, 1)
+			if tick != nil {
+				tick()
+			}
 			continue
 		}
 		file.queueBytes = 0 // content is already retained by the preflight slice
 		select {
 		case fileChan <- file:
 			atomic.AddInt64(totalDiscovered, 1)
+			if tick != nil {
+				tick()
+			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -1091,7 +1204,7 @@ func (idx *Indexer) walkAndFilter(
 	totalDiscovered *int64,
 	skippedCount *int64,
 ) error {
-	return idx.walkAndFilterStructural(ctx, rootPath, absRoot, paths, ignore, existingHashes, nil, nil, sourceBudget, sourceBufferBytes, fileChan, totalDiscovered, skippedCount)
+	return idx.walkAndFilterStructural(ctx, rootPath, absRoot, paths, ignore, existingHashes, nil, nil, sourceBudget, sourceBufferBytes, fileChan, totalDiscovered, skippedCount, nil, nil)
 }
 
 func (idx *Indexer) walkAndFilterStructural(
@@ -1107,7 +1220,24 @@ func (idx *Indexer) walkAndFilterStructural(
 	fileChan chan<- fileInfo,
 	totalDiscovered *int64,
 	skippedCount *int64,
+	walkedCount *int64,
+	tick walkTick,
 ) error {
+	// Throttle discover ticks so large trees do not flood the UI callback.
+	var lastTick time.Time
+	var tickCount int64
+	maybeTick := func() {
+		if tick == nil {
+			return
+		}
+		tickCount++
+		now := time.Now()
+		if tickCount == 1 || tickCount%25 == 0 || now.Sub(lastTick) >= 100*time.Millisecond {
+			lastTick = now
+			tick()
+		}
+	}
+
 	// If no paths specified, use root
 	if len(paths) == 0 {
 		paths = []string{absRoot}
@@ -1166,6 +1296,9 @@ func (idx *Indexer) walkAndFilterStructural(
 			if info.Size() > idx.config.MaxFileSize {
 				return nil
 			}
+			if walkedCount != nil {
+				atomic.AddInt64(walkedCount, 1)
+			}
 			if scan != nil {
 				scan.observe(relPath)
 			}
@@ -1216,6 +1349,7 @@ func (idx *Indexer) walkAndFilterStructural(
 			if existingHash, exists := existingHashes[relPath]; exists && existingHash == hash {
 				sourceBudget.Release(reservedBytes)
 				atomic.AddInt64(skippedCount, 1)
+				maybeTick()
 				return nil
 			}
 
@@ -1232,6 +1366,7 @@ func (idx *Indexer) walkAndFilterStructural(
 			select {
 			case fileChan <- fi:
 				atomic.AddInt64(totalDiscovered, 1)
+				maybeTick()
 			case <-ctx.Done():
 				sourceBudget.Release(reservedBytes)
 				return ctx.Err()

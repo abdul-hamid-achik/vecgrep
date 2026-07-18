@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 )
 
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns what it
@@ -120,11 +122,12 @@ func TestIndexProgressModel_ETA(t *testing.T) {
 		model    indexProgressModel
 		wantText bool // true => non-empty ETA expected
 	}{
-		{"zero start", indexProgressModel{done: 5, total: 100}, false},
-		{"done<2", indexProgressModel{start: time.Now().Add(-2 * time.Second), done: 1, total: 100}, false},
-		{"total<=done", indexProgressModel{start: time.Now().Add(-2 * time.Second), done: 10, total: 10}, false},
-		{"elapsed<1s", indexProgressModel{start: time.Now(), done: 5, total: 100}, false},
-		{"happy path", indexProgressModel{start: time.Now().Add(-2 * time.Second), done: 10, total: 100}, true},
+		{"zero start", indexProgressModel{progress: index.Progress{ProcessedFiles: 5, QueuedFiles: 100, WalkComplete: true}}, false},
+		{"done<2", indexProgressModel{start: time.Now().Add(-2 * time.Second), progress: index.Progress{ProcessedFiles: 1, QueuedFiles: 100, WalkComplete: true}}, false},
+		{"total<=done", indexProgressModel{start: time.Now().Add(-2 * time.Second), progress: index.Progress{ProcessedFiles: 10, QueuedFiles: 10, WalkComplete: true}}, false},
+		{"walk open", indexProgressModel{start: time.Now().Add(-2 * time.Second), progress: index.Progress{ProcessedFiles: 10, QueuedFiles: 100, WalkComplete: false}}, false},
+		{"elapsed<1s", indexProgressModel{start: time.Now(), progress: index.Progress{ProcessedFiles: 5, QueuedFiles: 100, WalkComplete: true}}, false},
+		{"happy path", indexProgressModel{start: time.Now().Add(-2 * time.Second), progress: index.Progress{ProcessedFiles: 10, QueuedFiles: 100, WalkComplete: true}}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,16 +149,40 @@ func TestIndexProgressModel_View(t *testing.T) {
 		t.Errorf("finished View = %q, want empty", got)
 	}
 
-	// total==0 -> "warming up…" hint instead of a silent 0/0 bar.
+	// walk open, no files yet -> discovering…
 	warming := newIndexProgressModel()
-	if got := warming.View().Content; !strings.Contains(got, "warming up") {
-		t.Errorf("total==0 View = %q, want it to contain \"warming up\"", got)
+	if got := warming.View().Content; !strings.Contains(got, "discovering") {
+		t.Errorf("cold View = %q, want it to contain \"discovering\"", got)
 	}
 
-	// total>0 -> shows the done/total counter.
-	prog := newIndexProgressModel()
-	prog.done, prog.total = 3, 7
-	if got := prog.View().Content; !strings.Contains(got, "3/7") {
-		t.Errorf("View = %q, want it to contain \"3/7\"", got)
+	// walk open with counters -> embed/queued, no percent.
+	discovering := newIndexProgressModel()
+	discovering.progress = index.Progress{
+		ProcessedFiles: 3,
+		QueuedFiles:    7,
+		WalkedFiles:    20,
+		SkippedFiles:   5,
+		WalkComplete:   false,
+		Phase:          index.PhaseDiscover,
+	}
+	got := discovering.View().Content
+	if !strings.Contains(got, "embed 3") || !strings.Contains(got, "queued 7") {
+		t.Errorf("discover View = %q, want embed/queued counters", got)
+	}
+	if strings.Contains(got, "%") {
+		t.Errorf("discover View = %q, must not show percent", got)
+	}
+
+	// walk complete -> shows percent / N/M.
+	done := newIndexProgressModel()
+	done.progress = index.Progress{
+		ProcessedFiles: 3,
+		QueuedFiles:    7,
+		TotalFiles:     7,
+		WalkComplete:   true,
+		Phase:          index.PhaseEmbed,
+	}
+	if got := done.View().Content; !strings.Contains(got, "3/7") {
+		t.Errorf("embed View = %q, want it to contain \"3/7\"", got)
 	}
 }

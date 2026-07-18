@@ -722,8 +722,8 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
 		if errors.Is(err, veclite.ErrFileLocked) || strings.Contains(strings.ToLower(err.Error()), "locked") {
-			fmt.Fprintln(os.Stderr, "\nError: the database is locked. The daemon may be running.")
-			fmt.Fprintln(os.Stderr, "  Use 'vecgrep daemon reindex' or stop the daemon first.")
+			fmt.Fprintln(os.Stderr, "\nError: the database is locked by another process (e.g. studio, index, MCP server, or daemon).")
+			fmt.Fprintln(os.Stderr, "  Stop that process, or if a daemon hub owns the project run 'vecgrep daemon reindex'.")
 			os.Exit(1)
 		}
 		return err
@@ -794,20 +794,29 @@ func runIndex(cmd *cobra.Command, args []string) error {
 				// line (shorter filename or smaller counts) doesn't leave
 				// trailing characters from the previous, longer line.
 				//
-				// Only show rate/ETA after at least 1 file is processed and
-				// elapsed > 1 second to avoid division by zero and misleading
-				// early rates.
+				// Phase-aware verbose progress: no false % / ETA until walk complete.
 				elapsed := time.Since(p.StartTime)
-				if p.ProcessedFiles > 0 && elapsed > time.Second {
+				if !p.WalkComplete {
+					fmt.Printf("\r  discovering embed=%d queued=%d skip=%d walked=%d %s\033[K",
+						p.ProcessedFiles, p.QueuedFiles, p.SkippedFiles, p.WalkedFiles, p.CurrentFile)
+				} else if p.ProcessedFiles > 1 && elapsed > time.Second {
+					queued := p.QueuedFiles
+					if queued == 0 {
+						queued = p.TotalFiles
+					}
 					rate := float64(p.ProcessedFiles) / elapsed.Seconds()
-					remaining := p.TotalFiles - p.ProcessedFiles
+					remaining := queued - p.ProcessedFiles
 					eta := time.Duration(float64(remaining) / rate * float64(time.Second))
 					fmt.Printf("\r  %s (%d/%d files, %d chunks, %.1f files/s, ETA %s)\033[K",
-						p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks,
+						p.CurrentFile, p.ProcessedFiles, queued, p.TotalChunks,
 						rate, formatETA(eta))
 				} else {
+					queued := p.QueuedFiles
+					if queued == 0 {
+						queued = p.TotalFiles
+					}
 					fmt.Printf("\r  %s (%d/%d files, %d chunks)\033[K",
-						p.CurrentFile, p.ProcessedFiles, p.TotalFiles, p.TotalChunks)
+						p.CurrentFile, p.ProcessedFiles, queued, p.TotalChunks)
 				}
 			}
 		}

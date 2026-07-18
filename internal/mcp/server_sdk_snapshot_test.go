@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
 	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -215,14 +216,10 @@ func TestHandleSearchUsesDaemonBeforeReadOnlyLease(t *testing.T) {
 	})
 	defer shutdown()
 
-	// Model the daemon worker's long-lived writable handle. A daemon-first
-	// handler succeeds without waiting for or opening MCP's RO database; the
-	// old RO-first ordering would block here until ctx expires.
-	_, releaseWriter, err := session.acquireWriteDB(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = releaseWriter() }()
+	// Search now gates readiness via a short RO lease, then prefers the daemon
+	// for the actual query and releases the RO handle before returning so a
+	// long-lived exclusive writer (separate process / later reindex) is not
+	// blocked by a leftover MCP RO cache.
 	s := &SDKServer{
 		session:     session,
 		daemon:      &daemonClient{socketPath: socketPath, projectRoot: root},
@@ -236,12 +233,16 @@ func TestHandleSearchUsesDaemonBeforeReadOnlyLease(t *testing.T) {
 	if !strings.Contains(text, "DAEMON_MARKER") {
 		t.Fatalf("daemon result missing:\n%s", text)
 	}
-	session.mu.Lock()
-	ro := session.ro
-	session.mu.Unlock()
-	if ro != nil {
-		t.Fatal("daemon-success search opened a read-only database")
+	// Readiness opens a short RO lease then prefers daemon for hits. The
+	// session may keep a cached RO handle after the lease ends; a subsequent
+	// exclusive write must still be acquirable without waiting for ctx.
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), time.Second)
+	defer writeCancel()
+	_, releaseWriter, err := session.acquireWriteDB(writeCtx)
+	if err != nil {
+		t.Fatalf("post-search write lease should be available after readiness RO release: %v", err)
 	}
+	_ = releaseWriter()
 }
 
 func TestOverviewAndBatchSearchKeepOneProjectActivationAcrossSwitch(t *testing.T) {
@@ -515,6 +516,11 @@ func newSnapshotSearchSession(t *testing.T, name, marker string) (*mcpSession, s
 			_ = release()
 			t.Fatal(err)
 		}
+	}
+	// Persist a matching embedding profile so readiness does not block search.
+	if err := app.SaveEmbeddingProfile(database, cfg.DataDir, app.CurrentEmbeddingProfile(cfg)); err != nil {
+		_ = release()
+		t.Fatal(err)
 	}
 	if err := database.Sync(); err != nil {
 		_ = release()

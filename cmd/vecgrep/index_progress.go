@@ -16,28 +16,25 @@ import (
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 )
 
-// fileMsg advances the bar to a processed file; doneMsg tells it indexing
-// finished and it should quit (the real IndexResult is delivered out-of-band,
-// see runIndexWithBar).
+// fileMsg advances the bar; doneMsg tells it indexing finished and it should
+// quit (the real IndexResult is delivered out-of-band, see runIndexWithBar).
 type (
 	fileMsg struct {
-		done, total int
-		file        string
+		progress index.Progress
 	}
 	doneMsg struct{}
 )
 
 // indexProgressModel is a minimal inline Bubble Tea program: a single animated
-// gradient progress bar that tracks indexing, file by file. It mirrors the
-// look of codemap's index bar — a blended purple→pink bar with percentage,
-// file count, and the current path.
+// gradient progress bar that tracks indexing. It mirrors the look of codemap's
+// index bar — blended purple→pink — with phase-aware counters so discover
+// never shows a lying percentage.
 type indexProgressModel struct {
-	prog        progress.Model
-	done, total int
-	file        string
-	start       time.Time // set on the first file; anchors the ETA estimate
-	finished    bool      // indexing reported done
-	canceled    bool      // user pressed ctrl+c
+	prog     progress.Model
+	progress index.Progress
+	start    time.Time // set on the first tick; anchors the ETA estimate
+	finished bool      // indexing reported done
+	canceled bool      // user pressed ctrl+c
 }
 
 func newIndexProgressModel() indexProgressModel {
@@ -52,12 +49,13 @@ func (m indexProgressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.start.IsZero() {
 			m.start = time.Now()
 		}
-		m.done, m.total, m.file = msg.done, msg.total, msg.file
-		var pct float64
-		if msg.total > 0 {
-			pct = float64(msg.done) / float64(msg.total)
+		m.progress = msg.progress
+		// Only drive the gradient fill when the walk is complete (honest %).
+		if msg.progress.WalkComplete {
+			return m, m.prog.SetPercent(msg.progress.HonestPercent())
 		}
-		return m, m.prog.SetPercent(pct)
+		// Indeterminate: leave bar at low fill; don't set a shrinking percent.
+		return m, m.prog.SetPercent(0.08)
 	case doneMsg:
 		m.finished = true
 		return m, tea.Quit
@@ -78,39 +76,77 @@ func (m indexProgressModel) View() tea.View {
 	if m.finished {
 		return tea.NewView("") // clear the bar; the summary prints after the program quits
 	}
-	line := m.prog.View()
-	if m.total == 0 {
-		// No files reported yet: the embedding model is loading and the walk is
-		// still discovering files. Show a hint instead of a silent 0/0 bar (the
-		// warm-up log line is suppressed while the bar is live).
-		return tea.NewView(line + "  warming up…")
+	p := m.progress
+
+	// Cold start / still discovering with no signal yet.
+	if p.WalkedFiles == 0 && p.QueuedFiles == 0 && p.ProcessedFiles == 0 && !p.WalkComplete {
+		// No gradient percent — bubbles progress always renders "%".
+		return tea.NewView("…  discovering…")
 	}
-	line += fmt.Sprintf("  %d/%d", m.done, m.total)
+
+	if !p.WalkComplete {
+		// No honest %: counters only (never show a shrinking percent).
+		line := fmt.Sprintf("…  embed %d · queued %d", p.ProcessedFiles, p.QueuedFiles)
+		if p.SkippedFiles > 0 {
+			line += fmt.Sprintf(" · skip %d", p.SkippedFiles)
+		}
+		if p.WalkedFiles > 0 {
+			line += fmt.Sprintf(" · walked %d", p.WalkedFiles)
+		}
+		if p.CurrentFile != "" {
+			line += "  " + truncStr(p.CurrentFile, 26)
+		}
+		return tea.NewView(line)
+	}
+
+	// Walk complete: gradient bar + honest percent + classic N/M + ETA.
+	line := m.prog.View()
+	queued := p.QueuedFiles
+	if queued == 0 {
+		queued = p.TotalFiles
+	}
+	if queued == 0 && p.ProcessedFiles == 0 {
+		// All-skip / nothing to embed.
+		line += "  100%  0 to embed"
+		if p.SkippedFiles > 0 {
+			line += fmt.Sprintf("  skipped %d", p.SkippedFiles)
+		}
+		return tea.NewView(line)
+	}
+	pct := int(p.HonestPercent() * 100)
+	line += fmt.Sprintf("  %d%%  %d/%d", pct, p.ProcessedFiles, queued)
 	if eta := m.eta(); eta != "" {
 		line += "  ~" + eta + " left"
 	}
-	if m.file != "" {
-		line += "  " + truncStr(m.file, 26)
+	if p.CurrentFile != "" {
+		line += "  " + truncStr(p.CurrentFile, 26)
 	}
 	return tea.NewView(line) // inline (AltScreen defaults false) — a transient one-liner
 }
 
-// eta returns a compact remaining-time estimate, or "" when there isn't enough
-// signal yet (need a couple of files done and a second elapsed to avoid wild
-// early guesses).
+// eta returns a compact remaining-time estimate only after the walk completes
+// and enough files have finished (avoid wild early guesses).
 func (m indexProgressModel) eta() string {
-	if m.start.IsZero() || m.done < 2 || m.total <= m.done {
+	p := m.progress
+	if !p.WalkComplete || m.start.IsZero() || p.ProcessedFiles < 2 {
+		return ""
+	}
+	queued := p.QueuedFiles
+	if queued == 0 {
+		queued = p.TotalFiles
+	}
+	if queued <= p.ProcessedFiles {
 		return ""
 	}
 	elapsed := time.Since(m.start)
 	if elapsed < time.Second {
 		return ""
 	}
-	rate := float64(m.done) / elapsed.Seconds() // files per second
+	rate := float64(p.ProcessedFiles) / elapsed.Seconds() // files per second
 	if rate <= 0 {
 		return ""
 	}
-	remaining := time.Duration(float64(m.total-m.done) / rate * float64(time.Second))
+	remaining := time.Duration(float64(queued-p.ProcessedFiles) / rate * float64(time.Second))
 	return formatETA(remaining)
 }
 
@@ -138,7 +174,7 @@ func runIndexWithBar(ctx context.Context, service *app.Service, req app.IndexReq
 
 	prog := tea.NewProgram(newIndexProgressModel(), tea.WithContext(ctx))
 	progressCB := func(p index.Progress) {
-		prog.Send(fileMsg{done: p.ProcessedFiles, total: p.TotalFiles, file: p.CurrentFile})
+		prog.Send(fileMsg{progress: p})
 	}
 
 	type indexOut struct {

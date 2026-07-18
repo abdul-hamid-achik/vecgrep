@@ -252,6 +252,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.readOnly = msg.readOnly
 		if msg.readOnly {
 			m.statusMessage = "ready (read-only — daemon owns the index)"
+		} else if m.isIndexEmpty() {
+			m.statusMessage = "empty index — press r to index"
 		} else {
 			m.statusMessage = "ready"
 		}
@@ -1071,13 +1073,19 @@ func (m Model) renderPreview() string {
 }
 
 func (m Model) renderResults(width int) string {
-	if m.indexing {
+	// First full index / empty project: take over results with progress.
+	// Incremental reindex with existing results: keep the list and show a strip
+	// in the footer (statusMessage) instead of wiping hits.
+	if m.indexing && len(m.results) == 0 {
 		return m.renderIndexProgress(width)
 	}
 	if m.loading {
 		return mutedStyle.Render("Searching...")
 	}
 	if len(m.results) == 0 {
+		if m.isIndexEmpty() {
+			return mutedStyle.Render("No index yet. Press r to index this project.")
+		}
 		if m.lastQuery == "" {
 			return mutedStyle.Render("Type a query and press enter.")
 		}
@@ -1135,27 +1143,35 @@ func (m Model) renderResultRow(index int, result search.Result, width int) strin
 	return truncateDisplay(row, width)
 }
 
+func (m Model) isIndexEmpty() bool {
+	if m.status == nil || m.status.Stats == nil {
+		return false
+	}
+	return m.status.Stats["chunks"] == 0 && m.status.Stats["files"] == 0
+}
+
 func (m Model) renderIndexProgress(width int) string {
 	progress := m.indexProgress
 	if progress == nil {
-		return mutedStyle.Render("Indexing current project...")
+		return mutedStyle.Render("Discovering project files…")
 	}
 
-	total := progress.TotalFiles
 	processed := progress.ProcessedFiles
-	bar := progressBar(processed, total, clamp(width-22, 10, 36))
+	queued := progress.QueuedFiles
+	if queued == 0 {
+		queued = progress.TotalFiles
+	}
 	elapsed := ""
 	rateStr := ""
 	etaStr := ""
 	if !progress.StartTime.IsZero() {
 		elapsedDur := time.Since(progress.StartTime)
 		elapsed = "  " + elapsedDur.Round(time.Second).String()
-		// Show rate and ETA after at least 1 file is processed and > 1s
-		// elapsed to avoid misleading early rates.
-		if processed > 0 && elapsedDur > time.Second {
+		// Rate/ETA only after walk complete + enough signal.
+		if progress.WalkComplete && processed > 1 && elapsedDur > time.Second {
 			rate := float64(processed) / elapsedDur.Seconds()
 			rateStr = fmt.Sprintf("%.1f files/s", rate)
-			remaining := total - processed
+			remaining := queued - processed
 			if remaining > 0 && rate > 0 {
 				eta := time.Duration(float64(remaining) / rate * float64(time.Second))
 				etaStr = "ETA " + formatETA(eta)
@@ -1163,25 +1179,35 @@ func (m Model) renderIndexProgress(width int) string {
 		}
 	}
 
-	lines := []string{
-		fmt.Sprintf("%s  %d/%d files%s", bar, processed, total, elapsed),
-		fmt.Sprintf("%d skipped  %d chunks", progress.SkippedFiles, progress.TotalChunks),
-	}
-	if rateStr != "" {
-		line := rateStr
-		if etaStr != "" {
-			line += "  " + etaStr
+	var lines []string
+	if !progress.WalkComplete {
+		title := "Discovering · embedding"
+		if progress.Phase == index.PhaseDiscover {
+			title = "Discovering · embedding"
 		}
-		lines = append(lines, line)
+		lines = []string{
+			title + elapsed,
+			fmt.Sprintf("embed %d · queued %d · skip %d · walked %d",
+				processed, queued, progress.SkippedFiles, progress.WalkedFiles),
+			fmt.Sprintf("%d chunks", progress.TotalChunks),
+		}
+	} else {
+		bar := progressBar(processed, queued, clamp(width-22, 10, 36))
+		lines = []string{
+			"Embedding" + elapsed,
+			fmt.Sprintf("%s  %d/%d files", bar, processed, queued),
+			fmt.Sprintf("%d skipped  %d chunks", progress.SkippedFiles, progress.TotalChunks),
+		}
+		if rateStr != "" {
+			line := rateStr
+			if etaStr != "" {
+				line += "  " + etaStr
+			}
+			lines = append(lines, line)
+		}
 	}
 	if progress.CurrentFile != "" {
-		lines = append(lines, "Current: "+truncateDisplay(displayIndexPath(m.session, progress.CurrentFile), width-9))
-	}
-	if len(m.indexRecent) > 0 {
-		lines = append(lines, "", "Recent")
-		for _, path := range m.indexRecent {
-			lines = append(lines, "  "+truncateDisplay(path, width-4))
-		}
+		lines = append(lines, "→ "+truncateDisplay(displayIndexPath(m.session, progress.CurrentFile), width-4))
 	}
 	if len(progress.Errors) > 0 {
 		lines = append(lines, "", warnStyle.Render(fmt.Sprintf("%d warnings", len(progress.Errors))))
@@ -1392,9 +1418,10 @@ func (m Model) renderHelp() string {
 		"L / T        cycle language / type filters",
 		"+ / -        change limit",
 		"s            find similar to selected result",
-		"r / R        index / full reindex (shows ETA + rate)",
+		"r / R        index / full reindex (phase-aware progress)",
 		"x            delete selected file",
 		"i            register this folder globally when none is open",
+		"             (empty index: press r after init to first-index)",
 		"o            open selected result in EDITOR",
 		"v / c / ?    status / config / help",
 		"!            reset project index",
@@ -1410,7 +1437,21 @@ func (m Model) renderHelp() string {
 
 func (m Model) renderFooter() string {
 	var parts []string
-	if m.statusMessage != "" {
+	// Compact progress strip when reindexing with existing results still visible.
+	if m.indexing && len(m.results) > 0 && m.indexProgress != nil {
+		p := m.indexProgress
+		if !p.WalkComplete {
+			parts = append(parts, fmt.Sprintf("discovering  embed %d · queued %d · walk %d",
+				p.ProcessedFiles, p.QueuedFiles, p.WalkedFiles))
+		} else {
+			queued := p.QueuedFiles
+			if queued == 0 {
+				queued = p.TotalFiles
+			}
+			parts = append(parts, fmt.Sprintf("embedding  %d/%d  %d%%",
+				p.ProcessedFiles, queued, int(p.HonestPercent()*100)))
+		}
+	} else if m.statusMessage != "" {
 		parts = append(parts, m.statusMessage)
 	}
 	if m.errMessage != "" {

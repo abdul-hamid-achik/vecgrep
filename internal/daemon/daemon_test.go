@@ -188,7 +188,7 @@ func TestIsRunningWedgedSocket(t *testing.T) {
 			// Hold the connection open without ever writing a response.
 			go func(c net.Conn) {
 				<-done
-				c.Close()
+				_ = c.Close()
 			}(conn)
 		}
 	}()

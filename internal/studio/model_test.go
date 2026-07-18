@@ -347,7 +347,7 @@ func TestModelInitShortcutWorksWithoutProject(t *testing.T) {
 	}
 }
 
-func TestModelRenderIndexProgressShowsCountersAndRecentFiles(t *testing.T) {
+func TestModelRenderIndexProgressShowsCountersWhenWalkComplete(t *testing.T) {
 	m := NewModel(context.Background(), "/repo")
 	m.width = 100
 	m.height = 30
@@ -355,19 +355,49 @@ func TestModelRenderIndexProgressShowsCountersAndRecentFiles(t *testing.T) {
 	m.indexing = true
 	progress := index.Progress{
 		TotalFiles:     10,
+		QueuedFiles:    10,
 		ProcessedFiles: 4,
 		SkippedFiles:   2,
 		TotalChunks:    18,
+		WalkComplete:   true,
+		Phase:          index.PhaseEmbed,
 		CurrentFile:    "/repo/internal/search/search.go",
 		StartTime:      time.Now().Add(-2 * time.Second),
 	}
 	m.indexProgress = &progress
-	m.addIndexRecent(progress.CurrentFile)
 
 	got := m.renderResults(80)
-	for _, want := range []string{"40%", "4/10 files", "2 skipped", "18 chunks", "internal/search/search.go"} {
+	for _, want := range []string{"40%", "4/10 files", "2 skipped", "18 chunks", "internal/search/search.go", "Embedding"} {
 		if !contains(got, want) {
 			t.Fatalf("index progress missing %q: %q", want, got)
+		}
+	}
+}
+
+func TestModelRenderIndexProgressDiscoverPhaseNoPercent(t *testing.T) {
+	m := NewModel(context.Background(), "/repo")
+	m.width = 100
+	m.height = 30
+	m.session = &app.Session{ProjectRoot: "/repo"}
+	m.indexing = true
+	progress := index.Progress{
+		QueuedFiles:    7,
+		ProcessedFiles: 3,
+		WalkedFiles:    20,
+		SkippedFiles:   5,
+		WalkComplete:   false,
+		Phase:          index.PhaseDiscover,
+		StartTime:      time.Now().Add(-2 * time.Second),
+	}
+	m.indexProgress = &progress
+
+	got := m.renderResults(80)
+	if contains(got, "%") {
+		t.Fatalf("discover phase must not show percent: %q", got)
+	}
+	for _, want := range []string{"embed 3", "queued 7", "walked 20"} {
+		if !contains(got, want) {
+			t.Fatalf("discover progress missing %q: %q", want, got)
 		}
 	}
 }
@@ -380,9 +410,12 @@ func TestModelRenderIndexProgressShowsRateAndETA(t *testing.T) {
 	m.indexing = true
 	progress := index.Progress{
 		TotalFiles:     100,
+		QueuedFiles:    100,
 		ProcessedFiles: 30,
 		SkippedFiles:   0,
 		TotalChunks:    45,
+		WalkComplete:   true,
+		Phase:          index.PhaseEmbed,
 		CurrentFile:    "/repo/main.go",
 		StartTime:      time.Now().Add(-10 * time.Second),
 	}
@@ -406,9 +439,11 @@ func TestModelRenderIndexProgressHidesRateWhenTooFewFiles(t *testing.T) {
 	m.indexing = true
 	progress := index.Progress{
 		TotalFiles:     10,
+		QueuedFiles:    10,
 		ProcessedFiles: 0,
 		SkippedFiles:   0,
 		TotalChunks:    0,
+		WalkComplete:   true,
 		CurrentFile:    "",
 		StartTime:      time.Now().Add(-500 * time.Millisecond),
 	}
@@ -421,6 +456,20 @@ func TestModelRenderIndexProgressHidesRateWhenTooFewFiles(t *testing.T) {
 	}
 	if contains(got, "ETA") {
 		t.Fatalf("index progress should not show ETA with 0 files: %q", got)
+	}
+}
+
+func TestModelEmptyIndexCTA(t *testing.T) {
+	m := NewModel(context.Background(), "/repo")
+	m.width = 100
+	m.height = 30
+	m.loading = false
+	m.indexing = false
+	m.session = &app.Session{ProjectRoot: "/repo"}
+	m.status = &app.StatusResponse{Stats: map[string]int64{"chunks": 0, "files": 0}}
+	got := m.renderResults(80)
+	if !contains(got, "No index yet") || !contains(got, "Press r") {
+		t.Fatalf("empty index CTA missing: %q", got)
 	}
 }
 
@@ -463,7 +512,7 @@ func TestModelRenderHelpMentionsETAAndConfig(t *testing.T) {
 	m.width = 120
 	got := m.renderHelp()
 	for _, want := range []string{
-		"ETA + rate",
+		"phase-aware progress",
 		"config view (c)",
 		"status view (v)",
 		"hybrid / semantic / keyword",

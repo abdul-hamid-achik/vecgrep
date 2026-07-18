@@ -27,6 +27,10 @@ steps:
         screen:
             contains: "Search"
         timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "No index yet"
+        timeoutMs: 3000
     - snapshot: first_run_initialized
     - press: "ctrl+c"
     - wait:
