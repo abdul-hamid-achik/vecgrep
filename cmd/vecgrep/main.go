@@ -78,8 +78,14 @@ var indexCmd = &cobra.Command{
 	Use:   "index [paths...]",
 	Short: "Index files for semantic search",
 	Long: `Index source files for semantic search. If no paths are specified,
-indexes the current directory recursively.`,
+indexes the current directory recursively.
+
+In an interactive terminal, empty indexes and --full reindexes print a plan
+and ask for confirmation before embedding (wrong-folder protection). Use
+--yes to skip the prompt (scripts/CI). --dry-run prints the plan only.`,
 	RunE: runIndex,
+	// Silence usage on intentional cancel / nothing-to-do.
+	SilenceUsage: true,
 }
 
 var searchCmd = &cobra.Command{
@@ -442,6 +448,7 @@ func init() {
 	indexCmd.Flags().StringSlice("ignore", nil, "additional patterns to ignore")
 	indexCmd.Flags().Bool("no-progress", false, "disable the live progress bar (useful for scripts/CI)")
 	indexCmd.Flags().Bool("dry-run", false, "preview changes without calling the embedding provider")
+	indexCmd.Flags().Bool("yes", false, "skip interactive plan confirmation (scripts/CI)")
 	indexCmd.Flags().String("structural-chunks", "", "codemap symbol chunks: auto, off, or required (overrides config)")
 
 	// Search command flags
@@ -731,31 +738,43 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	defer session.Close()
 	service := app.NewService(session)
 
-	// --dry-run: preview changes without calling the embedding provider.
+	// Get flags early so plan-first can use them.
+	fullReindex, _ := cmd.Flags().GetBool("full")
+	additionalIgnores, _ := cmd.Flags().GetStringSlice("ignore")
+	yes, _ := cmd.Flags().GetBool("yes")
+	verbose, _ := rootCmd.PersistentFlags().GetBool("verbose")
+	scopedPaths := len(args) > 0
+
+	// --dry-run: preview only (no embed, no confirm).
 	if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
 		preview, err := service.DryRunPreviewWithStructuralMode(cmd.Context(), structuralMode)
 		if err != nil {
 			return fmt.Errorf("dry-run failed: %w", err)
 		}
-		fmt.Printf("Dry run for %s\n", session.ProjectRoot)
-		fmt.Printf("  New files:       %d\n", preview.NewFiles)
-		fmt.Printf("  Modified files:  %d\n", preview.ModifiedFiles)
-		fmt.Printf("  Deleted files:   %d\n", preview.DeletedFiles)
-		fmt.Printf("  Files to embed:  %d\n", preview.FilesToEmbed)
-		fmt.Printf("  Estimated chunks: %d\n", preview.EstimatedChunks)
+		printIndexPlan(session.ProjectRoot, preview)
 		if preview.TotalPending == 0 {
 			fmt.Println("\nIndex is up to date — nothing to do.")
 		} else {
-			fmt.Printf("\nRun 'vecgrep index' to update the index.\n")
+			fmt.Printf("\nRun 'vecgrep index' to update the index")
+			if needsInteractiveIndexConfirm(fullReindex, preview.FilesToEmbed == preview.ScannedFiles && preview.ScannedFiles > 0, preview) {
+				fmt.Print(" (interactive TTY may ask to confirm large plans; use --yes to skip)")
+			}
+			fmt.Println(".")
 		}
 		return nil
 	}
 
-	// Get flags
-	fullReindex, _ := cmd.Flags().GetBool("full")
-	additionalIgnores, _ := cmd.Flags().GetStringSlice("ignore")
-
-	verbose, _ := rootCmd.PersistentFlags().GetBool("verbose")
+	// Plan-first wrong-folder gate (mirrors Studio): full reindex and empty
+	// indexes always plan; large plans need y/n on a TTY unless --yes.
+	// Path-scoped index (args) skips preflight — the user already limited scope.
+	if !scopedPaths {
+		if err := maybeConfirmIndexPlan(cmd, service, session.ProjectRoot, structuralMode, fullReindex, yes); err != nil {
+			if _, ok := err.(quietExitError); ok {
+				return nil
+			}
+			return err
+		}
+	}
 
 	fmt.Printf("Indexing %s...\n", session.ProjectRoot)
 	fmt.Printf("  Model: %s\n", session.Config.Embedding.Model)
@@ -868,6 +887,11 @@ func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) err
 		return err
 	}
 
+	fullReindex, _ := cmd.Flags().GetBool("full")
+	additionalIgnores, _ := cmd.Flags().GetStringSlice("ignore")
+	yes, _ := cmd.Flags().GetBool("yes")
+	scopedPaths := len(args) > 0
+
 	if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
 		session, err := app.OpenReadOnlySession(cmd.Context(), "")
 		if err != nil {
@@ -879,12 +903,7 @@ func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) err
 		if err != nil {
 			return fmt.Errorf("dry-run failed: %w", err)
 		}
-		fmt.Printf("Dry run for %s\n", session.ProjectRoot)
-		fmt.Printf("  New files:       %d\n", preview.NewFiles)
-		fmt.Printf("  Modified files:  %d\n", preview.ModifiedFiles)
-		fmt.Printf("  Deleted files:   %d\n", preview.DeletedFiles)
-		fmt.Printf("  Files to embed:  %d\n", preview.FilesToEmbed)
-		fmt.Printf("  Estimated chunks: %d\n", preview.EstimatedChunks)
+		printIndexPlan(session.ProjectRoot, preview)
 		if preview.TotalPending == 0 {
 			fmt.Println("\nIndex is up to date — nothing to do.")
 		} else {
@@ -893,8 +912,23 @@ func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) err
 		return nil
 	}
 
-	fullReindex, _ := cmd.Flags().GetBool("full")
-	additionalIgnores, _ := cmd.Flags().GetStringSlice("ignore")
+	// Same plan-first gate as the direct path (read-only dry-run session).
+	if !scopedPaths {
+		session, err := app.OpenReadOnlySession(cmd.Context(), "")
+		if err != nil {
+			return err
+		}
+		service := app.NewService(session)
+		err = maybeConfirmIndexPlan(cmd, service, projectRoot, structuralMode, fullReindex, yes)
+		_ = session.Close()
+		if err != nil {
+			if _, ok := err.(quietExitError); ok {
+				return nil
+			}
+			return err
+		}
+	}
+
 	fmt.Printf("Indexing %s (via daemon)...\n", projectRoot)
 	if fullReindex {
 		fmt.Println("  Mode: full re-index")

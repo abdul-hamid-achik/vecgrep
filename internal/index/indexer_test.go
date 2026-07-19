@@ -1437,3 +1437,33 @@ func TestIndex_PeriodicSyncPolicy(t *testing.T) {
 		t.Fatalf("sync calls = %d, want 2", syncCalls)
 	}
 }
+
+func TestDryRunPreviewNeedsConfirm(t *testing.T) {
+	if (DryRunPreview{FilesToEmbed: 100}).NeedsConfirm() {
+		t.Fatal("small plan should not need confirm")
+	}
+	if !(DryRunPreview{FilesToEmbed: ConfirmScopeFiles}).NeedsConfirm() {
+		t.Fatal("files threshold should need confirm")
+	}
+	if !(DryRunPreview{ScannedFiles: ConfirmScopeFiles}).NeedsConfirm() {
+		t.Fatal("scanned files threshold should need confirm")
+	}
+	if !(DryRunPreview{BytesScanned: ConfirmScopeBytes}).NeedsConfirm() {
+		t.Fatal("bytes threshold should need confirm")
+	}
+	if !(DryRunPreview{EstimatedChunks: ConfirmScopeChunks}).NeedsConfirm() {
+		t.Fatal("chunks threshold should need confirm")
+	}
+}
+
+func TestProgressLargeScopeUsesSharedConstants(t *testing.T) {
+	if (Progress{WalkedFiles: LargeScopeFiles - 1}).LargeScope() {
+		t.Fatal("below file threshold")
+	}
+	if !(Progress{WalkedFiles: LargeScopeFiles}).LargeScope() {
+		t.Fatal("at file threshold")
+	}
+	if !(Progress{BytesWalked: LargeScopeBytes}).LargeScope() {
+		t.Fatal("at byte threshold")
+	}
+}

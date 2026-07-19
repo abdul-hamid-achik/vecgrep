@@ -97,7 +97,10 @@ const (
 //
 // TotalFiles is kept as an alias of QueuedFiles (files sent to the embed
 // pipeline) for backward compatibility with CLI/Studio consumers.
-// Percent-complete is only meaningful when WalkComplete is true.
+// Percent-complete is only meaningful when WalkComplete is true — while the
+// walk is still open, QueuedFiles grows and any N/M ratio can backslide
+// (e.g. 90/100 → 100/110). UIs must not show a completion percent until
+// WalkComplete is true.
 type Progress struct {
 	// WalkedFiles is how many regular files the walker considered (including skips).
 	WalkedFiles int
@@ -110,7 +113,18 @@ type Progress struct {
 	// SkippedFiles is unchanged/filtered files not queued for embed.
 	SkippedFiles int
 	TotalChunks  int
-	CurrentFile  string
+	// CurrentFile is the best active path for the UI: prefer the file currently
+	// being walked/hashed while discovering, else the last completed embed file.
+	CurrentFile string
+	// WalkingFile is the relative path currently being hashed/queued (walk side).
+	WalkingFile string
+	// EmbeddingFile is the relative/absolute path of the last file that finished
+	// embed/insert (results side).
+	EmbeddingFile string
+	// Byte counters for scope awareness (wrong-folder detection, throughput).
+	BytesWalked    int64
+	BytesQueued    int64
+	BytesProcessed int64
 	// WalkComplete is true after the walker has finished (QueuedFiles is final).
 	WalkComplete bool
 	// Phase is discover while walking, embed once the walk is complete.
@@ -143,6 +157,40 @@ func (p Progress) HonestPercent() float64 {
 		return 1
 	}
 	return pct
+}
+
+// Soft large-tree thresholds (warn during live discover; embeds may already run).
+const (
+	LargeScopeFiles = 5000
+	LargeScopeBytes = 500 * 1024 * 1024 // 500 MiB
+)
+
+// Hard confirm thresholds (gate before starting Index when a dry-run plan is known).
+// Lower than LargeScope so we stop before paying most of the embed cost.
+const (
+	ConfirmScopeFiles  = 2000
+	ConfirmScopeBytes  = 200 * 1024 * 1024 // 200 MiB
+	ConfirmScopeChunks = 10000
+)
+
+// LargeScope reports whether the tree already looks big enough that the user
+// may have pointed vecgrep at the wrong directory (e.g. ~/projects).
+func (p Progress) LargeScope() bool {
+	return p.WalkedFiles >= LargeScopeFiles || p.BytesWalked >= LargeScopeBytes
+}
+
+// DisplayFile returns the path to show in progress UIs.
+func (p Progress) DisplayFile() string {
+	if p.CurrentFile != "" {
+		return p.CurrentFile
+	}
+	if !p.WalkComplete && p.WalkingFile != "" {
+		return p.WalkingFile
+	}
+	if p.EmbeddingFile != "" {
+		return p.EmbeddingFile
+	}
+	return p.WalkingFile
 }
 
 // ProgressCallback is called during indexing to report progress.
@@ -458,9 +506,14 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 	var walkedCount int64     // files considered by the walker
 	var processedCount int64  // files finished embed/insert
 	var chunksCount int64
+	var bytesWalked int64
+	var bytesQueued int64
+	var bytesProcessed int64
 	var walkComplete atomic.Bool
-	var currentFile atomic.Value // string
-	currentFile.Store("")
+	var walkingFile atomic.Value   // string: path currently hashed/queued
+	var embeddingFile atomic.Value // string: last finished embed file
+	walkingFile.Store("")
+	embeddingFile.Store("")
 	var scan *fullScanState
 	if deleteExisting && len(paths) == 0 {
 		scan = newFullScanState()
@@ -483,7 +536,17 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 		if done {
 			phase = PhaseEmbed
 		}
-		cur, _ := currentFile.Load().(string)
+		walkPath, _ := walkingFile.Load().(string)
+		embedPath, _ := embeddingFile.Load().(string)
+		// Prefer live walk path while discovering so the UI shows motion even
+		// before the first embed completes; after walk, show embed completions.
+		cur := walkPath
+		if done || walkPath == "" {
+			cur = embedPath
+			if cur == "" {
+				cur = walkPath
+			}
+		}
 		progressMu.Lock()
 		errs := progressErrors
 		progressMu.Unlock()
@@ -495,6 +558,11 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 			SkippedFiles:   skipped,
 			TotalChunks:    chunks,
 			CurrentFile:    cur,
+			WalkingFile:    walkPath,
+			EmbeddingFile:  embedPath,
+			BytesWalked:    atomic.LoadInt64(&bytesWalked),
+			BytesQueued:    atomic.LoadInt64(&bytesQueued),
+			BytesProcessed: atomic.LoadInt64(&bytesProcessed),
 			WalkComplete:   done,
 			Phase:          phase,
 			StartTime:      startTime,
@@ -554,9 +622,9 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 	go func() {
 		var err error
 		if prepared != nil {
-			err = feedPreparedFiles(ctx, *prepared, existingHashes, scan, fileChan, &totalDiscovered, &skippedCount, &walkedCount, emitProgress)
+			err = feedPreparedFiles(ctx, *prepared, existingHashes, scan, fileChan, &totalDiscovered, &skippedCount, &walkedCount, &bytesWalked, &bytesQueued, &walkingFile, emitProgress)
 		} else {
-			err = idx.walkAndFilterStructural(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, structural, scan, sourceBudget, sourceBudgetBytes, fileChan, &totalDiscovered, &skippedCount, &walkedCount, emitProgress)
+			err = idx.walkAndFilterStructural(ctx, projectRoot, absRoot, paths, ignoreMatcher, existingHashes, structural, scan, sourceBudget, sourceBudgetBytes, fileChan, &totalDiscovered, &skippedCount, &walkedCount, &bytesWalked, &bytesQueued, &walkingFile, emitProgress)
 		}
 		walkComplete.Store(true)
 		// Emit a final discover→embed transition tick so UIs drop false % mode.
@@ -595,7 +663,12 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 		result.Ingestion.add(r.ingestion)
 		atomic.StoreInt64(&processedCount, int64(result.FilesProcessed))
 		atomic.StoreInt64(&chunksCount, int64(result.ChunksCreated))
-		currentFile.Store(r.path)
+		if r.size > 0 {
+			atomic.AddInt64(&bytesProcessed, r.size)
+		}
+		if r.path != "" {
+			embeddingFile.Store(r.path)
+		}
 
 		if r.err != nil {
 			result.Errors = append(result.Errors, r.err)
@@ -672,6 +745,7 @@ type fileInfo struct {
 // fileResult holds the result of indexing a single file.
 type fileResult struct {
 	path          string
+	size          int64
 	chunksCreated int
 	ingestion     IngestionCounts
 	err           error
@@ -683,6 +757,7 @@ type fileResult struct {
 // that drives remaining to zero owns inserting the file and reporting it.
 type fileTask struct {
 	path      string
+	size      int64
 	records   []db.ChunkRecord // one per chunk, in chunk order
 	embeds    [][]float32      // filled in by slot as batches complete
 	ingestion IngestionCounts
@@ -738,7 +813,7 @@ func (idx *Indexer) chunkWorker(ctx context.Context, projectRoot string, deleteE
 		sourceBudget.Release(file.queueBytes)
 		select {
 		case <-ctx.Done():
-			results <- fileResult{path: file.path, err: ctx.Err()}
+			results <- fileResult{path: file.path, size: file.size, err: ctx.Err()}
 			return
 		default:
 		}
@@ -758,7 +833,7 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 		var err error
 		content, err = os.ReadFile(file.path)
 		if err != nil {
-			results <- fileResult{path: file.path, err: fmt.Errorf("read file: %w", err)}
+			results <- fileResult{path: file.path, size: file.size, err: fmt.Errorf("read file: %w", err)}
 			return
 		}
 	}
@@ -771,13 +846,13 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 	// converge instead of reporting it modified forever.
 	if deleteExisting {
 		if _, err := idx.deleteFile(ctx, projectRoot, file.relativePath); err != nil {
-			results <- fileResult{path: file.path, err: fmt.Errorf("delete existing file chunks: %w", err)}
+			results <- fileResult{path: file.path, size: file.size, err: fmt.Errorf("delete existing file chunks: %w", err)}
 			return
 		}
 	}
 
 	if !isChunkEligibleContent(content) {
-		results <- fileResult{path: file.path} // binary/empty/whitespace: skip silently
+		results <- fileResult{path: file.path, size: file.size} // binary/empty/whitespace: skip silently
 		return
 	}
 
@@ -806,7 +881,7 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 	}
 
 	if len(chunks) == 0 {
-		results <- fileResult{path: file.path}
+		results <- fileResult{path: file.path, size: file.size}
 		return
 	}
 	ingestion := countChunkOrigins(chunks)
@@ -824,6 +899,7 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 	}
 	task := &fileTask{
 		path:      file.path,
+		size:      file.size,
 		records:   records,
 		embeds:    make([][]float32, len(chunks)),
 		remaining: len(chunks),
@@ -921,12 +997,12 @@ func (idx *Indexer) embedBatch(ctx context.Context, batch []embedItem, results c
 // next time (the stale chunks were already dropped by chunkFile's DeleteFile).
 func (idx *Indexer) finishFile(task *fileTask, results chan<- fileResult) {
 	if task.failed {
-		results <- fileResult{path: task.path, err: fmt.Errorf("embed: one or more chunks failed for %s", task.path)}
+		results <- fileResult{path: task.path, size: task.size, err: fmt.Errorf("embed: one or more chunks failed for %s", task.path)}
 		return
 	}
 
 	ids, err := idx.db.InsertChunkBatch(task.records, task.embeds)
-	res := fileResult{path: task.path}
+	res := fileResult{path: task.path, size: task.size}
 	if err != nil {
 		res.err = fmt.Errorf("batch insert: %w", err)
 	} else {
@@ -1156,10 +1232,29 @@ func structuralPathSelected(absRoot, relativePath string, paths []string) bool {
 // walkTick is an optional progress callback invoked from the walker (throttled).
 type walkTick func()
 
-func feedPreparedFiles(ctx context.Context, files []fileInfo, existingHashes map[string]string, scan *fullScanState, fileChan chan<- fileInfo, totalDiscovered, skippedCount, walkedCount *int64, tick walkTick) error {
+func feedPreparedFiles(
+	ctx context.Context,
+	files []fileInfo,
+	existingHashes map[string]string,
+	scan *fullScanState,
+	fileChan chan<- fileInfo,
+	totalDiscovered, skippedCount, walkedCount, bytesWalked, bytesQueued *int64,
+	walkingFile *atomic.Value,
+	tick walkTick,
+) error {
 	for _, file := range files {
 		if walkedCount != nil {
 			atomic.AddInt64(walkedCount, 1)
+		}
+		if bytesWalked != nil && file.size > 0 {
+			atomic.AddInt64(bytesWalked, file.size)
+		}
+		if walkingFile != nil {
+			path := file.relativePath
+			if path == "" {
+				path = file.path
+			}
+			walkingFile.Store(path)
 		}
 		if scan != nil {
 			scan.observe(file.relativePath)
@@ -1175,6 +1270,9 @@ func feedPreparedFiles(ctx context.Context, files []fileInfo, existingHashes map
 		select {
 		case fileChan <- file:
 			atomic.AddInt64(totalDiscovered, 1)
+			if bytesQueued != nil && file.size > 0 {
+				atomic.AddInt64(bytesQueued, file.size)
+			}
 			if tick != nil {
 				tick()
 			}
@@ -1204,7 +1302,7 @@ func (idx *Indexer) walkAndFilter(
 	totalDiscovered *int64,
 	skippedCount *int64,
 ) error {
-	return idx.walkAndFilterStructural(ctx, rootPath, absRoot, paths, ignore, existingHashes, nil, nil, sourceBudget, sourceBufferBytes, fileChan, totalDiscovered, skippedCount, nil, nil)
+	return idx.walkAndFilterStructural(ctx, rootPath, absRoot, paths, ignore, existingHashes, nil, nil, sourceBudget, sourceBufferBytes, fileChan, totalDiscovered, skippedCount, nil, nil, nil, nil, nil)
 }
 
 func (idx *Indexer) walkAndFilterStructural(
@@ -1221,9 +1319,13 @@ func (idx *Indexer) walkAndFilterStructural(
 	totalDiscovered *int64,
 	skippedCount *int64,
 	walkedCount *int64,
+	bytesWalked *int64,
+	bytesQueued *int64,
+	walkingFile *atomic.Value,
 	tick walkTick,
 ) error {
 	// Throttle discover ticks so large trees do not flood the UI callback.
+	// Still emit often enough that CurrentFile/bytes feel live in Studio.
 	var lastTick time.Time
 	var tickCount int64
 	maybeTick := func() {
@@ -1232,7 +1334,7 @@ func (idx *Indexer) walkAndFilterStructural(
 		}
 		tickCount++
 		now := time.Now()
-		if tickCount == 1 || tickCount%25 == 0 || now.Sub(lastTick) >= 100*time.Millisecond {
+		if tickCount == 1 || tickCount%10 == 0 || now.Sub(lastTick) >= 50*time.Millisecond {
 			lastTick = now
 			tick()
 		}
@@ -1296,6 +1398,11 @@ func (idx *Indexer) walkAndFilterStructural(
 			if info.Size() > idx.config.MaxFileSize {
 				return nil
 			}
+			// Publish path ASAP so the UI shows what we are touching even while
+			// hashing (hash can dominate on large wrong-folder trees).
+			if walkingFile != nil {
+				walkingFile.Store(relPath)
+			}
 			if walkedCount != nil {
 				atomic.AddInt64(walkedCount, 1)
 			}
@@ -1327,6 +1434,9 @@ func (idx *Indexer) walkAndFilterStructural(
 				}
 				sourceBudget.Release(reservedBytes)
 				return nil
+			}
+			if bytesWalked != nil {
+				atomic.AddInt64(bytesWalked, actualSize)
 			}
 			actualBytes := min(actualSize, sourceBufferBytes)
 			switch {
@@ -1366,6 +1476,9 @@ func (idx *Indexer) walkAndFilterStructural(
 			select {
 			case fileChan <- fi:
 				atomic.AddInt64(totalDiscovered, 1)
+				if bytesQueued != nil {
+					atomic.AddInt64(bytesQueued, actualSize)
+				}
 				maybeTick()
 			case <-ctx.Done():
 				sourceBudget.Release(reservedBytes)
@@ -1543,6 +1656,28 @@ type DryRunPreview struct {
 	TotalPending    int
 	EstimatedChunks int
 	FilesToEmbed    int
+	// ScannedFiles is how many indexable files were considered (tree size signal).
+	ScannedFiles int
+	// BytesScanned is the sum of those files' sizes (wrong-folder / scope signal).
+	BytesScanned int64
+}
+
+// NeedsConfirm reports whether an interactive UI should require an explicit
+// y/n before starting Index. Used for wrong-folder protection on large plans.
+func (p DryRunPreview) NeedsConfirm() bool {
+	if p.FilesToEmbed >= ConfirmScopeFiles {
+		return true
+	}
+	if p.ScannedFiles >= ConfirmScopeFiles {
+		return true
+	}
+	if p.BytesScanned >= ConfirmScopeBytes {
+		return true
+	}
+	if p.EstimatedChunks >= ConfirmScopeChunks {
+		return true
+	}
+	return false
 }
 
 // DryRunPreview scans the project and returns counts of files needing
@@ -1586,11 +1721,20 @@ func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string) (*Dry
 
 	// Build a map of current files for quick lookup
 	currentFileMap := make(map[string]fileInfo)
+	var bytesScanned int64
 	for _, f := range currentFiles {
 		currentFileMap[f.relativePath] = f
+		if f.size > 0 {
+			bytesScanned += f.size
+		} else if f.content != nil {
+			bytesScanned += int64(len(f.content))
+		}
 	}
 
-	preview := &DryRunPreview{}
+	preview := &DryRunPreview{
+		ScannedFiles: len(currentFiles),
+		BytesScanned: bytesScanned,
+	}
 
 	// Count new and modified files, and estimate chunks for changed files
 	for relPath, currentFile := range currentFileMap {

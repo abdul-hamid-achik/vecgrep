@@ -166,11 +166,12 @@ func TestIndexProgressModel_View(t *testing.T) {
 		Phase:          index.PhaseDiscover,
 	}
 	got := discovering.View().Content
-	if !strings.Contains(got, "embed 3") || !strings.Contains(got, "queued 7") {
-		t.Errorf("discover View = %q, want embed/queued counters", got)
+	// Discover shows walk/queue/embed counters — never a final N/M percent ratio.
+	if !strings.Contains(got, "walk 20") || !strings.Contains(got, "queue 7") || !strings.Contains(got, "embed 3") {
+		t.Errorf("discover View = %q, want walk/queue/embed counters", got)
 	}
-	if strings.Contains(got, "%") {
-		t.Errorf("discover View = %q, must not show percent", got)
+	if strings.Contains(got, "%") || strings.Contains(got, "3/7") {
+		t.Errorf("discover View = %q, must not show percent or N/M ratio", got)
 	}
 
 	// walk complete -> shows percent / N/M.

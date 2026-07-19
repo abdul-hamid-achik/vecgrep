@@ -1,0 +1,55 @@
+version: 1
+name: studio_confirm_reset_cancel
+intent: |
+    a user can open the reset confirm in Studio and cancel with n without leaving the app.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; GLYPHRUN=1 TERM=xterm-256color \"$ROOT/bin/vecgrep\" studio"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "mode hybrid"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "No index yet"
+        timeoutMs: 5000
+    # Leave the query text field so "!" is a shortcut, not a typed character.
+    - press: "tab"
+    - press: "!"
+    - wait:
+        screen:
+            contains: "reset project index"
+        timeoutMs: 4000
+    - snapshot: reset_confirm_visible
+    - press: "n"
+    - wait:
+        screen:
+            contains: "cancelled"
+        timeoutMs: 4000
+    - snapshot: confirm_cancelled
+    # Quit while "cancelled" is still the footer status so outcomes can see it.
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: confirm_cancelled
+      description: reset confirm can be dismissed with n
+      verify:
+        screen:
+            contains: "cancelled"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0

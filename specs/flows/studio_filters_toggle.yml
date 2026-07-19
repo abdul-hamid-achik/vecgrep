@@ -1,0 +1,49 @@
+version: 1
+name: studio_filters_toggle
+intent: |
+    a user can expand Studio filters with f after leaving the query field.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; GLYPHRUN=1 TERM=xterm-256color \"$ROOT/bin/vecgrep\" studio"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "f filters"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "No index yet"
+        timeoutMs: 5000
+    # Leave the query text field so "f" toggles filters instead of typing.
+    - press: "tab"
+    - press: "f"
+    - wait:
+        screen:
+            contains: "Directory"
+        timeoutMs: 4000
+    - snapshot: filters_open
+    # Quit with filters open so the outcome can assert Directory on the final screen.
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: filters_expand
+      description: f opens directory/file/line filter panels
+      verify:
+        screen:
+            contains: "Directory"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0

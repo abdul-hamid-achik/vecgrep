@@ -21,9 +21,11 @@ var (
 	activePanelTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	chipStyle             = lipgloss.NewStyle().Foreground(colorDim).Background(lipgloss.Color("#252932")).Padding(0, 1)
 	activeChipStyle       = lipgloss.NewStyle().Foreground(colorInk).Background(colorSelect).Padding(0, 1)
-	panelStyle            = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorPanel).Padding(0, 1)
-	focusedPanelStyle     = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(colorPanelActive).Padding(0, 1)
-	activeStyle           = lipgloss.NewStyle().Foreground(colorInk).Background(colorSelect)
+	okChipStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6E22E")).Background(lipgloss.Color("#1E2A1A")).Bold(true).Padding(0, 1)
+	warnChipStyle         = lipgloss.NewStyle().Foreground(colorWarn).Background(lipgloss.Color("#2A2818")).Bold(true).Padding(0, 1)
+	badChipStyle          = lipgloss.NewStyle().Foreground(colorBad).Background(lipgloss.Color("#2A1520")).Bold(true).Padding(0, 1)
+	panelStyle            = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorPanel).Padding(0, 1)
+	focusedPanelStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(colorPanelActive).Padding(0, 1)
 )
 
 func clamp(n, min, max int) int {

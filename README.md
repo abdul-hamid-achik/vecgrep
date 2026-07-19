@@ -241,7 +241,7 @@ vecgrep studio /path/to/project
 
 In an interactive terminal, running `vecgrep` without a subcommand also opens Studio.
 
-Studio is built on Charm v2 Bubble Tea/Bubbles/Lip Gloss libraries. It supports query search, result preview, directory/file/line filters, language and chunk-type filters, status/config views, inline global registration when no project is open, incremental indexing with progress, full re-index confirmation, file deletion from the index, and reset confirmation.
+Studio is built on Charm v2 Bubble Tea/Bubbles/Lip Gloss libraries. It supports query search, result preview, collapsible filters (directory/file/line), language and chunk-type filters, min-score, readiness chips (empty/stale/profile mismatch), hybrid→keyword fallback warnings, yank to clipboard, query history, status/config views with scroll, inline global registration when no project is open, phase-aware indexing progress, dry-run plan before full re-index, file deletion, and reset confirmation.
 
 ### MCP Server
 

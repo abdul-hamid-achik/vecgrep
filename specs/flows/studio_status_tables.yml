@@ -1,0 +1,67 @@
+version: 1
+name: studio_status_tables
+intent: |
+    a user can open Studio status and see project health fields.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - |
+            ROOT=$(pwd)
+            TMP=$(mktemp -d)
+            export HOME="$TMP/home"
+            PROJECT="$TMP/project"
+            mkdir -p "$HOME" "$PROJECT"
+            cd "$PROJECT"
+            printf 'package main\n\nfunc main() {}\n' > main.go
+            "$ROOT/bin/vecgrep" init >/dev/null
+            "$ROOT/bin/vecgrep" index --yes --no-progress >/dev/null 2>&1 || true
+            GLYPHRUN=1 TERM=xterm-256color "$ROOT/bin/vecgrep" studio
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "mode hybrid"
+        timeoutMs: 8000
+    - wait:
+        screen:
+            contains: "chunks"
+        timeoutMs: 5000
+    # Leave query so "v" opens status.
+    - press: "tab"
+    - press: "v"
+    - wait:
+        screen:
+            contains: "Status"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "Project:"
+        timeoutMs: 5000
+    - snapshot: status_view
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: status_panel_visible
+      description: status view is open
+      verify:
+        screen:
+            contains: "Status"
+    - id: status_project_visible
+      description: status view shows project root
+      verify:
+        screen:
+            contains: "Project:"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0

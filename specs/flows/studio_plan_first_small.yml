@@ -1,0 +1,60 @@
+version: 1
+name: studio_plan_first_small
+intent: |
+    on a small empty project, pressing r plans then starts indexing (auto-start under 100 files).
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - |
+            ROOT=$(pwd)
+            TMP=$(mktemp -d)
+            export HOME="$TMP/home"
+            PROJECT="$TMP/project"
+            mkdir -p "$HOME" "$PROJECT"
+            cd "$PROJECT"
+            printf 'package main\n\nfunc main() {}\n' > main.go
+            "$ROOT/bin/vecgrep" init >/dev/null
+            GLYPHRUN=1 TERM=xterm-256color "$ROOT/bin/vecgrep" studio
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "mode hybrid"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "No index yet"
+        timeoutMs: 5000
+    # Leave query so "r" indexes instead of typing.
+    - press: "tab"
+    - press: "r"
+    # Small empty: plan then auto-start. Prefer the Indexing panel title
+    # (capital I) so we do not match the "No index yet" CTA.
+    - wait:
+        screen:
+            contains: "Indexing"
+        timeoutMs: 25000
+    - snapshot: indexing_started
+    # ctrl+c always quits (cancels index first if still running).
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 15000
+outcomes:
+    - id: indexing_panel_visible
+      description: plan-first path reaches the Indexing panel
+      verify:
+        screen:
+            contains: "Indexing"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0

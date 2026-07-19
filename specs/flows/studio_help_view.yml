@@ -1,0 +1,57 @@
+version: 1
+name: studio_help_view
+intent: |
+    a user can open Studio help with ? outside the query field and see key bindings.
+target:
+    cmd:
+        - "/bin/sh"
+        - "-lc"
+        - "ROOT=$(pwd); TMP=$(mktemp -d); export HOME=\"$TMP/home\"; PROJECT=\"$TMP/project\"; mkdir -p \"$HOME\" \"$PROJECT\"; cd \"$PROJECT\"; \"$ROOT/bin/vecgrep\" init >/dev/null; GLYPHRUN=1 TERM=xterm-256color \"$ROOT/bin/vecgrep\" studio"
+    cwd: "."
+terminal:
+    cols: 100
+    rows: 30
+    profile: xterm-256color
+    alternateScreen: require
+steps:
+    - wait:
+        screen:
+            contains: "mode hybrid"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "No index yet"
+        timeoutMs: 5000
+    # Leave query so "?" opens help instead of typing into the search box.
+    - press: "tab"
+    - press: "?"
+    - wait:
+        screen:
+            contains: "Help"
+        timeoutMs: 4000
+    - wait:
+        screen:
+            contains: "More"
+        timeoutMs: 3000
+    - snapshot: help_open
+    - press: "ctrl+c"
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 3000
+outcomes:
+    - id: help_panel_visible
+      description: help view title is visible
+      verify:
+        screen:
+            contains: "Help"
+    - id: help_more_section
+      description: help includes the extended More section
+      verify:
+        screen:
+            contains: "More"
+    - id: clean_exit
+      description: the app exits cleanly
+      verify:
+        process:
+            exitCode: 0

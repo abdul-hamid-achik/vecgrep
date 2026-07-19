@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/progress"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
@@ -31,6 +33,7 @@ type (
 // never shows a lying percentage.
 type indexProgressModel struct {
 	prog     progress.Model
+	spin     spinner.Model
 	progress index.Progress
 	start    time.Time // set on the first tick; anchors the ETA estimate
 	finished bool      // indexing reported done
@@ -38,10 +41,19 @@ type indexProgressModel struct {
 }
 
 func newIndexProgressModel() indexProgressModel {
-	return indexProgressModel{prog: progress.New(progress.WithDefaultBlend(), progress.WithWidth(30))}
+	spin := spinner.New(
+		spinner.WithSpinner(spinner.MiniDot),
+		spinner.WithStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("#66D9EF"))),
+	)
+	return indexProgressModel{
+		prog: progress.New(progress.WithDefaultBlend(), progress.WithWidth(30)),
+		spin: spin,
+	}
 }
 
-func (m indexProgressModel) Init() tea.Cmd { return nil }
+func (m indexProgressModel) Init() tea.Cmd {
+	return m.spin.Tick
+}
 
 func (m indexProgressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -68,6 +80,13 @@ func (m indexProgressModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pm, cmd := m.prog.Update(msg)
 		m.prog = pm
 		return m, cmd
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		if !m.finished {
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -78,23 +97,33 @@ func (m indexProgressModel) View() tea.View {
 	}
 	p := m.progress
 
+	spin := m.spin.View()
+
 	// Cold start / still discovering with no signal yet.
 	if p.WalkedFiles == 0 && p.QueuedFiles == 0 && p.ProcessedFiles == 0 && !p.WalkComplete {
-		// No gradient percent — bubbles progress always renders "%".
-		return tea.NewView("…  discovering…")
+		return tea.NewView(spin + "  discovering…")
+	}
+
+	file := p.DisplayFile()
+	if file == "" {
+		file = p.CurrentFile
 	}
 
 	if !p.WalkComplete {
-		// No honest %: counters only (never show a shrinking percent).
-		line := fmt.Sprintf("…  embed %d · queued %d", p.ProcessedFiles, p.QueuedFiles)
+		// No honest %: counters only (never show embed/queued as a final N/M —
+		// queued grows while walking and would look like 90/100 → 100/110).
+		line := fmt.Sprintf("%s  walk %d · queue %d · embed %d", spin, p.WalkedFiles, p.QueuedFiles, p.ProcessedFiles)
 		if p.SkippedFiles > 0 {
 			line += fmt.Sprintf(" · skip %d", p.SkippedFiles)
 		}
-		if p.WalkedFiles > 0 {
-			line += fmt.Sprintf(" · walked %d", p.WalkedFiles)
+		if p.BytesWalked > 0 {
+			line += " · " + humanBytes(p.BytesWalked)
 		}
-		if p.CurrentFile != "" {
-			line += "  " + truncStr(p.CurrentFile, 26)
+		if p.LargeScope() {
+			line += "  ⚠ large"
+		}
+		if file != "" {
+			line += "  " + truncStr(file, 28)
 		}
 		return tea.NewView(line)
 	}
@@ -115,13 +144,29 @@ func (m indexProgressModel) View() tea.View {
 	}
 	pct := int(p.HonestPercent() * 100)
 	line += fmt.Sprintf("  %d%%  %d/%d", pct, p.ProcessedFiles, queued)
+	if p.BytesProcessed > 0 {
+		line += "  " + humanBytes(p.BytesProcessed)
+	}
 	if eta := m.eta(); eta != "" {
 		line += "  ~" + eta + " left"
 	}
-	if p.CurrentFile != "" {
-		line += "  " + truncStr(p.CurrentFile, 26)
+	if file != "" {
+		line += "  " + truncStr(file, 28)
 	}
 	return tea.NewView(line) // inline (AltScreen defaults false) — a transient one-liner
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // eta returns a compact remaining-time estimate only after the walk completes
