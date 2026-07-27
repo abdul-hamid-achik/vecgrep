@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Memory C5 contract documented** in `docs/usage.md`: stable JSON shape,
+  exit codes (0 success, 3 provider_unavailable, 1 error), and tag convention
+  for sibling tools (`--tags monitor,incident,<rule>`).
+- **`profile_status` values documented** in `docs/usage.md`: table of
+  `ok`/`missing`/`mismatch`/`not written yet`/`<error>` with consumer actions,
+  plus `freshness.state` values and the MCP `vecgrep_ensure` readiness enum.
+- **Non-code text indexing pattern** documented in `docs/usage.md`: how to
+  index incident bundles and log excerpts as a separate vecgrep project
+  using the existing generic chunker, with limitations and future `--kind`
+  flag notes.
+
 ## [2.20.0] - 2026-07-18
 
 ### Added

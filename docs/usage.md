@@ -130,14 +130,42 @@ vecgrep clean
 vecgrep reset --force
 ```
 
-`status --format json` includes a `freshness` proof. `fresh` means raw source
-hashes match, the latest ingestion receipt completed application postflight,
-and any structural snapshot still matches codemap's lightweight manifest.
-`stale` is confirmed drift; `unknown` is deliberately fail-closed evidence
-(for example a legacy index without raw hashes, an interrupted delete, a
-path-scoped indexing attempt, or a manifest mismatch). Run
-`vecgrep index --full` to rebuild trusted metadata when freshness is unknown;
-from MCP, call `vecgrep_index` with `force:true`.
+`status --format json` includes a `freshness` proof and a `profile_status`
+field. `fresh` means raw source hashes match, the latest ingestion receipt
+completed application postflight, and any structural snapshot still matches
+codemap's lightweight manifest. `stale` is confirmed drift; `unknown` is
+deliberately fail-closed evidence (for example a legacy index without raw
+hashes, an interrupted delete, a path-scoped indexing attempt, or a manifest
+mismatch). Run `vecgrep index --full` to rebuild trusted metadata when
+freshness is unknown; from MCP, call `vecgrep_index` with `force:true`.
+
+### `profile_status` values
+
+The `profile_status` field tells a consumer whether the embedding profile
+matches the current configuration, so it can decide whether to reindex
+before searching:
+
+| Value | Meaning | Consumer action |
+|------|---------|----------------|
+| `ok` | Profile matches; index is ready | Proceed with search |
+| `missing` | Index has chunks but no `embedding_profile.json` | Run `vecgrep index --full` |
+| `mismatch` | Stored profile ≠ current config (provider/model/dimensions/distance changed) | Run `vecgrep index --full` to rebuild with the new profile |
+| `not written yet` | No chunks and no profile (fresh `init`, nothing indexed) | Run `vecgrep index` |
+| `<error>` | Profile read/parse failed | Check the error string; likely a corrupt profile file — `vecgrep reset --force` then `vecgrep index` |
+
+The `freshness.state` field (separate from `profile_status`) reports source
+drift: `fresh` (hashes match), `stale` (files changed/added/removed),
+`unknown` (fail-closed). A project can be `profile_status: "ok"` but
+`freshness.state: "stale"` — search works but results may reference outdated
+code.
+
+### Readiness via MCP
+
+The MCP `vecgrep_ensure` tool provides a higher-level readiness enum
+(`empty`, `stale`, `profile_mismatch`, `unknown`, `ready`) that combines
+`profile_status` + `freshness` into a single consumer-friendly signal. The
+CLI `status --format json` exposes the raw fields; MCP consumers should
+prefer `vecgrep_ensure` or `vecgrep_status` for the combined signal.
 
 ## Memory
 
@@ -150,11 +178,91 @@ vecgrep memory remember <content> [--tags a,b] [--importance 0.7] [--ttl-hours 2
 every requested tag). `--format json` emits a JSON array of
 `{id,content,importance,tags,score}`.
 
-When the embedding provider is unreachable, `recall --format json` keeps
-stdout empty and emits `{"error":"provider_unavailable"}` to stderr with
-exit code `3` — so a consumer can distinguish "recall unavailable" from
-"recall ran, no matches" (the latter is a normal `[]` on stdout with exit 0).
+### C5 JSON contract
 
+`memory recall --format json` emits a stable JSON array (never `null`):
+
+```json
+[
+  {
+    "id": "42",
+    "content": "node api had a memory leak in handleRequest at src/api.js:120",
+    "importance": 0.8,
+    "tags": ["monitor", "incident", "rss_growth"],
+    "score": 0.87
+  }
+]
+```
+
+| Field | Type | Description |
+|------|------|-------------|
+| `id` | string | Unique memory ID (uint64 emitted as a string) |
+| `content` | string | The stored memory text |
+| `importance` | float64 | Caller-supplied weight (0.0–1.0, default 0.5) |
+| `tags` | []string | Tags attached at `remember` time |
+| `score` | float32 | Cosine similarity to the query (0–1) |
+
+Empty recall emits `[]` on stdout with exit 0 — "ran, no matches."
+
+### Exit codes
+
+| Code | Meaning | stdout | stderr |
+|------|---------|--------|--------|
+| 0 | Success (array on stdout, `[]` when no matches) | JSON array | empty |
+| 3 | Embedding provider unreachable | empty | `{"error":"provider_unavailable"}` |
+| 1 | Generic cobra error | empty | error message |
+
+A consumer can distinguish "recall unavailable" (exit 3, no stdout) from
+"recall ran, no matches" (exit 0, `[]` on stdout).
+
+### Tag convention for sibling tools
+
+Tags use AND semantics: a memory matches only if it carries **every**
+requested tag exactly. The recommended convention is
+`--tags <tool>,<scope>[,extra...]`:
+
+| Tool | Example tags |
+|------|-------------|
+| Monitor | `monitor,incident,<rule>` (e.g. `monitor,incident,rss_growth`) |
+| Codemap | `codemap,<project_key>` (see G2 memory governance) |
+| Cairntrace | `cairntrace,<run_id>` |
+
+This scoping prevents cross-project leakage: `recall --tags monitor,incident`
+returns only Monitor incidents, never codemap-scoped memories.
+
+## Indexing non-code text (incident bundles, logs)
+
+vecgrep is code-corpus-first (language-aware chunker via codemap structural
+chunks), but the generic chunker automatically routes any text file (`.md`,
+`.txt`, `.log`, `.json`) through line-based chunking with sliding-window
+overlap. This means you can index **incident bundles or log excerpts** as a
+separate searchable project today:
+
+```bash
+# Export incident bundles to a directory (e.g. from fcheap stash restore)
+mkdir -p ~/incidents && cd ~/incidents
+vecgrep init
+vecgrep index .
+
+# Search across incidents by meaning, not exact tag
+vecgrep search "node memory leak gc pressure" -m hybrid -f json
+```
+
+Each incident's `manifest.json`, `correlations.json`, and `semantic.json`
+are text files that the generic chunker indexes as `ChunkTypeGeneric` chunks.
+Search results include file paths and line ranges, so the consumer can map
+a hit back to the originating incident bundle.
+
+### Limitations and future work
+
+- **No `--project` CLI flag**: the project is auto-detected from `cwd`. To
+  search incidents and code in one query, index both under the same project
+  root, or use MCP `vecgrep_batch_search` across projects.
+- **No fcheap stash-id metadata on chunks**: chunks carry file path + line
+  range only. To map a hit back to an fcheap stash, encode the stash ID in
+  the indexed file path or content (e.g. name files `<stash-id>-manifest.json`).
+- **No `--kind` flag**: all text is treated the same way. A future
+  `--kind text|code|incident` flag could enable modality-aware ranking.
 ## Shell Completion
 
 ```bash
