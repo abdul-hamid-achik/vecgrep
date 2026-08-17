@@ -1,5 +1,12 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": {
+    "deploymentEnabled": {
+      "*": false,
+      "main": true
+    }
+  },
+  "ignoreCommand": "git diff --quiet ${VERCEL_GIT_PREVIOUS_SHA:-HEAD^} HEAD -- docs/ package.json bun.lock package-lock.json vercel.json",
   "framework": "vitepress",
   "installCommand": "bun install",
   "buildCommand": "bun run site:build",
