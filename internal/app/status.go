@@ -67,6 +67,10 @@ type StatusResponse struct {
 	// structural re-ranking. This is best-effort — a false value does not mean
 	// codemap is uninstalled, just that no graph index was found.
 	HasCodemapGraph bool
+
+	// Lightweight is true when this response was produced from the vector-free
+	// health manifest rather than by opening VecLite.
+	Lightweight bool
 }
 
 func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {

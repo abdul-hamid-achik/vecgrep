@@ -125,6 +125,7 @@ target's scope). `similar` scores are cosine similarities (0-1).
 ```bash
 vecgrep status
 vecgrep status --format json
+vecgrep status --lightweight --format json
 vecgrep delete internal/old_file.go
 vecgrep clean
 vecgrep reset --force
@@ -138,6 +139,13 @@ deliberately fail-closed evidence (for example a legacy index without raw
 hashes, an interrupted delete, a path-scoped indexing attempt, or a manifest
 mismatch). Run `vecgrep index --full` to rebuild trusted metadata when
 freshness is unknown; from MCP, call `vecgrep_index` with `force:true`.
+
+`status --lightweight` uses a vector-free health manifest written after a
+complete index. It compares persisted source hashes with the current
+filesystem and can report files, chunks, pending changes, and freshness
+without loading the VecLite/HNSW snapshot. Missing or invalid health metadata
+reports `freshness.state: "unknown"`; use the full status command when you
+need detailed vector/provider diagnostics.
 
 ### `profile_status` values
 

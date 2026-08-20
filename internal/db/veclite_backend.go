@@ -168,8 +168,9 @@ func NewVecLiteBackend(dbPath string) *VecLiteBackend {
 }
 
 // Init initializes the VecLite backend with the given dimensions and HNSW config.
-// If hnsw is the zero value, defaults (M=16, EfConstruction=200, EfSearch=100)
-// are applied.
+// If hnsw is the zero value, defaults (M=16, EfConstruction=100, EfSearch=100)
+// are applied. Callers can opt into EfConstruction=200 for a higher-quality
+// build profile with additional transient memory usage.
 func (b *VecLiteBackend) Init(dimensions int, hnsw HNSWConfig) error {
 	return b.InitWithOptions(dimensions, hnsw, false, false)
 }

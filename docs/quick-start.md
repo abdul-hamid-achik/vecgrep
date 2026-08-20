@@ -80,6 +80,7 @@ vecgrep browse
 ```bash
 vecgrep status
 vecgrep status --format json
+vecgrep status --lightweight --format json
 ```
 
 Status includes the data directory, vector backend, provider, index counts, and embedding profile state.

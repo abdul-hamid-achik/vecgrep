@@ -248,74 +248,41 @@ func (p *ThrottledProvider) Embed(ctx context.Context, text string) (vec []float
 	}
 }
 
+// batchEmbedFunc is a single-shot batch embedder (EmbedDocuments or EmbedBatch).
+type batchEmbedFunc func(ctx context.Context, texts []string) ([][]float32, error)
+
 // EmbedBatch generates embeddings for multiple texts with throttling.
-// When the inner provider implements DocumentProvider, the entire batch
-// is delegated to a single inner.EmbedDocuments call (one HTTP request for
-// the Ollama /api/embed endpoint), bypassing the per-text worker queue.
-// Otherwise it falls back to processing each text through Embed.
+// Prefer inner DocumentProvider.EmbedDocuments when available (Ollama/Cohere/
+// Voyage/OpenAI), otherwise Provider.EmbedBatch. Both paths send one (or a
+// few) HTTP requests for the whole indexer batch — never one request per text.
 func (p *ThrottledProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
-
-	// Fast path: inner provider supports native batch embedding.
 	if docProvider, ok := p.inner.(DocumentProvider); ok {
-		return p.embedBatchDelegated(ctx, docProvider, texts)
+		return p.embedBatchDelegated(ctx, texts, docProvider.EmbedDocuments)
 	}
-
-	// Fallback: process each text through the per-text throttle queue.
-	results := make([][]float32, len(texts))
-	var wg sync.WaitGroup
-	errs := make([]error, len(texts))
-
-	for i, text := range texts {
-		if text == "" {
-			errs[i] = ErrEmptyText
-			continue
-		}
-		wg.Add(1)
-		go func(idx int, t string) {
-			defer wg.Done()
-			v, err := p.Embed(ctx, t)
-			if err != nil {
-				errs[idx] = err
-				return
-			}
-			results[idx] = v
-		}(i, text)
-	}
-
-	wg.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			return results, NewProviderError("throttle", "embedBatch", fmt.Errorf("text %d: %w", i, err))
-		}
-	}
-
-	return results, nil
+	return p.embedBatchDelegated(ctx, texts, p.inner.EmbedBatch)
 }
 
 // EmbedDocuments implements the DocumentProvider interface.
 // It delegates to the inner provider's EmbedDocuments when available,
 // applying cache dedup as a pre-filter to skip texts we already have.
+// Providers without DocumentProvider still batch via Provider.EmbedBatch.
 func (p *ThrottledProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	docProvider, ok := p.inner.(DocumentProvider)
-	if !ok {
-		// Inner doesn't support batch — fall back to EmbedBatch.
-		return p.EmbedBatch(ctx, texts)
+	if docProvider, ok := p.inner.(DocumentProvider); ok {
+		return p.embedBatchDelegated(ctx, texts, docProvider.EmbedDocuments)
 	}
-	return p.embedBatchDelegated(ctx, docProvider, texts)
+	return p.embedBatchDelegated(ctx, texts, p.inner.EmbedBatch)
 }
 
-// embedBatchDelegated sends the batch to the inner DocumentProvider in a
-// single call, using the cache to skip texts whose embeddings we already
-// have. This bypasses the per-text worker queue — the batch endpoint
-// handles concurrency internally.
-func (p *ThrottledProvider) embedBatchDelegated(ctx context.Context, docProvider DocumentProvider, texts []string) ([][]float32, error) {
+// embedBatchDelegated sends the batch through embedFn in a single call, using
+// the cache to skip texts whose embeddings we already have. This bypasses the
+// per-text worker queue — the batch endpoint handles concurrency internally.
+func (p *ThrottledProvider) embedBatchDelegated(ctx context.Context, texts []string, embedFn batchEmbedFunc) ([][]float32, error) {
 	if !p.beginOperation() {
 		return nil, ErrContextCanceled
 	}
@@ -361,7 +328,7 @@ func (p *ThrottledProvider) embedBatchDelegated(ctx context.Context, docProvider
 		}
 	}
 
-	missed, err := docProvider.EmbedDocuments(opCtx, missTexts)
+	missed, err := embedFn(opCtx, missTexts)
 	if err != nil {
 		return nil, NewProviderError("throttle", "embedDocuments", err)
 	}

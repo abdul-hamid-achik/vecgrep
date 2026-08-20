@@ -20,7 +20,8 @@ type OpenOptions struct {
 	DataDir    string // Directory containing vectors.veclite
 
 	// HNSW tuning. Zero values fall back to vecgrep defaults
-	// (M=16, EfConstruction=200, EfSearch=100).
+	// (M=16, EfConstruction=100, EfSearch=100). Use 200 explicitly when a
+	// higher-build-quality profile is worth the additional transient memory.
 	HNSWM              int
 	HNSWEfConstruction int
 	HNSWEfSearch       int
@@ -36,7 +37,7 @@ type OpenOptions struct {
 // Default HNSW parameters used when config does not override them.
 const (
 	DefaultHNSWM              = 16
-	DefaultHNSWEfConstruction = 200
+	DefaultHNSWEfConstruction = 100
 	DefaultHNSWEfSearch       = 100
 )
 

@@ -106,7 +106,8 @@ type VectorConfig struct {
 type VecLiteConfig struct {
 	// M is the HNSW max connections per node (default: DefaultVecLiteM = 16)
 	M int `mapstructure:"m" yaml:"m,omitempty"`
-	// EfConstruction is the HNSW build quality parameter (default: DefaultVecLiteEfConstruction = 200)
+	// EfConstruction is the HNSW build quality parameter (default: DefaultVecLiteEfConstruction = 100).
+	// 200 remains available as an explicit high-quality, higher-memory profile.
 	EfConstruction int `mapstructure:"ef_construction" yaml:"ef_construction,omitempty"`
 	// EfSearch is the HNSW search quality parameter (default: DefaultVecLiteEfSearch = 100)
 	EfSearch int `mapstructure:"ef_search" yaml:"ef_search,omitempty"`
@@ -116,7 +117,7 @@ type VecLiteConfig struct {
 // diagnostics) can distinguish user-tuned values from defaults.
 const (
 	DefaultVecLiteM              = 16
-	DefaultVecLiteEfConstruction = 200
+	DefaultVecLiteEfConstruction = 100
 	DefaultVecLiteEfSearch       = 100
 )
 
@@ -255,8 +256,10 @@ type DaemonConfig struct {
 	// Autostart starts the daemon automatically on the first search or
 	// index operation if it is not already running.
 	Autostart bool `mapstructure:"autostart" yaml:"autostart,omitempty"`
-	// IdleTimeout is how long the daemon stays alive without activity
-	// before shutting down. Zero means no idle shutdown.
+	// IdleTimeout is how long an open project worker may remain without
+	// activity before its watcher, index session and embedding provider are
+	// released. The hub stays alive so a later request can reopen the project.
+	// Zero disables worker eviction.
 	IdleTimeout int `mapstructure:"idle_timeout" yaml:"idle_timeout,omitempty"`
 	// EmbedWorkers is the number of concurrent embedding workers for
 	// background indexing (default 2).

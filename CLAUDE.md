@@ -22,7 +22,8 @@ This is the easiest thing to get wrong.
 
 1. **`docs/` is the VitePress website (deployed to Vercel).** It holds user-facing
    product documentation only: guides, MCP reference, provider config, the VecLite
-   integration contract (`docs/veclite-integration.md`). Build with `task site` /
+   integration contract (`docs/veclite-integration.md`). Git auto-builds **`main`
+   only**; do not `vercel promote`. CLI ships from tags. Build with `task site` /
    `task site:build` / `task site:preview`. **Never drop scratch notes, session
    handoffs, TODO dumps, or agent working memory into `docs/` (or anywhere in the
    repo).**

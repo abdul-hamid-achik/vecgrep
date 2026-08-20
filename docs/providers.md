@@ -7,9 +7,9 @@ vecgrep defaults to local Ollama embeddings and supports managed cloud providers
 | Provider | Default Model | Dimensions | Notes |
 | --- | --- | ---: | --- |
 | Ollama | `nomic-embed-text` | 768 | Local-first default |
-| OpenAI | `text-embedding-3-small` | 1536 | Supports configurable dimensions for `text-embedding-3-*` models |
-| Cohere | `embed-v4.0` | 1536 | Uses retrieval-specific document/query input types |
-| Voyage AI | `voyage-code-3` | 1024 | Uses retrieval-specific document/query input types |
+| OpenAI | `text-embedding-3-small` | 1536 | Supports configurable dimensions for `text-embedding-3-*` models; indexer batches via `/v1/embeddings` |
+| Cohere | `embed-v4.0` | 1536 | Uses retrieval-specific document/query input types; batched |
+| Voyage AI | `voyage-code-3` | 1024 | Uses retrieval-specific document/query input types; batched |
 
 ## Local Embedding Presets
 

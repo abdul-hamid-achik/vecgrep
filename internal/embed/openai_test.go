@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -157,6 +158,107 @@ func TestOpenAIProvider_EmbedBatch(t *testing.T) {
 		if len(emb) != 1536 {
 			t.Errorf("embedding %d: expected 1536 dimensions, got %d", i, len(emb))
 		}
+	}
+}
+
+func TestOpenAIProvider_EmbedDocuments(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		var req openaiEmbeddingRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		inputs, ok := req.Input.([]interface{})
+		if !ok {
+			t.Fatal("expected array input")
+		}
+		resp := openaiEmbeddingResponse{
+			Object: "list",
+			Data: make([]struct {
+				Object    string    `json:"object"`
+				Index     int       `json:"index"`
+				Embedding []float64 `json:"embedding"`
+			}, len(inputs)),
+			Model: "text-embedding-3-small",
+		}
+		for i := range inputs {
+			resp.Data[i].Object = "embedding"
+			resp.Data[i].Index = i
+			resp.Data[i].Embedding = make([]float64, 1536)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	provider := NewOpenAIProvider(OpenAIConfig{
+		APIKey:     "test-key",
+		BaseURL:    server.URL,
+		Dimensions: 1536,
+	})
+	texts := []string{"a", "b", "c", "d"}
+	embeddings, err := provider.EmbedDocuments(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("EmbedDocuments: %v", err)
+	}
+	if len(embeddings) != len(texts) {
+		t.Fatalf("got %d embeddings, want %d", len(embeddings), len(texts))
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("expected 1 HTTP request for EmbedDocuments batch, got %d", requests.Load())
+	}
+}
+
+func TestThrottledOpenAIProvider_EmbedDocumentsOneHTTPRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		var req openaiEmbeddingRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		inputs, ok := req.Input.([]interface{})
+		if !ok {
+			t.Fatal("expected array input")
+		}
+		resp := openaiEmbeddingResponse{
+			Object: "list",
+			Data: make([]struct {
+				Object    string    `json:"object"`
+				Index     int       `json:"index"`
+				Embedding []float64 `json:"embedding"`
+			}, len(inputs)),
+			Model: "text-embedding-3-small",
+		}
+		for i := range inputs {
+			resp.Data[i].Object = "embedding"
+			resp.Data[i].Index = i
+			resp.Data[i].Embedding = make([]float64, 1536)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	inner := NewOpenAIProvider(OpenAIConfig{
+		APIKey:     "test-key",
+		BaseURL:    server.URL,
+		Dimensions: 1536,
+	})
+	provider := NewThrottledProvider(inner, DefaultThrottleConfig())
+	defer provider.Close()
+
+	texts := []string{"one", "two", "three", "four", "five"}
+	embeddings, err := provider.EmbedDocuments(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("throttled EmbedDocuments: %v", err)
+	}
+	if len(embeddings) != len(texts) {
+		t.Fatalf("got %d embeddings, want %d", len(embeddings), len(texts))
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("expected 1 HTTP request through throttle, got %d (per-chunk path regresses indexing)", requests.Load())
 	}
 }
 

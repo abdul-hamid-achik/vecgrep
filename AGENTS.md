@@ -43,7 +43,10 @@ There are two distinct documentation surfaces — do not mix them:
 
 1. **`docs/` — VitePress website (deployed to Vercel).** This is the public product
    documentation site (user-facing guides, MCP reference, provider config, integration
-   contracts). Build with `task site` / `task site:build` / `task site:preview`. Only
+   contracts). Git auto-builds **`main` only** (`vercel.json`). Feature branches do not
+   create Preview deployments. `ignoreCommand` skips non-docs commits. Do not
+   `vercel promote`; `main` is the site release. CLI binaries ship from tags. Build with
+   `task site` / `task site:build` / `task site:preview`. Only
    edit files here for user-facing product documentation. **Do not use `docs/` for
    scratch notes, session handoffs, TODO dumps, or agent working memory.**
 

@@ -430,7 +430,7 @@ func TestThrottledProviderEmbedDocumentsEmptyText(t *testing.T) {
 
 func TestThrottledProviderEmbedBatchFallbackWithoutDocumentProvider(t *testing.T) {
 	// When inner provider does NOT implement DocumentProvider, EmbedBatch
-	// should fall back to per-text Embed calls.
+	// must still use Provider.EmbedBatch (one call), not per-text Embed.
 	mock := &noDocsProvider{}
 	cfg := DefaultThrottleConfig()
 	p := NewThrottledProvider(mock, cfg)
@@ -444,9 +444,11 @@ func TestThrottledProviderEmbedBatchFallbackWithoutDocumentProvider(t *testing.T
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
 	}
-	// Should have used per-text Embed (3 calls), not EmbedDocuments.
-	if mock.embedCalls.Load() != 3 {
-		t.Errorf("expected 3 Embed calls (fallback), got %d", mock.embedCalls.Load())
+	if mock.batchCalls.Load() != 1 {
+		t.Errorf("expected 1 EmbedBatch call (batched fallback), got %d", mock.batchCalls.Load())
+	}
+	if mock.embedCalls.Load() != 0 {
+		t.Errorf("expected 0 Embed calls, got %d", mock.embedCalls.Load())
 	}
 }
 
@@ -454,6 +456,7 @@ func TestThrottledProviderEmbedBatchFallbackWithoutDocumentProvider(t *testing.T
 // fallback path in ThrottledProvider.EmbedBatch.
 type noDocsProvider struct {
 	embedCalls atomic.Int32
+	batchCalls atomic.Int32
 }
 
 func (m *noDocsProvider) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -462,6 +465,7 @@ func (m *noDocsProvider) Embed(ctx context.Context, text string) ([]float32, err
 }
 
 func (m *noDocsProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	m.batchCalls.Add(1)
 	results := make([][]float32, len(texts))
 	for i := range texts {
 		results[i] = []float32{1.0, 2.0, 3.0}

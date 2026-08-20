@@ -311,11 +311,13 @@ Displays index statistics, configuration, and pending changes.
 
 Options:
 - `-f, --format` - Output format: `default`, `json`
+- `--lightweight` - Read vector-free health metadata without opening VecLite/HNSW
 
 Examples:
 ```bash
 vecgrep status                # Default text output
 vecgrep status --format json  # JSON output for scripting
+vecgrep status --lightweight --format json  # Bounded-memory health check
 ```
 
 ### Index Management
@@ -432,7 +434,7 @@ search:
 vector:
   veclite:
     m: 16                       # HNSW max connections per node
-    ef_construction: 200        # Build quality (higher = better quality, slower build)
+    ef_construction: 100        # Memory-bounded default; use 200 for higher build quality
     ef_search: 100              # Search quality (higher = better recall, slower search)
 
 codemap:

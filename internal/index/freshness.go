@@ -43,9 +43,17 @@ func (idx *Indexer) GetRawPendingChanges(ctx context.Context, projectRoot string
 		return nil, false, err
 	}
 
+	return CompareSourceHashes(indexedFiles, currentFileHashes), true, nil
+}
+
+// CompareSourceHashes compares the indexed source-hash projection with the
+// current filesystem projection. Keeping this comparison independent from the
+// database lets lightweight status verify drift from a small on-disk health
+// manifest without opening VecLite.
+func CompareSourceHashes(indexed, current map[string]string) *PendingChanges {
 	pending := &PendingChanges{}
-	for relativePath, sourceHash := range currentFileHashes {
-		indexedHash, exists := indexedFiles[relativePath]
+	for relativePath, sourceHash := range current {
+		indexedHash, exists := indexed[relativePath]
 		switch {
 		case !exists:
 			pending.NewFiles++
@@ -53,13 +61,29 @@ func (idx *Indexer) GetRawPendingChanges(ctx context.Context, projectRoot string
 			pending.ModifiedFiles++
 		}
 	}
-	for relativePath := range indexedFiles {
-		if _, exists := currentFileHashes[relativePath]; !exists {
+	for relativePath := range indexed {
+		if _, exists := current[relativePath]; !exists {
 			pending.DeletedFiles++
 		}
 	}
 	pending.TotalPending = pending.NewFiles + pending.ModifiedFiles + pending.DeletedFiles
-	return pending, true, nil
+	return pending
+}
+
+// ScanRawFileHashes produces the same source-hash projection used by the
+// indexer, but does not require a database. It is intentionally suitable for
+// bounded-memory status checks and keeps the filtering rules in one place.
+func ScanRawFileHashes(ctx context.Context, projectRoot string, cfg IndexerConfig) (map[string]string, error) {
+	idx := NewIndexer(nil, nil, cfg)
+	absRoot, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("abs path: %w", err)
+	}
+	ignoreMatcher, err := idx.buildIgnoreMatcher(absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("build ignore matcher: %w", err)
+	}
+	return idx.scanRawFileHashes(ctx, absRoot, ignoreMatcher)
 }
 
 // scanRawFileHashes walks the same full-project filesystem scope as Index but

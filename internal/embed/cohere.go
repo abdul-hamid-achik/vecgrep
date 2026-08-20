@@ -327,3 +327,9 @@ func (p *CohereProvider) Warmup(ctx context.Context) (time.Duration, error) {
 func cohereSupportsOutputDimension(model string) bool {
 	return strings.Contains(strings.ToLower(model), "embed-v4")
 }
+
+var (
+	_ Provider         = (*CohereProvider)(nil)
+	_ DocumentProvider = (*CohereProvider)(nil)
+	_ QueryProvider    = (*CohereProvider)(nil)
+)

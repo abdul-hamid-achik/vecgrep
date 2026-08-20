@@ -1804,6 +1804,14 @@ func (s *SDKServer) handleDelete(ctx context.Context, req *sdkmcp.CallToolReques
 			IsError: true,
 		}, nil, nil
 	}
+	if chunksDeleted > 0 {
+		if err := app.InvalidateIndexHealthEvidence(state.session.cfg.DataDir, state.projectRoot); err != nil {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Deleted file but invalidating health evidence failed: %v", err)}},
+				IsError: true,
+			}, nil, nil
+		}
+	}
 
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Deleted %s (%d chunks removed)", input.FilePath, chunksDeleted)}},
@@ -1902,6 +1910,12 @@ func (s *SDKServer) handleReset(ctx context.Context, req *sdkmcp.CallToolRequest
 	if err := database.ResetAll(ctx); err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to reset database: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+	if err := app.InvalidateAllIndexHealthEvidence(state.session.cfg.DataDir); err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Database reset but invalidating health evidence failed: %v", err)}},
 			IsError: true,
 		}, nil, nil
 	}

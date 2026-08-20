@@ -83,7 +83,16 @@ func (s *Service) DeleteFile(ctx context.Context, path string) (int64, error) {
 	if s == nil || s.session == nil {
 		return 0, fmt.Errorf("service not initialized")
 	}
-	return s.session.DB.DeleteProjectFile(ctx, s.session.ProjectRoot, path)
+	deleted, err := s.session.DB.DeleteProjectFile(ctx, s.session.ProjectRoot, path)
+	if err != nil {
+		return deleted, err
+	}
+	if deleted > 0 {
+		if err := InvalidateIndexHealthEvidence(s.session.Config.DataDir, s.session.ProjectRoot); err != nil {
+			return deleted, fmt.Errorf("invalidate index health evidence: %w", err)
+		}
+	}
+	return deleted, nil
 }
 
 // DryRunPreview returns counts of files needing reindexing and an estimated
@@ -130,7 +139,13 @@ func (s *Service) Reset(ctx context.Context, scope ResetScope) error {
 	if err := RemoveEmbeddingProfileMeta(s.session.DB); err != nil {
 		return fmt.Errorf("remove embedding profile metadata: %w", err)
 	}
-	return RemoveEmbeddingProfile(s.session.Config.DataDir)
+	if err := RemoveEmbeddingProfile(s.session.Config.DataDir); err != nil {
+		return err
+	}
+	if scope == ResetAll {
+		return InvalidateAllIndexHealthEvidence(s.session.Config.DataDir)
+	}
+	return InvalidateIndexHealthEvidence(s.session.Config.DataDir, s.session.ProjectRoot)
 }
 
 func RoundDuration(d time.Duration) time.Duration {

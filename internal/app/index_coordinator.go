@@ -87,6 +87,7 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 	if c.provider == nil {
 		return nil, ErrProviderRequired
 	}
+	index.ReportStatus(progress, "checking embedding provider…")
 	if err := c.provider.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("embedding provider unavailable: %w", err)
 	}
@@ -95,9 +96,11 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 	// runtime. Warmup is retried per run because a transient model unload should
 	// not permanently disable it for a daemon.
 	c.restoreOnce.Do(func() {
+		index.ReportStatus(progress, "restoring embedding cache…")
 		borrowed := c.borrowedService(nil)
 		borrowed.maybeRestoreEmbeddingCache(ctx)
 	})
+	index.ReportStatus(progress, "warming embedding model…")
 	log.Printf("warming up embedding model")
 	if loadDur, err := c.provider.Warmup(ctx); err != nil {
 		log.Printf("model warmup skipped: %v", err)
@@ -105,6 +108,7 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 		log.Printf("model warmup complete (load_duration: %dms)", loadDur.Milliseconds())
 	}
 
+	index.ReportStatus(progress, "opening index database…")
 	database, release, err := c.acquireIndexDB(ctx)
 	if err != nil {
 		return nil, err
@@ -150,6 +154,7 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 		return nil, fmt.Errorf("begin ingestion receipt: %w", err)
 	}
 	indexer.SetIndexRunAttemptID(attemptID)
+	index.ReportStatus(progress, "checking embedding profile…")
 	if err := service.ensureEmbeddingProfileForIndex(req.FullReindex); err != nil {
 		finalizeErr := finalizeIngestionReceiptAttempt(c.cfg.DataDir, c.projectRoot, attemptID, err)
 		return nil, errors.Join(err, finalizeErr)
@@ -181,6 +186,7 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 		return nil, errors.Join(runErr, finalizeErr)
 	}
 
+	index.ReportStatus(progress, "finalizing index…")
 	var postErr error
 	if flushErr != nil {
 		postErr = fmt.Errorf("flush embedding provider: %w", flushErr)
@@ -195,6 +201,17 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 	if postErr == nil {
 		if err := database.Sync(); err != nil {
 			postErr = fmt.Errorf("sync index postflight: %w", err)
+		}
+	}
+	// Publish the vector-free health projection before the receipt is allowed
+	// to advance last_success. A missing or failed manifest is deliberately
+	// non-fatal to indexing: full status can still inspect VecLite, while
+	// lightweight status fails closed until a later complete index repairs it.
+	if postErr == nil && scopeComplete {
+		if manifest, manifestErr := BuildIndexHealthManifest(database, c.projectRoot, attemptID); manifestErr != nil {
+			log.Printf("index health manifest unavailable: %v", manifestErr)
+		} else if manifestErr := WriteIndexHealthManifest(c.cfg.DataDir, c.projectRoot, manifest); manifestErr != nil {
+			log.Printf("index health manifest not published: %v", manifestErr)
 		}
 	}
 	// Finalize while the exclusive DB lease is still held. Another process

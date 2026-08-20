@@ -71,7 +71,7 @@ search:
 vector:
   veclite:
     m: 16
-    ef_construction: 200
+    ef_construction: 100  # Memory-bounded default; use 200 for higher build quality
     ef_search: 100
 
 codemap:

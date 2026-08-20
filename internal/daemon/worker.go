@@ -36,6 +36,7 @@ type projectWorker struct {
 
 	operationsMu sync.Mutex
 	closing      bool
+	activeOps    int
 	operations   sync.WaitGroup
 }
 
@@ -130,15 +131,47 @@ func (w *projectWorker) writeState() error {
 
 func (w *projectWorker) beginOperation() bool {
 	w.operationsMu.Lock()
-	defer w.operationsMu.Unlock()
 	if w.closing {
+		w.operationsMu.Unlock()
 		return false
 	}
+	w.activeOps++
 	w.operations.Add(1)
+	w.operationsMu.Unlock()
+	w.touchActivity()
 	return true
 }
 
-func (w *projectWorker) endOperation() { w.operations.Done() }
+func (w *projectWorker) endOperation() {
+	w.operationsMu.Lock()
+	if w.activeOps > 0 {
+		w.activeOps--
+	}
+	w.operationsMu.Unlock()
+	w.operations.Done()
+}
+
+// isIdle reports whether a worker has no in-flight work and has not been used
+// for at least timeout. The active-operation check prevents the idle reaper
+// from tearing down a worker while a request or watcher batch is still using
+// it.
+func (w *projectWorker) isIdle(now time.Time, timeout time.Duration) bool {
+	if timeout <= 0 {
+		return false
+	}
+	w.operationsMu.Lock()
+	active := w.activeOps
+	closing := w.closing
+	w.operationsMu.Unlock()
+	if closing || active != 0 {
+		return false
+	}
+
+	w.stateMu.Lock()
+	last := w.state.LastActivity
+	w.stateMu.Unlock()
+	return !last.IsZero() && now.Sub(last) >= timeout
+}
 
 func (w *projectWorker) markReindexed() {
 	w.stateMu.Lock()
@@ -211,6 +244,18 @@ func (w *projectWorker) search(ctx context.Context, params searchParams) (any, s
 		return nil, "", nil, err
 	}
 	return outcome.Results, string(outcome.Mode), outcome.Warnings, nil
+}
+
+// indexMeta returns the small amount of index state needed by machine-facing
+// search envelopes. Keeping this on the warm worker avoids opening a second
+// read-only session just to answer whether an empty result set came from an
+// empty index or from a successful search with no matches.
+func (w *projectWorker) indexMeta(ctx context.Context) (bool, bool, int, error) {
+	if !w.beginOperation() {
+		return false, false, 0, errWorkerClosing
+	}
+	defer w.endOperation()
+	return w.service.IndexMeta(ctx)
 }
 
 // stats returns index statistics for the worker's project.

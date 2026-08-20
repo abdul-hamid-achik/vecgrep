@@ -16,7 +16,7 @@ func printIndexPlan(root string, p *index.DryRunPreview) {
 	if p == nil {
 		return
 	}
-	fmt.Printf("Plan for %s\n", root)
+	fmt.Printf("Dry run plan for %s\n", root)
 	if p.ScannedFiles > 0 {
 		fmt.Printf("  Scanned files:    %d\n", p.ScannedFiles)
 	}

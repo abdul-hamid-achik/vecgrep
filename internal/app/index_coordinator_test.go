@@ -129,6 +129,13 @@ func TestIndexCoordinatorFinalizesReceiptBeforeReleasingWriter(t *testing.T) {
 	if atRelease == nil || !atRelease.Success || !atRelease.Complete || !atRelease.IngestionComplete {
 		t.Fatalf("receipt at writer release = %+v", atRelease)
 	}
+	health, healthErr := LoadIndexHealthManifest(cfg.DataDir, root)
+	if healthErr != nil {
+		t.Fatalf("load health manifest: %v", healthErr)
+	}
+	if health == nil || health.AttemptID != atRelease.AttemptID || health.Stats["files"] != 1 {
+		t.Fatalf("health manifest = %+v, want completed attempt and one file", health)
+	}
 }
 
 func TestIndexCoordinatorRequiresFullReindexToRecoverDirtyProject(t *testing.T) {

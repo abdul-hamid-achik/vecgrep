@@ -91,6 +91,9 @@ const (
 	PhaseDiscover ProgressPhase = "discover"
 	// PhaseEmbed: walk finished; QueuedFiles/TotalFiles is fixed. % is honest.
 	PhaseEmbed ProgressPhase = "embed"
+	// PhaseStatus: free-form pre/post pipeline work (warmup, structural, reset…).
+	// Counters may be zero; UIs should prefer Status text over "discovering…".
+	PhaseStatus ProgressPhase = "status"
 )
 
 // Progress represents indexing progress information.
@@ -128,7 +131,11 @@ type Progress struct {
 	// WalkComplete is true after the walker has finished (QueuedFiles is final).
 	WalkComplete bool
 	// Phase is discover while walking, embed once the walk is complete.
-	Phase     ProgressPhase
+	// PhaseStatus is used for coordinator/indexer status ticks (Status text).
+	Phase ProgressPhase
+	// Status is a short human label for the current non-counter phase
+	// (e.g. "warming model", "resetting storage"). Empty during normal walk/embed.
+	Status    string
 	StartTime time.Time
 	Errors    []error
 }
@@ -252,6 +259,28 @@ func NewIndexer(database *db.DB, provider embed.Provider, cfg IndexerConfig) *In
 // SetProgressCallback sets a callback for progress updates.
 func (idx *Indexer) SetProgressCallback(cb ProgressCallback) {
 	idx.progress = cb
+}
+
+// EmitStatus reports a free-form phase label to the progress callback (if any).
+// Safe to call before walk/embed counters exist; UIs should show Status instead
+// of a frozen "discovering…" line.
+func (idx *Indexer) EmitStatus(status string) {
+	if idx == nil || idx.progress == nil || status == "" {
+		return
+	}
+	idx.progress(Progress{
+		Phase:  PhaseStatus,
+		Status: status,
+	})
+}
+
+// ReportStatus is a package-level helper for callers that hold a progress
+// callback but not an Indexer (e.g. IndexCoordinator preflight).
+func ReportStatus(cb ProgressCallback, status string) {
+	if cb == nil || status == "" {
+		return
+	}
+	cb(Progress{Phase: PhaseStatus, Status: status})
 }
 
 func (idx *Indexer) sync() error {
@@ -413,6 +442,7 @@ func (idx *Indexer) indexObserved(ctx context.Context, projectRoot string, paths
 			runErr = errors.Join(runErr, receiptErr)
 		}
 	}()
+	idx.EmitStatus("loading structural symbols…")
 	structural, warning, err := idx.loadStructuralChunksWithSnapshot(ctx, projectRoot, structuralConfig)
 	if err != nil {
 		report.FailureStage = "structural_load"
@@ -420,6 +450,7 @@ func (idx *Indexer) indexObserved(ctx context.Context, projectRoot string, paths
 	}
 	populateStructuralRunReport(&report, structural, warning)
 	if structuralConfig.required && structural != nil && len(structural.Files) > 0 {
+		idx.EmitStatus("preparing structural files…")
 		prepared, err := idx.prepareRequiredStructuralFiles(ctx, projectRoot, paths, structural)
 		if err != nil {
 			report.FailureStage = "structural_preflight"
@@ -1806,6 +1837,7 @@ func (idx *Indexer) ReindexAll(ctx context.Context, projectRoot string) (result 
 			runErr = errors.Join(runErr, receiptErr)
 		}
 	}()
+	idx.EmitStatus("loading structural symbols…")
 	structural, warning, err := idx.loadStructuralChunksWithSnapshot(ctx, projectRoot, structuralConfig)
 	if err != nil {
 		report.FailureStage = "structural_load"
@@ -1814,6 +1846,7 @@ func (idx *Indexer) ReindexAll(ctx context.Context, projectRoot string) (result 
 	populateStructuralRunReport(&report, structural, warning)
 	var prepared *[]fileInfo
 	if structuralConfig.required && structural != nil && len(structural.Files) > 0 {
+		idx.EmitStatus("preparing structural files…")
 		files, prepareErr := idx.prepareRequiredStructuralFiles(ctx, projectRoot, nil, structural)
 		if prepareErr != nil {
 			report.FailureStage = "structural_preflight"
@@ -1828,11 +1861,13 @@ func (idx *Indexer) ReindexAll(ctx context.Context, projectRoot string) (result 
 	}
 
 	// Delete all existing data for this project
+	idx.EmitStatus("resetting storage…")
 	if err := idx.db.Reset(ctx, absPath); err != nil {
 		report.FailureStage = "storage_reset"
 		return nil, fmt.Errorf("reset project: %w", err)
 	}
 
+	idx.EmitStatus("scanning project tree…")
 	// Perform full index without redundant per-file deletion after Reset.
 	if prepared != nil {
 		return idx.indexPrepared(ctx, projectRoot, false, structural, warning, prepared)

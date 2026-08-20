@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/abdul-hamid-achik/vecgrep/internal/app"
+	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
 )
 
@@ -452,6 +453,10 @@ func (m Model) renderIndexProgress(width int) string {
 			return spin + " " + mutedStyle.Render("Reindexing via daemon…"+elapsed+"\nesc cancel")
 		}
 		return spin + " " + mutedStyle.Render("Starting… scanning project tree\nesc cancel")
+	}
+
+	if p.Status != "" && (p.Phase == index.PhaseStatus || (p.WalkedFiles == 0 && p.QueuedFiles == 0 && !p.WalkComplete)) {
+		return spin + " " + mutedStyle.Render(p.Status+"\nesc cancel")
 	}
 
 	processed := p.ProcessedFiles

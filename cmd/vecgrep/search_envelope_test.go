@@ -142,6 +142,23 @@ func TestPrintSearchEnvelope_IndexedWithHits(t *testing.T) {
 	}
 }
 
+func TestMarshalSearchEnvelopeEmptyHitsPreservesIndexMetadata(t *testing.T) {
+	data, err := marshalSearchEnvelope(true, true, 7, nil)
+	if err != nil {
+		t.Fatalf("marshalSearchEnvelope failed: %v", err)
+	}
+	var got searchEnvelope
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("envelope is not valid JSON: %v", err)
+	}
+	if !got.Index.Indexed || !got.Index.Fresh || got.Index.Chunks != 7 {
+		t.Fatalf("index metadata = %+v, want indexed/fresh/7", got.Index)
+	}
+	if got.Hits == nil || len(got.Hits) != 0 {
+		t.Fatalf("hits = %#v, want non-nil empty array", got.Hits)
+	}
+}
+
 func TestSearchCommandExposesMinScoreAndEnvelopeFormat(t *testing.T) {
 	if searchCmd.Flags().Lookup("min-score") == nil {
 		t.Fatal("search command missing --min-score flag")

@@ -99,9 +99,17 @@ func (m indexProgressModel) View() tea.View {
 
 	spin := m.spin.View()
 
+	// Free-form phase (warmup, structural load, storage reset, finalize…).
+	if p.Status != "" && p.Phase == index.PhaseStatus {
+		return tea.NewView(spin + "  " + p.Status)
+	}
+	if p.Status != "" && p.WalkedFiles == 0 && p.QueuedFiles == 0 && p.ProcessedFiles == 0 && !p.WalkComplete {
+		return tea.NewView(spin + "  " + p.Status)
+	}
+
 	// Cold start / still discovering with no signal yet.
 	if p.WalkedFiles == 0 && p.QueuedFiles == 0 && p.ProcessedFiles == 0 && !p.WalkComplete {
-		return tea.NewView(spin + "  discovering…")
+		return tea.NewView(spin + "  starting…")
 	}
 
 	file := p.DisplayFile()

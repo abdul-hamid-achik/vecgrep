@@ -149,10 +149,10 @@ func TestIndexProgressModel_View(t *testing.T) {
 		t.Errorf("finished View = %q, want empty", got)
 	}
 
-	// walk open, no files yet -> discovering…
+	// cold start with no signal yet -> starting…
 	warming := newIndexProgressModel()
-	if got := warming.View().Content; !strings.Contains(got, "discovering") {
-		t.Errorf("cold View = %q, want it to contain \"discovering\"", got)
+	if got := warming.View().Content; !strings.Contains(got, "starting") {
+		t.Errorf("cold View = %q, want it to contain \"starting\"", got)
 	}
 
 	// walk open with counters -> embed/queued, no percent.

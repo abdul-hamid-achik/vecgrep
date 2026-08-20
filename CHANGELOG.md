@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.0] - 2026-08-20
+
 ### Added
 
+- **`vecgrep status --lightweight`** — vector-free health metadata without opening
+  VecLite/HNSW, so readiness probes stay cheap for Cortex and other agents.
+- **Index health manifest** — a small, receipt-bound projection of a successful
+  full-project index so freshness checks can compare source hashes without
+  materializing the graph.
+- **Daemon `json-envelope` search** — warm-path daemon responses carry index
+  metadata (`indexed`/`fresh`/`chunks`) so clients no longer fall back to a cold
+  session just for the envelope.
 - **Memory C5 contract documented** in `docs/usage.md`: stable JSON shape,
   exit codes (0 success, 3 provider_unavailable, 1 error), and tag convention
   for sibling tools (`--tags monitor,incident,<rule>`).
@@ -19,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index incident bundles and log excerpts as a separate vecgrep project
   using the existing generic chunker, with limitations and future `--kind`
   flag notes.
+
+### Changed
+
+- **Safer daemon dial** — context deadlines (or a 2s fallback) keep CLI/editor
+  search responsive when an old daemon socket is wedged.
+- **Lower default `ef_construction` (100)** — memory-bounded HNSW builds; use
+  200 when you want higher build quality.
+- **Embedder throttle / provider polish** — tighter OpenAI/Cohere/Voyage
+  budgeting and clearer timeout behavior under load.
 
 ## [2.20.0] - 2026-07-18
 
@@ -390,6 +409,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configurable chunk size and overlap
 - Ignore patterns for excluding files from indexing
 
+[2.23.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.22.0...v2.23.0
+[2.22.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.21.0...v2.22.0
+[2.21.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.20.0...v2.21.0
+[2.20.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.19.0...v2.20.0
+[2.19.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.18.0...v2.19.0
 [2.18.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.17.0...v2.18.0
 [2.17.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.16.0...v2.17.0
 [2.16.0]: https://github.com/abdul-hamid-achik/vecgrep/compare/v2.15.0...v2.16.0

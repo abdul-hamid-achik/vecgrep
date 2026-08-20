@@ -486,6 +486,7 @@ func init() {
 
 	// Status command flags
 	statusCmd.Flags().StringP("format", "f", "default", "output format (default, json)")
+	statusCmd.Flags().Bool("lightweight", false, "read vector-free health metadata without opening VecLite")
 
 	// Reset command flags
 	resetCmd.Flags().Bool("force", false, "skip confirmation prompt")
@@ -989,12 +990,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	// Try searching via the daemon socket first. If the daemon is running,
 	// this avoids opening a separate read-only session and re-initializing
 	// the embedding provider. Falls back transparently if the socket is
-	// unavailable or the request fails. The json-envelope format needs
-	// index metadata from a session, so it always takes the session path.
-	if format != "json-envelope" {
-		if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, minScore, explain, format, scopeFiles, symbol); ok {
-			return nil
-		}
+	// unavailable or the request fails. The daemon also returns the index
+	// metadata required by json-envelope, so Teak can stay on the warm path.
+	if ok := tryDaemonSearch(cmd.Context(), query, limit, modeStr, lang, languages, chunkTypes, chunkType, filePattern, directory, minLine, maxLine, minScore, explain, format, scopeFiles, symbol); ok {
+		return nil
 	}
 
 	// Fallback: open a read-only session and search directly.
@@ -1134,6 +1133,15 @@ func printSearchEnvelope(ctx context.Context, service *app.Service, results []se
 	if err != nil {
 		return fmt.Errorf("index metadata: %w", err)
 	}
+	data, err := marshalSearchEnvelope(indexed, fresh, chunks, results)
+	if err != nil {
+		return fmt.Errorf("marshal envelope: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
+}
+
+func marshalSearchEnvelope(indexed, fresh bool, chunks int, results []search.Result) ([]byte, error) {
 	envelope := searchEnvelope{
 		SchemaVersion: searchEnvelopeSchemaVersion,
 		Hits:          results,
@@ -1144,12 +1152,7 @@ func printSearchEnvelope(ctx context.Context, service *app.Service, results []se
 	if envelope.Hits == nil {
 		envelope.Hits = []search.Result{}
 	}
-	data, err := json.MarshalIndent(envelope, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal envelope: %w", err)
-	}
-	fmt.Println(string(data))
-	return nil
+	return json.MarshalIndent(envelope, "", "  ")
 }
 
 // tryDaemonSearch attempts to run a search through the daemon's unix socket.
@@ -1171,8 +1174,6 @@ func tryDaemonSearch(
 	scopeFiles []string,
 	symbol string,
 ) bool {
-	_ = ctx // reserved for future context-aware socket dial
-
 	// The daemon search protocol currently supports query, limit, mode, and
 	// language. If more complex filters are requested, fall back to the
 	// read-only session which has full filter support.
@@ -1196,11 +1197,19 @@ func tryDaemonSearch(
 	}
 	socketPath := filepath.Join(globalDir, "daemon.sock")
 
-	conn, err := net.Dial("unix", socketPath)
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
 	if err != nil {
 		return false // daemon not running
 	}
 	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		// A live socket is not proof that the daemon will answer. Keep the CLI
+		// and editor fallback responsive when an old daemon is wedged.
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	}
 
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
@@ -1241,6 +1250,11 @@ func tryDaemonSearch(
 			Results  []search.Result `json:"results"`
 			Mode     string          `json:"mode"`
 			Warnings []string        `json:"warnings"`
+			Index    *struct {
+				Indexed bool `json:"indexed"`
+				Fresh   bool `json:"fresh"`
+				Chunks  int  `json:"chunks"`
+			} `json:"index,omitempty"`
 		} `json:"result,omitempty"`
 		Error *struct {
 			Code    int    `json:"code"`
@@ -1252,6 +1266,9 @@ func tryDaemonSearch(
 	}
 	if resp.Error != nil {
 		return false // let the fallback handle the real error
+	}
+	if format == "json-envelope" && resp.Result.Index == nil {
+		return false // older daemons do not provide the envelope contract
 	}
 
 	// Surface degraded-mode diagnostics (e.g. embedder unavailable →
@@ -1266,7 +1283,15 @@ func tryDaemonSearch(
 		}
 	}
 
-	printSearchResults(resp.Result.Results, format)
+	if format == "json-envelope" {
+		data, err := marshalSearchEnvelope(resp.Result.Index.Indexed, resp.Result.Index.Fresh, resp.Result.Index.Chunks, resp.Result.Results)
+		if err != nil {
+			return false
+		}
+		fmt.Println(string(data))
+	} else {
+		printSearchResults(resp.Result.Results, format)
+	}
 	return true
 }
 
@@ -1366,6 +1391,7 @@ type StatusOutput struct {
 	IngestionReceipt *app.IngestionReceipt     `json:"ingestion_receipt,omitempty"`
 	ReceiptError     string                    `json:"ingestion_receipt_error,omitempty"`
 	Freshness        *app.IndexFreshnessReport `json:"freshness,omitempty"`
+	Lightweight      bool                      `json:"lightweight,omitempty"`
 }
 
 // PendingChanges represents pending reindex changes
@@ -1397,6 +1423,7 @@ func statusOutputFromResponse(status *app.StatusResponse) StatusOutput {
 		IngestionReceipt: status.IngestionReceipt,
 		ReceiptError:     status.ReceiptError,
 		Freshness:        status.Freshness,
+		Lightweight:      status.Lightweight,
 	}
 	if !status.LatestIndexedAt.IsZero() {
 		output.LatestIndexed = status.LatestIndexedAt.Format(time.RFC3339)
@@ -1418,6 +1445,24 @@ func statusOutputFromResponse(status *app.StatusResponse) StatusOutput {
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	format, _ := cmd.Flags().GetString("format")
+	lightweight, _ := cmd.Flags().GetBool("lightweight")
+	if lightweight {
+		status, err := app.LightweightStatus(cmd.Context(), "")
+		if err != nil {
+			return fmt.Errorf("failed to get lightweight status: %w", err)
+		}
+		if format == "json" {
+			output := statusOutputFromResponse(status)
+			jsonBytes, err := json.MarshalIndent(output, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to marshal JSON: %w", err)
+			}
+			fmt.Println(string(jsonBytes))
+			return nil
+		}
+		printLightweightStatus(status)
+		return nil
+	}
 
 	session, err := app.OpenReadOnlySession(cmd.Context(), "")
 	if err != nil {
@@ -1502,6 +1547,27 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func printLightweightStatus(status *app.StatusResponse) {
+	freshness := "unknown"
+	reason := "index_health_manifest_missing"
+	if status != nil && status.Freshness != nil {
+		freshness = string(status.Freshness.State)
+		reason = status.Freshness.Reason
+	}
+	fmt.Println("vecgrep status (lightweight)")
+	fmt.Printf("  Project root: %s\n", status.ProjectRoot)
+	fmt.Printf("  Data dir:     %s\n", status.DataDir)
+	fmt.Printf("  Health:       vector-free manifest\n")
+	fmt.Printf("  Files:        %d\n", status.Stats["files"])
+	fmt.Printf("  Chunks:       %d\n", status.Stats["chunks"])
+	fmt.Printf("  Freshness:    %s (%s)\n", freshness, reason)
+	if status.PendingChanges != nil {
+		fmt.Printf("  Pending:      %d (new=%d modified=%d deleted=%d)\n",
+			status.PendingChanges.TotalPending, status.PendingChanges.NewFiles,
+			status.PendingChanges.ModifiedFiles, status.PendingChanges.DeletedFiles)
+	}
 }
 
 type countItem struct {
@@ -1659,6 +1725,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 			if resetErr != nil {
 				return fmt.Errorf("failed to reset index files after open error %q: %w", err, resetErr)
 			}
+			fmt.Fprintln(os.Stderr, "cleared index files on disk…")
 			fmt.Printf("Index files reset for %s\n", result.ProjectRoot)
 			fmt.Printf("  VecLite index: %s\n", result.VecLitePath)
 			fmt.Println("Run 'vecgrep index' to re-index your codebase.")
@@ -1669,6 +1736,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 			if resetErr != nil {
 				return fmt.Errorf("failed to reset index files after open error %q: %w", err, resetErr)
 			}
+			fmt.Fprintln(os.Stderr, "cleared index files on disk…")
 			fmt.Printf("Index files reset for %s\n", result.ProjectRoot)
 			fmt.Printf("  VecLite index: %s\n", result.VecLitePath)
 			fmt.Println("Run 'vecgrep index' to re-index your codebase.")
@@ -1693,6 +1761,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	fmt.Fprintln(os.Stderr, "clearing indexed chunks…")
 	if err := service.Reset(cmd.Context(), app.ResetProject); err != nil {
 		return fmt.Errorf("failed to reset database: %w", err)
 	}
@@ -2589,11 +2658,11 @@ func runDaemonStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	if !daemon.IsRunning(globalDir) {
-		fmt.Println("Daemon hub: not running")
+		fmt.Println("Daemon: not running (hub)")
 		return nil
 	}
 
-	fmt.Println("Daemon hub: running")
+	fmt.Println("Daemon: running (hub)")
 	state, err := daemon.ReadHubState(globalDir)
 	if err == nil && state != nil {
 		fmt.Printf("  PID: %d\n", state.PID)

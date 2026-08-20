@@ -354,3 +354,9 @@ func voyageErrorMessage(body []byte) string {
 	}
 	return string(body)
 }
+
+var (
+	_ Provider         = (*VoyageProvider)(nil)
+	_ DocumentProvider = (*VoyageProvider)(nil)
+	_ QueryProvider    = (*VoyageProvider)(nil)
+)

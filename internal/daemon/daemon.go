@@ -68,6 +68,7 @@ type Daemon struct {
 	stopCh      chan struct{}
 	doneCh      chan struct{}
 	sweepDoneCh chan struct{}
+	idleDoneCh  chan struct{}
 
 	// logSink, when non-nil, is the managed log file the hub writes to and
 	// periodically offloads to fcheap. logOffloadDoneCh signals that loop to exit.
@@ -112,6 +113,7 @@ func New(cfg Config) (*Daemon, error) {
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 		sweepDoneCh:      make(chan struct{}),
+		idleDoneCh:       make(chan struct{}),
 		logOffloadDoneCh: make(chan struct{}),
 	}, nil
 }
@@ -161,11 +163,17 @@ func (d *Daemon) Start(ctx context.Context, preopen ...string) error {
 	if sweepInterval := parseSweepInterval(d.cfg.Daemon.SweepInterval); sweepInterval > 0 {
 		go d.sweepLoop(ctx, sweepInterval)
 	}
+	if idleTimeout := daemonIdleTimeout(d.cfg.Daemon.IdleTimeout); idleTimeout > 0 {
+		go d.workerIdleLoop(ctx, idleTimeout)
+	} else {
+		close(d.idleDoneCh)
+	}
 	if d.cfg.Daemon.LogOffload {
 		d.startLogOffload(ctx)
 	}
 
 	<-d.stopCh
+	<-d.idleDoneCh
 	_ = d.listener.Close()
 	d.closeAllWorkers()
 
@@ -234,15 +242,30 @@ func (d *Daemon) removeWorker(root string) bool {
 	canon := canonicalRoot(root)
 	d.workersMu.Lock()
 	w, ok := d.workers[canon]
-	if ok {
+	d.workersMu.Unlock()
+	if !ok {
+		return false
+	}
+	return d.removeWorkerInstance(w)
+}
+
+// removeWorkerInstance removes exactly w. The identity check prevents a
+// delayed idle-reaper pass from removing a replacement worker for the same
+// project after a manual remove/reopen cycle.
+func (d *Daemon) removeWorkerInstance(w *projectWorker) bool {
+	canon := canonicalRoot(w.root())
+	d.workersMu.Lock()
+	current, ok := d.workers[canon]
+	if ok && current == w {
 		delete(d.workers, canon)
 	}
 	d.workersMu.Unlock()
-	if ok {
+	if ok && current == w {
 		w.close()
 		_ = d.writeState()
+		return true
 	}
-	return ok
+	return false
 }
 
 func (d *Daemon) lookupWorker(root string) (*projectWorker, bool) {
@@ -371,6 +394,9 @@ func (d *Daemon) workerForReq(ctx context.Context, req *jsonRPCRequest) (*projec
 	if err != nil {
 		return nil, &jsonRPCError{Code: -32603, Message: fmt.Sprintf("open project %q: %v", p.Project, err)}
 	}
+	// Mark activity before returning the worker so a request arriving near an
+	// idle-reaper tick keeps the project warm for the duration of this request.
+	w.touchActivity()
 	return w, nil
 }
 
@@ -399,6 +425,16 @@ func (d *Daemon) handleSearch(ctx context.Context, req *jsonRPCRequest) jsonRPCR
 	result := map[string]any{"results": results, "mode": mode}
 	if len(warnings) > 0 {
 		result["warnings"] = warnings
+	}
+	// Include envelope metadata from the already-open worker. This keeps
+	// machine consumers on the daemon fast path instead of reopening the
+	// vector index solely to distinguish an empty index from zero hits.
+	if indexed, fresh, chunks, metaErr := w.indexMeta(ctx); metaErr == nil {
+		result["index"] = map[string]any{
+			"indexed": indexed,
+			"fresh":   fresh,
+			"chunks":  chunks,
+		}
 	}
 	return jsonRPCResponse{ID: req.ID, Result: result}
 }
@@ -663,6 +699,58 @@ type searchParams struct {
 }
 
 // --- periodic background loops (hub-level) ---
+
+// daemonIdleTimeout converts the user-facing minute setting while keeping the
+// zero value as an explicit opt-out.
+func daemonIdleTimeout(minutes int) time.Duration {
+	if minutes <= 0 {
+		return 0
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+// workerIdleLoop closes project workers that have not been used recently.
+// The hub stays alive, so a later request can reopen the project without
+// retaining every visited index, watcher and embedding provider in memory.
+func (d *Daemon) workerIdleLoop(ctx context.Context, timeout time.Duration) {
+	defer close(d.idleDoneCh)
+
+	interval := timeout / 2
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	if interval > 5*time.Minute {
+		interval = 5 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.stopCh:
+			return
+		case now := <-ticker.C:
+			d.evictIdleWorkers(now, timeout)
+		}
+	}
+}
+
+func (d *Daemon) evictIdleWorkers(now time.Time, timeout time.Duration) int {
+	workers := d.listWorkers()
+	evicted := 0
+	for _, w := range workers {
+		if !w.isIdle(now, timeout) {
+			continue
+		}
+		if d.removeWorkerInstance(w) {
+			evicted++
+			log.Printf("daemon: closed idle project %s", w.root())
+		}
+	}
+	return evicted
+}
 
 // sweepLoop periodically runs fcheap vacuum to clean up orphaned stash entries.
 // Best-effort: if fcheap is not available it logs and returns.

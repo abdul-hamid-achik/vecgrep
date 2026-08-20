@@ -250,18 +250,21 @@ func (s *Service) indexFreshness(ctx context.Context, receipt *IngestionReceipt,
 		report.Reason = "raw_source_drift"
 		return report, pending, nil
 	}
+	return evaluateReceiptFreshness(ctx, s.session.ProjectRoot, s.session.Config, receipt, receiptErr, s.manifestSource, report), pending, nil
+}
 
+func evaluateReceiptFreshness(ctx context.Context, projectRoot string, cfg *config.Config, receipt *IngestionReceipt, receiptErr error, source *codemapStructuralManifestSource, report *IndexFreshnessReport) *IndexFreshnessReport {
 	if receiptErr != nil {
 		report.Reason = "ingestion_receipt_invalid"
-		return report, pending, nil
+		return report
 	}
 	if receipt == nil {
 		report.Reason = "ingestion_receipt_missing"
-		return report, pending, nil
+		return report
 	}
 	if !successfulIngestionReceipt(receipt) {
 		report.Reason = "ingestion_receipt_incomplete"
-		return report, pending, nil
+		return report
 	}
 	report.ReceiptVerified = true
 	lastSuccess := receipt.LastSuccess.UTC()
@@ -271,29 +274,28 @@ func (s *Service) indexFreshness(ctx context.Context, receipt *IngestionReceipt,
 	if !report.ManifestRequired {
 		report.State = IndexFreshnessFresh
 		report.Reason = "fresh"
-		return report, pending, nil
+		return report
 	}
 
-	expectedProjectKey, err := structuralProjectKey(s.session.ProjectRoot)
+	expectedProjectKey, err := structuralProjectKey(projectRoot)
 	if err != nil || receipt.Producer != "codemap" || receipt.Contract != "codemap.structural-export" || receipt.ContractVersion != structuralExportSchemaVersion || receipt.ProducerProjectKey != expectedProjectKey || !validLowerHex(receipt.IndexFingerprint, 64) {
 		report.Reason = "ingestion_receipt_structural_contract_invalid"
-		return report, pending, nil
+		return report
 	}
 
-	source := s.manifestSource
 	if source == nil {
-		bin := s.session.Config.Codemap.Bin
+		bin := cfg.Codemap.Bin
 		if bin == "" {
 			bin = "codemap"
 		}
 		resolved, resolveErr := config.ResolveBinary(bin)
 		if resolveErr != nil {
 			report.Reason = "structural_manifest_unavailable"
-			return report, pending, nil
+			return report
 		}
 		source = newCodemapStructuralManifestSource(resolved)
 	}
-	manifest, manifestErr := source.load(ctx, s.session.ProjectRoot, expectedProjectKey, receipt.IndexFingerprint)
+	manifest, manifestErr := source.load(ctx, projectRoot, expectedProjectKey, receipt.IndexFingerprint)
 	if manifestErr != nil {
 		switch {
 		case errors.Is(manifestErr, errStructuralManifestMismatch):
@@ -303,18 +305,18 @@ func (s *Service) indexFreshness(ctx context.Context, receipt *IngestionReceipt,
 		default:
 			report.Reason = "structural_manifest_unavailable"
 		}
-		return report, pending, nil
+		return report
 	}
 	report.ManifestVerified = true
 	report.StructuralManifest = manifest
 	if !manifest.Freshness.Fresh {
 		report.State = IndexFreshnessStale
 		report.Reason = "structural_manifest_stale"
-		return report, pending, nil
+		return report
 	}
 	report.State = IndexFreshnessFresh
 	report.Reason = "fresh"
-	return report, pending, nil
+	return report
 }
 
 func successfulIngestionReceipt(receipt *IngestionReceipt) bool {

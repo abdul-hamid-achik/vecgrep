@@ -61,6 +61,11 @@ merging stores or joining on bare symbol names (which collide).
   unknown` until a successful `vecgrep index --full` rebuilds the proof. A durable
   project tombstone also forces `unknown` if a multi-collection delete/reset is
   interrupted, so retained hashes can never certify missing or ghost chunks.
+- **Vector-free health checks** — `vecgrep status --lightweight` reads the
+  project-isolated `health/<project-key>/manifest.v1.json` sidecar and scans
+  source hashes without opening VecLite. It is the preferred polling path for
+  editors and agents; the full status command remains available for detailed
+  vector/provider diagnostics.
 - **Reverse direction** — codemap shells `vecgrep search --format json` as its
   semantic-search fallback and recalls vecgrep memories into its context reports.
 

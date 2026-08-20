@@ -208,6 +208,21 @@ func (p *OpenAIProvider) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 	return results, nil
 }
 
+// EmbedDocuments implements DocumentProvider. OpenAI uses the same embedding
+// space for queries and documents, so this delegates to EmbedBatch — the
+// important part is exposing DocumentProvider so ThrottledProvider can send
+// one HTTP request per indexer batch instead of one request per chunk.
+func (p *OpenAIProvider) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	return p.EmbedBatch(ctx, texts)
+}
+
+// Compile-time interface checks — cloud providers must stay on the batch path
+// used by the indexer (see ThrottledProvider.EmbedDocuments).
+var (
+	_ Provider         = (*OpenAIProvider)(nil)
+	_ DocumentProvider = (*OpenAIProvider)(nil)
+)
+
 // embedBatchInternal performs a batch embedding request.
 func (p *OpenAIProvider) embedBatchInternal(ctx context.Context, texts []string) ([][]float32, error) {
 	if p.config.APIKey == "" {

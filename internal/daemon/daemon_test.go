@@ -91,6 +91,52 @@ func TestProjectWorkerCloseDrainsOperationsAndRejectsNewWork(t *testing.T) {
 	}
 }
 
+func TestProjectWorkerIdleRequiresNoActiveOperations(t *testing.T) {
+	now := time.Now()
+	w := &projectWorker{state: DaemonState{LastActivity: now.Add(-10 * time.Minute)}}
+
+	if !w.isIdle(now, 5*time.Minute) {
+		t.Fatal("expected inactive worker to be evictable")
+	}
+	if !w.beginOperation() {
+		t.Fatal("beginOperation unexpectedly failed")
+	}
+	if w.isIdle(now, 5*time.Minute) {
+		t.Fatal("worker with active operation must not be evictable")
+	}
+	w.endOperation()
+
+	w.touchActivity()
+	if w.isIdle(time.Now(), 5*time.Minute) {
+		t.Fatal("recently used worker must not be evictable")
+	}
+}
+
+func TestDaemonEvictIdleWorkers(t *testing.T) {
+	now := time.Now()
+	old := &projectWorker{
+		session: &app.Session{ProjectRoot: filepath.Join(t.TempDir(), "old")},
+		state:   DaemonState{LastActivity: now.Add(-10 * time.Minute)},
+	}
+	current := &projectWorker{
+		session: &app.Session{ProjectRoot: filepath.Join(t.TempDir(), "current")},
+		state:   DaemonState{LastActivity: now},
+	}
+	d := &Daemon{workers: map[string]*projectWorker{}}
+	d.workers[canonicalRoot(old.root())] = old
+	d.workers[canonicalRoot(current.root())] = current
+
+	if got := d.evictIdleWorkers(now, 5*time.Minute); got != 1 {
+		t.Fatalf("evicted %d workers, want 1", got)
+	}
+	if _, ok := d.workers[canonicalRoot(old.root())]; ok {
+		t.Fatal("old worker remained registered")
+	}
+	if _, ok := d.workers[canonicalRoot(current.root())]; !ok {
+		t.Fatal("active worker was evicted")
+	}
+}
+
 func TestReadStateNoFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := ReadState(tmpDir)
