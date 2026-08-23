@@ -569,31 +569,9 @@ func (s *SDKServer) ensureInitialized(ctx context.Context) error {
 		return nil
 	}
 
-	// Try to auto-detect project from current working directory
 	projectRoot, err := config.GetProjectRoot()
 	if err != nil {
-		// Not found via local markers or global config - try to auto-register globally
-		cwd, cwdErr := os.Getwd()
-		if cwdErr != nil {
-			return fmt.Errorf("no vecgrep project found. Run vecgrep_init with the project path, or run 'vecgrep init' in the project directory first")
-		}
-
-		// Auto-register the cwd globally
-		if regErr := config.AddProjectToGlobal(cwd, ""); regErr != nil {
-			return fmt.Errorf("no vecgrep project found and auto-register failed: %w. Run vecgrep_init with the project path", regErr)
-		}
-
-		// Create the data directory
-		name, _, _ := config.FindProjectByPath(cwd)
-		dataDir, ddErr := config.GetProjectDataDir(name)
-		if ddErr != nil {
-			return fmt.Errorf("failed to get project data directory: %w", ddErr)
-		}
-		if mkErr := os.MkdirAll(dataDir, 0755); mkErr != nil {
-			return fmt.Errorf("failed to create data directory: %w", mkErr)
-		}
-
-		projectRoot = cwd
+		return fmt.Errorf("%v — run vecgrep_init with path=<workspace> or run 'vecgrep init' in the project directory", err)
 	}
 
 	// Auto-activate the detected project

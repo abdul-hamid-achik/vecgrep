@@ -116,6 +116,11 @@ type Progress struct {
 	// SkippedFiles is unchanged/filtered files not queued for embed.
 	SkippedFiles int
 	TotalChunks  int
+	// QueuedChunks is chunks handed to the embed pipeline (may exceed EmbeddedChunks
+	// while batches are in flight).
+	QueuedChunks int
+	// EmbeddedChunks is chunks that finished embedding (insert may still be pending).
+	EmbeddedChunks int
 	// CurrentFile is the best active path for the UI: prefer the file currently
 	// being walked/hashed while discovering, else the last completed embed file.
 	CurrentFile string
@@ -223,6 +228,16 @@ type Indexer struct {
 	// contract. Production leaves these nil and uses db directly.
 	syncFn       func() error
 	deleteFileFn func(context.Context, string, string) (int64, error)
+
+	// In-flight index counters (indexPrepared only; best-effort for progress UI).
+	queuedChunks         atomic.Int64
+	embeddedChunks       atomic.Int64
+	embedProgressMu      sync.Mutex
+	lastEmbedTick        time.Time
+	activeEmitProgress   func()
+	planProgress         ProgressCallback
+	planProgressMu       sync.Mutex
+	lastPlanProgressTick time.Time
 }
 
 // NewIndexer creates a new Indexer.
@@ -281,6 +296,44 @@ func ReportStatus(cb ProgressCallback, status string) {
 		return
 	}
 	cb(Progress{Phase: PhaseStatus, Status: status})
+}
+
+// tickEmbedProgress emits a progress update during embedding batches so the UI
+// advances on chunk throughput, not only when whole files finish inserting.
+func (idx *Indexer) tickEmbedProgress() {
+	if idx == nil || idx.progress == nil {
+		return
+	}
+	now := time.Now()
+	idx.embedProgressMu.Lock()
+	if !idx.lastEmbedTick.IsZero() && now.Sub(idx.lastEmbedTick) < 250*time.Millisecond {
+		idx.embedProgressMu.Unlock()
+		return
+	}
+	idx.lastEmbedTick = now
+	idx.embedProgressMu.Unlock()
+	if idx.activeEmitProgress != nil {
+		idx.activeEmitProgress()
+	}
+}
+
+// tickPlanProgress emits throttled dry-run / plan updates (file scan, chunk estimate).
+func (idx *Indexer) tickPlanProgress(p Progress) {
+	if idx == nil || idx.planProgress == nil {
+		return
+	}
+	now := time.Now()
+	idx.planProgressMu.Lock()
+	if !idx.lastPlanProgressTick.IsZero() && now.Sub(idx.lastPlanProgressTick) < 200*time.Millisecond {
+		idx.planProgressMu.Unlock()
+		return
+	}
+	idx.lastPlanProgressTick = now
+	idx.planProgressMu.Unlock()
+	if p.Phase == "" {
+		p.Phase = PhaseStatus
+	}
+	idx.planProgress(p)
 }
 
 func (idx *Indexer) sync() error {
@@ -518,6 +571,11 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 	if batchSize <= 0 {
 		batchSize = DefaultIndexerConfig().BatchSize
 	}
+	idx.queuedChunks.Store(0)
+	idx.embeddedChunks.Store(0)
+	idx.embedProgressMu.Lock()
+	idx.lastEmbedTick = time.Time{}
+	idx.embedProgressMu.Unlock()
 
 	// Pipeline channels. Source files are charged against sourceBudget before
 	// the walker reads and retains their content, then released when a chunk
@@ -588,6 +646,8 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 			ProcessedFiles: processed,
 			SkippedFiles:   skipped,
 			TotalChunks:    chunks,
+			QueuedChunks:   int(idx.queuedChunks.Load()),
+			EmbeddedChunks: int(idx.embeddedChunks.Load()),
 			CurrentFile:    cur,
 			WalkingFile:    walkPath,
 			EmbeddingFile:  embedPath,
@@ -687,6 +747,8 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 
 	// Cold-start tick so the UI leaves "idle" even before the first file finishes.
 	emitProgress()
+	idx.activeEmitProgress = emitProgress
+	defer func() { idx.activeEmitProgress = nil }()
 
 	for r := range resultsChan {
 		result.FilesProcessed++
@@ -938,6 +1000,7 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 	}
 
 	for i, chunk := range chunks {
+		idx.queuedChunks.Add(1)
 		select {
 		case items <- embedItem{task: task, slot: i, text: embeddingContent(chunk)}:
 		case <-ctx.Done():
@@ -1001,6 +1064,10 @@ func (idx *Indexer) embedBatch(ctx context.Context, batch []embedItem, results c
 		texts[i] = it.text
 	}
 	embeddings, err := embedDocuments(ctx, idx.provider, texts)
+	if err == nil {
+		idx.embeddedChunks.Add(int64(len(batch)))
+		idx.tickEmbedProgress()
+	}
 	for i, it := range batch {
 		var emb []float32
 		if err == nil && i < len(embeddings) {
@@ -1164,7 +1231,17 @@ func (idx *Indexer) collectFiles(ctx context.Context, rootPath string, paths []s
 				size:         info.Size(),
 				content:      content,
 			})
+			walked := len(files)
 			mu.Unlock()
+
+			if idx.planProgress != nil {
+				idx.tickPlanProgress(Progress{
+					Phase:       PhaseStatus,
+					WalkedFiles: walked,
+					WalkingFile: relPath,
+					Status:      fmt.Sprintf("scanning… %d files", walked),
+				})
+			}
 
 			return nil
 		})
@@ -1713,8 +1790,16 @@ func (p DryRunPreview) NeedsConfirm() bool {
 
 // DryRunPreview scans the project and returns counts of files needing
 // reindexing plus an estimated chunk count, without calling the embedding
-// provider.
-func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string) (*DryRunPreview, error) {
+// provider. cb is optional live plan progress (scan + chunk estimate).
+func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string, cb ProgressCallback) (*DryRunPreview, error) {
+	if cb != nil {
+		idx.planProgress = cb
+		defer func() {
+			idx.planProgress = nil
+			idx.lastPlanProgressTick = time.Time{}
+		}()
+	}
+	ReportStatus(cb, "loading structural symbols…")
 	structuralConfig := idx.SnapshotStructuralChunkSource()
 	structural, _, err := idx.loadStructuralChunksWithSnapshot(ctx, projectRoot, structuralConfig)
 	if err != nil {
@@ -1768,6 +1853,7 @@ func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string) (*Dry
 	}
 
 	// Count new and modified files, and estimate chunks for changed files
+	estimateDone := 0
 	for relPath, currentFile := range currentFileMap {
 		indexedHash, exists := indexedFiles[relPath]
 		if !exists {
@@ -1776,6 +1862,15 @@ func (idx *Indexer) DryRunPreview(ctx context.Context, projectRoot string) (*Dry
 			preview.ModifiedFiles++
 		} else {
 			continue // unchanged
+		}
+
+		estimateDone++
+		if estimateDone%500 == 0 {
+			idx.tickPlanProgress(Progress{
+				Phase:       PhaseStatus,
+				Status:      fmt.Sprintf("estimating chunks… %d files", estimateDone),
+				WalkedFiles: estimateDone,
+			})
 		}
 
 		// Estimate chunks for this file

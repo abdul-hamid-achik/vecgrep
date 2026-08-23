@@ -94,7 +94,7 @@ func maybeConfirmIndexPlan(cmd *cobra.Command, service *app.Service, root, struc
 		return nil
 	}
 
-	preview, err := service.DryRunPreviewWithStructuralMode(cmd.Context(), structuralMode)
+	preview, err := dryRunPreview(cmd, service, structuralMode, false)
 	if err != nil {
 		return fmt.Errorf("plan failed: %w", err)
 	}
@@ -155,3 +155,11 @@ var (
 	errIndexCancelled   = quietExitError{msg: "index cancelled"}
 	errIndexNothingToDo = quietExitError{msg: "index up to date"}
 )
+
+// dryRunPreview runs the plan step, showing a live bar on an interactive TTY.
+func dryRunPreview(cmd *cobra.Command, service *app.Service, structuralMode string, skipBar bool) (*index.DryRunPreview, error) {
+	if skipBar || !isInteractiveTerminal() {
+		return service.DryRunPreviewWithStructuralMode(cmd.Context(), structuralMode)
+	}
+	return runDryRunWithBar(cmd.Context(), service, structuralMode)
+}

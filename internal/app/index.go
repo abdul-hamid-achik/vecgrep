@@ -105,6 +105,12 @@ func (s *Service) DryRunPreview(ctx context.Context) (*index.DryRunPreview, erro
 // DryRunPreviewWithStructuralMode is DryRunPreview with the same optional
 // structural-mode override accepted by Index.
 func (s *Service) DryRunPreviewWithStructuralMode(ctx context.Context, structuralMode string) (*index.DryRunPreview, error) {
+	return s.DryRunPreviewWithStructuralModeAndProgress(ctx, structuralMode, nil)
+}
+
+// DryRunPreviewWithStructuralModeAndProgress is DryRunPreviewWithStructuralMode
+// with optional live plan progress for interactive CLIs.
+func (s *Service) DryRunPreviewWithStructuralModeAndProgress(ctx context.Context, structuralMode string, cb index.ProgressCallback) (*index.DryRunPreview, error) {
 	if s == nil || s.session == nil {
 		return nil, fmt.Errorf("service not initialized")
 	}
@@ -112,7 +118,7 @@ func (s *Service) DryRunPreviewWithStructuralMode(ctx context.Context, structura
 	if err != nil {
 		return nil, err
 	}
-	return indexer.DryRunPreview(ctx, s.session.ProjectRoot)
+	return indexer.DryRunPreview(ctx, s.session.ProjectRoot, cb)
 }
 
 func (s *Service) Clean(ctx context.Context) (*db.CleanStats, error) {

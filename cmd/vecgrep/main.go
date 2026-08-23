@@ -610,6 +610,12 @@ func runInitGlobal(cwd string, force bool) error {
 		return fmt.Errorf("project already registered as '%s' (use --force to reinitialize)", existingName)
 	}
 
+	if ancestor, name, shadowed := config.AncestorRegisteredProject(cwd); shadowed {
+		fmt.Fprintf(os.Stderr, "note: ancestor project %q is registered at %s — this init scopes vecgrep to %s\n", name, ancestor, cwd)
+	} else if name != "" && !config.PathsEqual(cwd, ancestor) {
+		fmt.Fprintf(os.Stderr, "note: registering scoped project under ancestor %q (%s)\n", name, ancestor)
+	}
+
 	// Add to global projects
 	if err := config.AddProjectToGlobal(cwd, ""); err != nil {
 		return fmt.Errorf("failed to register project: %w", err)
@@ -748,7 +754,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 
 	// --dry-run: preview only (no embed, no confirm).
 	if dryRun, _ := cmd.Flags().GetBool("dry-run"); dryRun {
-		preview, err := service.DryRunPreviewWithStructuralMode(cmd.Context(), structuralMode)
+		preview, err := dryRunPreview(cmd, service, structuralMode, false)
 		if err != nil {
 			return fmt.Errorf("dry-run failed: %w", err)
 		}
@@ -900,7 +906,7 @@ func indexViaDaemon(cmd *cobra.Command, args []string, globalDataDir string) err
 		}
 		defer session.Close()
 		service := app.NewService(session)
-		preview, err := service.DryRunPreviewWithStructuralMode(cmd.Context(), structuralMode)
+		preview, err := dryRunPreview(cmd, service, structuralMode, false)
 		if err != nil {
 			return fmt.Errorf("dry-run failed: %w", err)
 		}

@@ -773,52 +773,40 @@ func FindProjectRoot() (string, error) {
 	return FindProjectRootFrom(dir)
 }
 
-// FindProjectRootFrom searches for a project root starting from the given directory
+// FindProjectRootFrom searches for a project root starting from the given directory.
+// Local markers win first (nearest walk-up). Among global registrations the
+// deepest containing path wins (child over parent). A registered ancestor does
+// not shadow a nested git/go/npm root — run vecgrep init in that directory instead.
 func FindProjectRootFrom(startDir string) (string, error) {
-	dir := startDir
-
-	// The global store also lives in a ".vecgrep" directory (~/.vecgrep) and shares
-	// its name with the project-local marker. Never treat the global directory as a
-	// project-root marker, otherwise the home directory resolves as a project and
-	// indexing walks the entire home tree (~/.asdf, ~/Library, etc.).
-	globalDir, _ := GetGlobalConfigDir()
-
-	for {
-		// Check for project config files in order of preference
-		configFiles := []string{
-			filepath.Join(dir, "vecgrep.yaml"),
-			filepath.Join(dir, "vecgrep.yml"),
-			filepath.Join(dir, ".config", "vecgrep.yaml"),
-			filepath.Join(dir, DefaultDataDir),
-		}
-
-		for _, cf := range configFiles {
-			if info, err := os.Stat(cf); err == nil {
-				// For .vecgrep, check if it's a directory
-				if strings.HasSuffix(cf, DefaultDataDir) {
-					if info.IsDir() && (globalDir == "" || cf != globalDir) {
-						return dir, nil
-					}
-				} else if info.Mode().IsRegular() {
-					return dir, nil
-				}
-			}
-		}
-
-		// Check if this project is registered globally
-		if name, entry, _ := FindProjectByPath(dir); entry != nil {
-			// Project found in global config
-			_ = name
-			return dir, nil
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			return "", fmt.Errorf("not in a vecgrep project (no config file or %s directory found). Run 'vecgrep init' to initialize", DefaultDataDir)
-		}
-		dir = parent
+	if root, ok := findLocalProjectRootFrom(startDir); ok {
+		return root, nil
 	}
+
+	absStart, err := absClean(startDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve start dir: %w", err)
+	}
+
+	name, entry, ok := FindDeepestRegisteredProjectContaining(absStart)
+	if !ok {
+		return "", fmt.Errorf("not in a vecgrep project (no config file or %s directory found). Run 'vecgrep init' to initialize", DefaultDataDir)
+	}
+
+	regRoot, err := absClean(ExpandPath(entry.Path))
+	if err != nil {
+		return "", fmt.Errorf("resolve registered project path: %w", err)
+	}
+
+	if pathsEqual(absStart, regRoot) {
+		return regRoot, nil
+	}
+
+	if boundary, has := NestedProjectBoundary(absStart, regRoot); has {
+		return "", fmt.Errorf("%w: cwd is under registered project %q (%s) but %s looks like its own codebase — run 'vecgrep init' in %s for a scoped index",
+			ErrNestedProjectBoundary, name, regRoot, filepath.Base(boundary), boundary)
+	}
+
+	return regRoot, nil
 }
 
 // fileExists checks if a file exists and is a regular file

@@ -101,7 +101,11 @@ func (m indexProgressModel) View() tea.View {
 
 	// Free-form phase (warmup, structural load, storage reset, finalize…).
 	if p.Status != "" && p.Phase == index.PhaseStatus {
-		return tea.NewView(spin + "  " + p.Status)
+		line := spin + "  " + p.Status
+		if !m.start.IsZero() {
+			line += "  " + formatETA(time.Since(m.start))
+		}
+		return tea.NewView(line)
 	}
 	if p.Status != "" && p.WalkedFiles == 0 && p.QueuedFiles == 0 && p.ProcessedFiles == 0 && !p.WalkComplete {
 		return tea.NewView(spin + "  " + p.Status)
@@ -121,6 +125,9 @@ func (m indexProgressModel) View() tea.View {
 		// No honest %: counters only (never show embed/queued as a final N/M —
 		// queued grows while walking and would look like 90/100 → 100/110).
 		line := fmt.Sprintf("%s  walk %d · queue %d · embed %d", spin, p.WalkedFiles, p.QueuedFiles, p.ProcessedFiles)
+		if p.QueuedChunks > 0 {
+			line += fmt.Sprintf(" · chunks %d/%d", p.EmbeddedChunks, p.QueuedChunks)
+		}
 		if p.SkippedFiles > 0 {
 			line += fmt.Sprintf(" · skip %d", p.SkippedFiles)
 		}
@@ -152,6 +159,11 @@ func (m indexProgressModel) View() tea.View {
 	}
 	pct := int(p.HonestPercent() * 100)
 	line += fmt.Sprintf("  %d%%  %d/%d", pct, p.ProcessedFiles, queued)
+	if p.QueuedChunks > 0 {
+		line += fmt.Sprintf("  chunks %d/%d", p.EmbeddedChunks, p.QueuedChunks)
+	} else if p.TotalChunks > 0 {
+		line += fmt.Sprintf("  %d chunks", p.TotalChunks)
+	}
 	if p.BytesProcessed > 0 {
 		line += "  " + humanBytes(p.BytesProcessed)
 	}
@@ -258,6 +270,30 @@ func runIndexWithBar(ctx context.Context, service *app.Service, req app.IndexReq
 	out := <-resCh // doneMsg path: indexing already finished; authoritative result
 	logs.report()
 	return out.res, out.err
+}
+
+// runDryRunWithBar runs a dry-run plan with the same inline spinner/bar used for
+// indexing, so large trees do not sit silent for minutes before y/n.
+func runDryRunWithBar(ctx context.Context, service *app.Service, structuralMode string) (*index.DryRunPreview, error) {
+	prog := tea.NewProgram(newIndexProgressModel(), tea.WithContext(ctx))
+	type planOut struct {
+		p   *index.DryRunPreview
+		err error
+	}
+	resCh := make(chan planOut, 1)
+	go func() {
+		p, err := service.DryRunPreviewWithStructuralModeAndProgress(ctx, structuralMode, func(pr index.Progress) {
+			prog.Send(fileMsg{progress: pr})
+		})
+		resCh <- planOut{p, err}
+		prog.Send(doneMsg{})
+	}()
+	if _, runErr := prog.Run(); runErr != nil {
+		out := <-resCh
+		return out.p, out.err
+	}
+	out := <-resCh
+	return out.p, out.err
 }
 
 // suppressLogs routes both slog and the standard log package to the given
