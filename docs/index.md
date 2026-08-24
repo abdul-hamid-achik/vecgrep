@@ -32,9 +32,9 @@ features:
   - icon: 🤖
     title: MCP Server for AI Assistants
     details: Expose indexed code to Claude, Cursor, and any MCP-compatible client. Your AI assistant can search, index, and inspect your codebase semantically.
-  - icon: 🎨
-    title: Studio Terminal UI
-    details: A full-screen Bubble Tea TUI for searching, previewing code, indexing projects, and inspecting vector status — without leaving the terminal.
+  - icon: 🤖
+    title: CLI + MCP
+    details: Human commands with optional `--json` for agents, plus an MCP server for Claude, Cursor, and any MCP-compatible client.
   - icon: ⚡
     title: Incremental Indexing
     details: File-hash-based change detection means only modified files get re-indexed. Full rebuilds only when you change embedding model or dimensions.
@@ -143,8 +143,8 @@ Results (hybrid mode, top 5):
 # Find similar code by chunk ID, file:line, or raw text
 $ vecgrep similar --file-location internal/search/search.go:50
 
-# Open the full-screen terminal workspace
-$ vecgrep studio
+# Inspect index status
+$ vecgrep status
 ```
 
 </div>
@@ -194,7 +194,7 @@ query your index directly — `vecgrep_search`, `vecgrep_similar`,
 | AI assistant integration | ✗ | ✓ MCP server |
 | Incremental re-indexing | ✗ | ✓ file-hash detection |
 | Local-first embeddings | N/A | ✓ Ollama default |
-| Terminal UI | ✗ | ✓ Studio TUI |
+| Terminal UI | ✗ | CLI + MCP (`--json`) |
 
 </div>
 
@@ -345,7 +345,7 @@ vecgrep init && vecgrep index
 vecgrep search "what you're looking for"
 ```
 
-[Quick Start Guide](/quick-start){.cta-button} · [CLI Reference](/usage){.cta-button} · [Studio TUI](/studio){.cta-button} · [GitHub](https://github.com/abdul-hamid-achik/vecgrep){.cta-button}
+[Quick Start Guide](/quick-start){.cta-button} · [CLI Reference](/usage){.cta-button} · [MCP Integration](/mcp){.cta-button} · [GitHub](https://github.com/abdul-hamid-achik/vecgrep){.cta-button}
 
 MIT-licensed · open source · contributions welcome
 
