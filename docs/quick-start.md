@@ -61,18 +61,7 @@ vecgrep index --full
 
 ```bash
 vecgrep search "error handling in HTTP requests"
-```
-
-Open the full-screen terminal workspace:
-
-```bash
-vecgrep studio
-```
-
-You can also use:
-
-```bash
-vecgrep browse
+vecgrep search "authentication middleware" -f json
 ```
 
 ## Verify Status

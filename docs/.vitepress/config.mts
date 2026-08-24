@@ -20,8 +20,8 @@ const pageMeta: Record<string, { title: string; description: string }> = {
     description: 'Hierarchical config resolution, project files, environment variables, and embedding provider settings.'
   },
   '/studio': {
-    title: 'Studio TUI — vecgrep',
-    description: 'Full-screen terminal workspace built with Bubble Tea. Search, preview code, index projects, and inspect vector status.'
+    title: 'Surfaces — vecgrep',
+    description: 'Studio TUI removed. Use the CLI, --json output, and the MCP server (vecgrep serve --mcp).'
   },
   '/providers': {
     title: 'Embedding Providers — vecgrep',
@@ -223,7 +223,6 @@ export default defineConfig({
     },
     nav: [
       { text: 'Guide', link: '/quick-start' },
-      { text: 'Studio', link: '/studio' },
       { text: 'MCP', link: '/mcp' },
       { text: 'Providers', link: '/providers' },
       { text: 'Development', link: '/development' }
@@ -241,7 +240,6 @@ export default defineConfig({
       {
         text: 'Features',
         items: [
-          { text: 'Studio', link: '/studio' },
           { text: 'Embedding Providers', link: '/providers' },
           { text: 'MCP Integration', link: '/mcp' },
           { text: 'Docker', link: '/docker' }

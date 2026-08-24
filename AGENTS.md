@@ -12,7 +12,8 @@ vecgrep is a local-first semantic code search tool powered by vector embeddings.
 - Incremental indexing with file hashing
 - Language-aware code chunking
 - MCP (Model Context Protocol) server for AI assistant integration
-- Bubble Tea Studio terminal app
+
+Two surfaces: the **CLI** (human commands and `--json` for agents) and the **MCP server** (`vecgrep serve`). The former Studio TUI is not shipped — use CLI + MCP (`docs/studio.md`).
 
 ## Directory Structure
 
@@ -28,11 +29,11 @@ internal/
     veclite_backend.go     # VecLite HNSW implementation
   embed/            # Embedding providers (Ollama, OpenAI)
   index/            # File indexer and chunker
-  app/              # Shared CLI/Studio service layer
+  app/              # Shared CLI/MCP service layer
   mcp/              # Model Context Protocol server (server_sdk.go)
   render/           # CLI rendering adapters
   search/           # Search implementation
-  studio/           # Bubble Tea Studio terminal app
+  studio/           # Legacy Bubble Tea TUI (not wired to the CLI)
   version/          # Version info (set via ldflags)
 docs/               # VitePress documentation website (deployed to Vercel)
 ```

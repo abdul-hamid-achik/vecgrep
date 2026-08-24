@@ -13,8 +13,8 @@ hero:
       text: Get Started in 60 Seconds
       link: /quick-start
     - theme: alt
-      text: Explore Studio
-      link: /studio
+      text: MCP for agents
+      link: /mcp
     - theme: alt
       text: GitHub
       link: https://github.com/abdul-hamid-achik/vecgrep

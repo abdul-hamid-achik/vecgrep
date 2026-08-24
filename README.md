@@ -15,7 +15,6 @@ vecgrep indexes your codebase and enables natural language search using vector e
 - **Lossless Language-Aware Chunking** - Structural boundaries where available, generic fallback everywhere else
 - **Rich Filtering** - Filter by language, chunk type, directory, file pattern, and line range
 - **MCP Support** - Model Context Protocol server for AI assistant integration
-- **Studio** - Full-screen Bubble Tea workspace for search, preview, indexing, and status
 - **Similar Code Finder** - Find semantically similar code across your codebase
 - **Search Diagnostics** - Explain mode for debugging and optimizing searches
 - **Embedding Cache** - Cache query embeddings for faster repeated searches
@@ -73,10 +72,9 @@ task install
    vecgrep search "error handling in HTTP requests"
    ```
 
-   Or open Studio:
+   Or inspect status:
    ```bash
-   vecgrep studio
-   # or: vecgrep browse
+   vecgrep status
    ```
 
 ### Using Cloud Embeddings (Alternative)
@@ -228,20 +226,9 @@ vecgrep search "imports" --lines=1-50
 vecgrep search "API endpoints" --format=json
 ```
 
-### Studio
+### Surfaces
 
-Open the full-screen terminal workspace:
-
-```bash
-vecgrep studio
-# or: vecgrep browse
-# open a specific project/folder:
-vecgrep studio /path/to/project
-```
-
-In an interactive terminal, running `vecgrep` without a subcommand also opens Studio.
-
-Studio is built on Charm v2 Bubble Tea/Bubbles/Lip Gloss libraries. It supports query search, result preview, collapsible filters (directory/file/line), language and chunk-type filters, min-score, readiness chips (empty/stale/profile mismatch), hybrid→keyword fallback warnings, yank to clipboard, query history, status/config views with scroll, inline global registration when no project is open, phase-aware indexing progress, dry-run plan before full re-index, file deletion, and reset confirmation.
+vecgrep ships as a **CLI** and an **MCP server** (`vecgrep serve`). Use `--json` on CLI commands for machine output. The former Studio TUI is not shipped — see [docs/studio.md](docs/studio.md).
 
 ### MCP Server
 

@@ -25,7 +25,6 @@ import (
 	"github.com/abdul-hamid-achik/vecgrep/internal/mcp"
 	"github.com/abdul-hamid-achik/vecgrep/internal/render"
 	"github.com/abdul-hamid-achik/vecgrep/internal/search"
-	"github.com/abdul-hamid-achik/vecgrep/internal/studio"
 	"github.com/abdul-hamid-achik/vecgrep/internal/version"
 	"github.com/abdul-hamid-achik/veclite"
 	"github.com/spf13/cobra"
@@ -48,10 +47,7 @@ embeddings to find similar code across your codebase.
 It supports Ollama for local embeddings, ensuring your code never
 leaves your machine.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if !isInteractiveTerminal() {
-			return cmd.Help()
-		}
-		return runStudio(cmd, args)
+		return cmd.Help()
 	},
 }
 
@@ -102,15 +98,6 @@ unreachable, hybrid search degrades to keyword-only with an explicit warning;
 degraded results carry the same normalized keyword scores.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runSearch,
-}
-
-var studioCmd = &cobra.Command{
-	Use:     "studio [path]",
-	Aliases: []string{"browse"},
-	Short:   "Open the interactive terminal search workspace",
-	Long:    `Open vecgrep Studio for search, inspection, indexing, and project status.`,
-	Args:    cobra.MaximumNArgs(1),
-	RunE:    runStudio,
 }
 
 var serveCmd = &cobra.Command{
@@ -544,7 +531,6 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(indexCmd)
 	rootCmd.AddCommand(searchCmd)
-	rootCmd.AddCommand(studioCmd)
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(similarCmd)
@@ -736,7 +722,7 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
 		if errors.Is(err, veclite.ErrFileLocked) || strings.Contains(strings.ToLower(err.Error()), "locked") {
-			fmt.Fprintln(os.Stderr, "\nError: the database is locked by another process (e.g. studio, index, MCP server, or daemon).")
+			fmt.Fprintln(os.Stderr, "\nError: the database is locked by another process (e.g. index, MCP server, or daemon).")
 			fmt.Fprintln(os.Stderr, "  Stop that process, or if a daemon hub owns the project run 'vecgrep daemon reindex'.")
 			os.Exit(1)
 		}
@@ -1083,14 +1069,6 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	printSearchResults(resp.Results, format)
 	return nil
-}
-
-func runStudio(cmd *cobra.Command, args []string) error {
-	startDir := ""
-	if len(args) > 0 {
-		startDir = args[0]
-	}
-	return studio.Run(cmd.Context(), startDir)
 }
 
 func isInteractiveTerminal() bool {
@@ -1717,10 +1695,10 @@ func runReset(cmd *cobra.Command, args []string) error {
 	session, err := app.OpenSession(cmd.Context(), "")
 	if err != nil {
 		if errors.Is(err, veclite.ErrFileLocked) {
-			// Another process (e.g. studio TUI, index, or MCP server) holds the lock.
+			// Another process (e.g. index, MCP server, or daemon) holds the lock.
 			// With --force, delete the index files directly. Without --force, suggest it.
 			if !force {
-				fmt.Fprintln(os.Stderr, "Error: the database is locked by another process (e.g. studio, index, or MCP server).")
+				fmt.Fprintln(os.Stderr, "Error: the database is locked by another process (e.g. index or MCP server).")
 				fmt.Fprintln(os.Stderr, "To force-reset and delete the index files, run:")
 				fmt.Fprintln(os.Stderr, "  vecgrep reset --force")
 				fmt.Fprintln(os.Stderr, "")

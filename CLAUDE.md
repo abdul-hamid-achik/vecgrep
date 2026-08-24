@@ -12,9 +12,10 @@ local Ollama with optional cloud providers (OpenAI, Cohere, Voyage). Built on
 **VecLite** (`~/projects/veclite`) as its embedded vector-search database.
 
 Surfaces:
-- `vecgrep` CLI (Cobra) — `cmd/vecgrep/main.go`
-- `vecgrep studio` — canonical Bubble Tea v2 terminal app (`vecgrep browse` is the alias)
+- `vecgrep` CLI (Cobra) — `cmd/vecgrep/main.go` (`--json` for agents)
 - MCP server — `internal/mcp/server_sdk.go` (used by the vidtrace bug-finding loop)
+
+The former Studio TUI (`internal/studio/`) is not wired to the CLI — use CLI + MCP.
 
 ## Two documentation surfaces — do not mix them
 

@@ -665,7 +665,7 @@ func lockAgeDescription(dataDir string) string {
 // formatLockError returns a user-friendly error message for lock contention.
 func formatLockError(err error) string {
 	if errors.Is(err, vlsession.ErrFileLocked) {
-		return err.Error() + ". Another process holds the write lock (studio, CLI index, MCP serve, or daemon). " +
+		return err.Error() + ". Another process holds the write lock (index, MCP serve, or daemon). " +
 			"Search may still work read-only. To update the index: stop the other process, or run " +
 			"'vecgrep index' / 'vecgrep daemon reindex' from the CLI when the lock is free."
 	}
