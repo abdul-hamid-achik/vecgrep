@@ -89,7 +89,7 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 	}
 	index.ReportStatus(progress, "checking embedding provider…")
 	if err := c.provider.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("embedding provider unavailable: %w", err)
+		return nil, providerUnavailableError(ctx, err)
 	}
 
 	// Cache restoration is best-effort and only useful once per long-lived
@@ -238,6 +238,24 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 
 	service.maybeStashEmbeddingCache(ctx)
 	return result, nil
+}
+
+// localOllamaHint is the seam for the onboarding tip detection; tests replace
+// it to avoid real network probes.
+var localOllamaHint = embed.LocalOllamaHint
+
+// providerUnavailableError explains a provider ping failure from the index
+// preflight. When the failure is a missing API key but a local ollama with
+// embedding models is reachable, append the keyless local preset tip — the
+// fastest path to a working index. Detection is best-effort and bounded; it
+// never replaces or masks the original error.
+func providerUnavailableError(ctx context.Context, err error) error {
+	if errors.Is(err, embed.ErrAPIKeyNotConfigured) {
+		if hint := localOllamaHint(ctx); hint != "" {
+			return fmt.Errorf("embedding provider unavailable: %w\n  tip: %s", err, hint)
+		}
+	}
+	return fmt.Errorf("embedding provider unavailable: %w", err)
 }
 
 func (c *IndexCoordinator) acquireIndexDB(ctx context.Context) (*db.DB, func() error, error) {

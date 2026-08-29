@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -42,6 +43,15 @@ func needsInteractiveIndexConfirm(full, empty bool, p *index.DryRunPreview) bool
 // confirmIndexPlanTTY prints the plan and asks y/n. Returns true if the user confirmed.
 // Caller should only invoke when stdin/stdout are interactive.
 func confirmIndexPlanTTY(root string, full, empty bool, p *index.DryRunPreview) (bool, error) {
+	return confirmIndexPlanReader(root, full, empty, p, os.Stdin)
+}
+
+// confirmIndexPlanReader is confirmIndexPlanTTY with an injectable answer
+// source. When the answer cannot be read at all (e.g. stdin is /dev/null in a
+// scripted run — still a char device, so the TTY check passes, but the read
+// fails immediately) the error names --yes so scripts have the escape hatch
+// without digging through help.
+func confirmIndexPlanReader(root string, full, empty bool, p *index.DryRunPreview, r io.Reader) (bool, error) {
 	printIndexPlan(root, p)
 	fmt.Println()
 	kind := "index"
@@ -55,10 +65,10 @@ func confirmIndexPlanTTY(root string, full, empty bool, p *index.DryRunPreview) 
 	}
 	fmt.Printf("Proceed with %s of %s? [y/N] ", kind, root)
 
-	reader := bufio.NewReader(os.Stdin)
+	reader := bufio.NewReader(r)
 	line, err := reader.ReadString('\n')
 	if err != nil && len(strings.TrimSpace(line)) == 0 {
-		return false, err
+		return false, fmt.Errorf("read confirmation: %w (pass --yes to skip the prompt)", err)
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	if answer == "y" || answer == "yes" {

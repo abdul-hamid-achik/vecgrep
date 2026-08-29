@@ -1899,7 +1899,7 @@ func (s *SDKServer) handleReset(ctx context.Context, req *sdkmcp.CallToolRequest
 	}
 
 	return &sdkmcp.CallToolResult{
-		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Database reset complete. All indexed data has been cleared.\nRun vecgrep_index to re-index your codebase."}},
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "Database reset complete. All indexed data has been cleared.\nRun vecgrep_index to re-index your codebase.\nNote: keyword search requires the same index — re-index before keyword queries."}},
 	}, nil, nil
 }
 

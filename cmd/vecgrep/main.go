@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -1689,6 +1690,20 @@ func runClean(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// resetReindexNote explains that keyword mode shares the index that reset just
+// cleared. BM25 lives in the same veclite collections, so until the project is
+// re-indexed (which needs a working embedding provider) even `-m keyword`
+// returns nothing — better said here than discovered from empty results.
+func resetReindexNote() string {
+	return "Note: keyword search (-m keyword) requires the same index — run 'vecgrep index' before searching."
+}
+
+// printResetNextSteps prints the shared post-reset guidance.
+func printResetNextSteps(w io.Writer) {
+	fmt.Fprintln(w, "Run 'vecgrep index' to re-index your codebase.")
+	fmt.Fprintln(w, resetReindexNote())
+}
+
 func runReset(cmd *cobra.Command, args []string) error {
 	force, _ := cmd.Flags().GetBool("force")
 
@@ -1712,7 +1727,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(os.Stderr, "cleared index files on disk…")
 			fmt.Printf("Index files reset for %s\n", result.ProjectRoot)
 			fmt.Printf("  VecLite index: %s\n", result.VecLitePath)
-			fmt.Println("Run 'vecgrep index' to re-index your codebase.")
+			printResetNextSteps(os.Stdout)
 			return nil
 		}
 		if force {
@@ -1723,7 +1738,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 			fmt.Fprintln(os.Stderr, "cleared index files on disk…")
 			fmt.Printf("Index files reset for %s\n", result.ProjectRoot)
 			fmt.Printf("  VecLite index: %s\n", result.VecLitePath)
-			fmt.Println("Run 'vecgrep index' to re-index your codebase.")
+			printResetNextSteps(os.Stdout)
 			return nil
 		}
 		return err
@@ -1751,7 +1766,7 @@ func runReset(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("Database reset complete. All indexed data has been cleared.")
-	fmt.Println("Run 'vecgrep index' to re-index your codebase.")
+	printResetNextSteps(os.Stdout)
 
 	return nil
 }

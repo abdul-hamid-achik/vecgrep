@@ -3,6 +3,7 @@ package embed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -192,6 +193,100 @@ func detectVoyage(_ context.Context) *DetectedProvider {
 
 	provider.Available = true
 	return provider
+}
+
+// localOllamaHintTimeout bounds the onboarding-hint probe. It only matters
+// when localhost connections hang (firewall rules); refusals return
+// immediately. Keep it short — the hint rides on an error path.
+const localOllamaHintTimeout = 750 * time.Millisecond
+
+// localOllamaBaseURL resolves the local Ollama base URL from OLLAMA_HOST,
+// defaulting to http://localhost:11434. A scheme-less host gains http:// so
+// the URL can be used directly in requests.
+func localOllamaBaseURL() string {
+	url := os.Getenv("OLLAMA_HOST")
+	if url == "" {
+		return "http://localhost:11434"
+	}
+	if !strings.Contains(url, "://") {
+		url = "http://" + url
+	}
+	return strings.TrimSuffix(url, "/")
+}
+
+// LocalOllamaHint returns an onboarding tip when a local Ollama is reachable
+// and has at least one embedding model pulled, or "" otherwise. It backs the
+// auth-failure suggestion on the index path: a user whose cloud provider has
+// no API key can be pointed at the keyless local setup directly. Strictly
+// best-effort — bounded by a short timeout, never returns an error, and a
+// detection failure never surfaces to the user.
+func LocalOllamaHint(ctx context.Context) string {
+	return localOllamaHintAt(ctx, localOllamaBaseURL())
+}
+
+// localOllamaHintAt is LocalOllamaHint with an explicit base URL, for tests.
+func localOllamaHintAt(ctx context.Context, baseURL string) string {
+	ctx, cancel := context.WithTimeout(ctx, localOllamaHintTimeout)
+	defer cancel()
+
+	models, ok := fetchOllamaModelNames(ctx, baseURL)
+	if !ok || !hasEmbeddingModel(models) {
+		return ""
+	}
+	return "a local ollama is running with embedding models pulled — `vecgrep config preset fast-local` needs no API key"
+}
+
+// fetchOllamaModelNames lists installed model names from Ollama's /api/tags.
+// ok is false whenever the endpoint is unreachable, non-200, or malformed.
+func fetchOllamaModelNames(ctx context.Context, baseURL string) (names []string, ok bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/tags", nil)
+	if err != nil {
+		return nil, false
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var payload struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, false
+	}
+	for _, m := range payload.Models {
+		if m.Name != "" {
+			names = append(names, m.Name)
+		}
+	}
+	return names, true
+}
+
+// hasEmbeddingModel reports whether any installed Ollama model looks like an
+// embedding model: either a known vecgrep embedding model or a name carrying
+// "embed" (covers e.g. qwen3-embedding:0.6b without hardcoding every tag).
+func hasEmbeddingModel(models []string) bool {
+	known := make(map[string]bool)
+	for _, m := range GetSupportedModels() {
+		if m.Provider == ProviderOllama {
+			known[m.Name] = true
+		}
+	}
+	for _, name := range models {
+		base := name
+		if i := strings.Index(base, ":"); i >= 0 {
+			base = base[:i]
+		}
+		if known[base] || strings.Contains(strings.ToLower(name), "embed") {
+			return true
+		}
+	}
+	return false
 }
 
 // AutoDetect finds and returns the best available provider.

@@ -322,6 +322,18 @@ func (b *VecLiteBackend) searchOptions(limit int) []veclite.SearchOption {
 	return opts
 }
 
+// wrapDimensionDrift explains veclite dimension-mismatch errors. Switching
+// embedding provider or preset changes the embedding width; without a reset,
+// the existing collection keeps the old width and every vector operation
+// against it fails. The wrap names the remedy; all other errors pass through
+// unchanged, and the original error chain is preserved.
+func wrapDimensionDrift(err error) error {
+	if !errors.Is(err, veclite.ErrDimensionMismatch) {
+		return err
+	}
+	return fmt.Errorf("%w; the index was built with a different embedding profile — a provider or preset switch leaves a stale collection. run 'vecgrep reset --force' and then 'vecgrep index' to rebuild", err)
+}
+
 const (
 	fileHashRecordType       = "file_hash"
 	fileHashReadyType        = "project_ready"
@@ -513,7 +525,7 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 
 	id, err := b.collection().Insert(embedding, payload)
 	if err != nil {
-		return 0, err
+		return 0, wrapDimensionDrift(err)
 	}
 	if b.testHooks != nil && b.testHooks.afterChunkInsert != nil {
 		b.testHooks.afterChunkInsert()
@@ -577,7 +589,7 @@ func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]f
 	// Use InsertBatch for batch insert
 	ids, err := b.collection().InsertBatch(vectors, payloads)
 	if err != nil {
-		return nil, fmt.Errorf("batch insert failed: %w", err)
+		return nil, fmt.Errorf("batch insert failed: %w", wrapDimensionDrift(err))
 	}
 	for _, chunk := range fileChunks {
 		if err := b.upsertFileHash(chunk); err != nil {
@@ -626,7 +638,7 @@ func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (ui
 
 	id, isNew, err := b.collection().UpsertByKey("chunk_key", chunkKey, embedding, payload)
 	if err != nil {
-		return 0, false, fmt.Errorf("upsert failed: %w", err)
+		return 0, false, fmt.Errorf("upsert failed: %w", wrapDimensionDrift(err))
 	}
 	if err := b.upsertFileHash(chunk); err != nil {
 		b.invalidateFileHashes(chunk.ProjectRoot)
@@ -647,7 +659,7 @@ func (b *VecLiteBackend) InsertEmbedding(chunkID int64, embedding []float32) err
 
 	// Legacy mode: store with minimal payload
 	_, err := b.collection().Insert(embedding, map[string]any{"chunk_id": chunkID})
-	return err
+	return wrapDimensionDrift(err)
 }
 
 // DeleteEmbedding removes an embedding for a chunk (legacy compatibility).
@@ -1064,7 +1076,7 @@ func (b *VecLiteBackend) SearchEmbeddings(queryEmbedding []float32, limit int) (
 
 	results, err := b.collection().Search(queryEmbedding, b.searchOptions(limit)...)
 	if err != nil {
-		return nil, err
+		return nil, wrapDimensionDrift(err)
 	}
 
 	searchResults := make([]SearchResult, 0, len(results))
@@ -1544,7 +1556,7 @@ func (b *VecLiteBackend) SearchWithFilter(queryEmbedding []float32, limit int, o
 	// Perform search with native filtering
 	results, err := b.collection().Search(queryEmbedding, searchOpts...)
 	if err != nil {
-		return nil, err
+		return nil, wrapDimensionDrift(err)
 	}
 
 	searchResults := make([]SearchResult, 0, len(results))
@@ -1588,7 +1600,7 @@ func (b *VecLiteBackend) SearchWithExplain(queryEmbedding []float32, limit int, 
 	// run a second Search() call — halving the work for every --explain.
 	explanation, err := b.collection().SearchExplain(queryEmbedding, searchOpts...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, wrapDimensionDrift(err)
 	}
 
 	results := explanation.Results
@@ -1706,7 +1718,7 @@ func (b *VecLiteBackend) HybridSearch(queryEmbedding []float32, textQuery string
 	}
 	vectorResults, err := b.collection().Search(queryEmbedding, vectorOpts...)
 	if err != nil {
-		return nil, err
+		return nil, wrapDimensionDrift(err)
 	}
 
 	textOpts := b.searchOptions(fetchK)

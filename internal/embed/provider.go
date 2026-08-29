@@ -17,6 +17,10 @@ var (
 	ErrContextCanceled     = errors.New("embedding operation canceled")
 	ErrRateLimited         = errors.New("rate limited by embedding provider")
 	ErrDimensionMismatch   = errors.New("embedding dimension mismatch")
+	// ErrAPIKeyNotConfigured is returned by cloud providers whose API key is
+	// missing. Callers can detect it with errors.Is to offer onboarding hints
+	// (e.g. switching to a local, keyless provider).
+	ErrAPIKeyNotConfigured = errors.New("API key not configured")
 )
 
 // Provider defines the interface for embedding backends.

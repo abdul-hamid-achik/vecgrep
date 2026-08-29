@@ -202,7 +202,7 @@ func (p *VoyageProvider) embedBatchByInputType(ctx context.Context, texts []stri
 
 func (p *VoyageProvider) embedBatchInternal(ctx context.Context, texts []string, inputType string) ([][]float32, error) {
 	if p.config.APIKey == "" {
-		return nil, NewProviderError("voyage", "embed", fmt.Errorf("API key not configured"))
+		return nil, NewProviderError("voyage", "embed", ErrAPIKeyNotConfigured)
 	}
 
 	var lastErr error
@@ -320,7 +320,7 @@ func (p *VoyageProvider) Dimensions() int {
 
 func (p *VoyageProvider) Ping(ctx context.Context) error {
 	if p.config.APIKey == "" {
-		return NewProviderError("voyage", "ping", fmt.Errorf("API key not configured"))
+		return NewProviderError("voyage", "ping", ErrAPIKeyNotConfigured)
 	}
 	if _, err := p.EmbedQuery(ctx, "test"); err != nil {
 		return NewProviderError("voyage", "ping", err)

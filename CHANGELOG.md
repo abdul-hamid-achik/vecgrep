@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.25.1] - 2026-08-29
+
+### Fixed
+- **Provider-mismatch onboarding** — a missing API key now appends a bounded
+  (750 ms, best-effort) hint when a local ollama with embedding models is
+  reachable: `tip: a local ollama is running with embedding models pulled —
+  'vecgrep config preset fast-local' needs no API key`. Auth failures are a
+  new sentinel (`embed.ErrAPIKeyNotConfigured`) with identical message text.
+- **Dimension-drift diagnosis** — after a preset switch, vector operations
+  against the stale collection wrap `ErrDimensionMismatch` with the
+  stale-collection explanation and the `vecgrep reset --force` →
+  `vecgrep index` remedy (all eight vector call sites; provider-width
+  mismatches are excluded).
+- **Index prompt ergonomics** — the wrong-folder confirmation's read failure
+  now names `--yes`; all three CLI reset output paths (and the MCP reset
+  tool) note that keyword search needs the same index.
+
 ## [2.23.0] - 2026-08-20
 
 ### Added
