@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.25.2] - 2026-08-30
+
+### Fixed
+- **Data race in embed progress hook** — `Indexer.activeEmitProgress` was
+  assigned after the embed worker goroutines had already started, so a fast
+  first batch could read the field concurrently with the write (CI `-race`
+  red on `TestIndex_WithProgressCallback` since 2026-08-24). The hook is now
+  published before any pipeline goroutine starts; goroutine creation is the
+  happens-before edge that makes the lock-free read safe.
+
 ## [2.25.1] - 2026-08-29
 
 ### Fixed

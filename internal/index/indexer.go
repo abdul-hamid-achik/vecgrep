@@ -664,6 +664,13 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 		progressMu.Unlock()
 	}
 
+	// Publish the throttled-embed hook before any pipeline goroutine starts:
+	// goroutine creation is the happens-before edge that makes the field safe
+	// to read from embed workers without a lock (assigning it later raced with
+	// the first tickEmbedProgress read).
+	idx.activeEmitProgress = emitProgress
+	defer func() { idx.activeEmitProgress = nil }()
+
 	// Stage 1: chunk workers. Read + chunk each changed file and emit one item
 	// per chunk; files needing no embedding (binary / empty) report immediately.
 	var chunkWG sync.WaitGroup
@@ -747,8 +754,6 @@ func (idx *Indexer) indexPrepared(ctx context.Context, projectRoot string, delet
 
 	// Cold-start tick so the UI leaves "idle" even before the first file finishes.
 	emitProgress()
-	idx.activeEmitProgress = emitProgress
-	defer func() { idx.activeEmitProgress = nil }()
 
 	for r := range resultsChan {
 		result.FilesProcessed++
