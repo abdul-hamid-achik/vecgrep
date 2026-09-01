@@ -178,6 +178,29 @@ The `embed.Provider` interface allows for multiple provider implementations:
 - `internal/embed/ollama.go` - Ollama (local, default)
 - `internal/embed/openai.go` - OpenAI (cloud, requires API key)
 
+## Gotchas (learned the hard way)
+
+- **The embedding profile is collection metadata, not a sidecar.** Since the
+  VecLite v0.17.0 bump, the `EmbeddingProfile` lives in VecLite collection
+  metadata (`internal/db/veclite_backend.go`). Legacy `embedding_profile.json`
+  sidecars migrate transparently on first open (read → write to metadata →
+  delete sidecar). Do not reintroduce the sidecar.
+- **HNSW config is wired end-to-end.** `VECGREP_VECTOR_VECLITE_M`,
+  `VECGREP_VECTOR_VECLITE_EF_CONSTRUCTION`, and `VECGREP_VECTOR_VECLITE_EF_SEARCH`
+  resolve in `internal/config/resolution.go`, flow through `OpenOptions`, and reach
+  VecLite's `WithHNSWConfig` (collection creation) and `WithEfSearch` (per-query).
+  Do not re-add hardcoded `WithHNSW(16, 200)` call sites.
+- **The `DeleteAll`-on-empty workaround is intentional.** `DeleteByProjectRoot`
+  (`internal/db/veclite_backend.go`) drops and recreates the collection after
+  deleting all records because a VecLite HNSW-corruption-on-delete-all bug
+  persists through v0.17.0. Re-test before removing it.
+- **`vecgrep clean` is sync-and-report, not vacuum.** With pure VecLite storage
+  there are no orphans to remove. Do not advertise it as "remove orphaned data
+  and optimize."
+- **`findImportedBy` for Go uses `go/parser`** (`internal/mcp/overview_tools.go`),
+  not substring matching. JS/TS/Python still fall back to substring matching —
+  keep the Go path accurate; the vidtrace bug-finding loop depends on it.
+
 ## Before Committing
 
 1. Run `task check` (formats, lints, tests)
