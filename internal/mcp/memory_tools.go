@@ -12,7 +12,7 @@ import (
 
 // handleMemoryRemember handles the memory_remember tool.
 func (s *SDKServer) handleMemoryRemember(ctx context.Context, req *sdkmcp.CallToolRequest, input MemoryRememberInput) (*sdkmcp.CallToolResult, any, error) {
-	if err := s.ensureMemoryInitialized(ctx); err != nil {
+	if err := s.ensureMemoryEmbedder(ctx); err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Memory initialization failed: %v", err)}},
 			IsError: true,
@@ -58,7 +58,7 @@ func (s *SDKServer) handleMemoryRemember(ctx context.Context, req *sdkmcp.CallTo
 
 // handleMemoryRecall handles the memory_recall tool.
 func (s *SDKServer) handleMemoryRecall(ctx context.Context, req *sdkmcp.CallToolRequest, input MemoryRecallInput) (*sdkmcp.CallToolResult, any, error) {
-	if err := s.ensureMemoryInitialized(ctx); err != nil {
+	if err := s.ensureMemoryEmbedder(ctx); err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Memory initialization failed: %v", err)}},
 			IsError: true,

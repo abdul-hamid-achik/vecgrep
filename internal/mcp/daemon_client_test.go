@@ -258,7 +258,7 @@ func TestFormatDaemonSearchResult(t *testing.T) {
 		"mode":    "hybrid",
 	})
 
-	text := formatDaemonSearchResult(resultJSON, "")
+	text := formatDaemonSearchResult(resultJSON, "", false)
 	if text == "" {
 		t.Fatal("formatDaemonSearchResult should return non-empty text")
 	}
@@ -274,7 +274,7 @@ func TestFormatDaemonSearchResultWithScopeNote(t *testing.T) {
 		"mode":    "hybrid",
 	})
 
-	text := formatDaemonSearchResult(resultJSON, "Scoped: 5 files in blast radius")
+	text := formatDaemonSearchResult(resultJSON, "Scoped: 5 files in blast radius", false)
 	if !contains(text, "Scoped:") {
 		t.Fatal("scope note should appear in output")
 	}

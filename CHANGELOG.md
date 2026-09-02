@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Prompt audit of the MCP surface** — tool descriptions are now contract-accurate:
+  `vecgrep_related_files` names the real relationships (`imports`, `imported_by`,
+  `tests`, `all`; no `configs`), `memory_*` state that they embed with a local
+  Ollama independent of the project provider, `vecgrep_search` says which modes
+  need an embedder, `vecgrep_delete` says it is index-only. The server
+  instructions describe the readiness contract instead of a mandatory
+  status→index→search script; the `vecgrep_status` "Always call this" booster is
+  gone; the search footer only names `codemap_*` tools when codemap is reachable.
+  `AGENTS.md` drops the removed Studio section and the stale 8-tool list.
+
+### Fixed
+- **`memory_stats` / `memory_forget` no longer need Ollama** — opening the memory
+  store is a local file operation; only `memory_remember` and `memory_recall`
+  probe the embedder, per call, so a transient Ollama outage no longer poisons
+  the whole MCP session.
+
 ## [2.26.0] - 2026-09-01
 
 ### Added

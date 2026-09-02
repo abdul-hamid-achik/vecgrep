@@ -359,11 +359,12 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Name:    "vecgrep",
 		Version: version.Version,
 	}, &sdkmcp.ServerOptions{
-		Instructions: "vecgrep: local semantic code search. Workflow: (1) vecgrep_status or vecgrep_ensure mode:check — read readiness.state/action; " +
-			"(2) if action is non-null, call vecgrep_index / vecgrep_index force:true, or vecgrep_ensure mode:index_if_empty|force_rebuild; " +
-			"(3) then vecgrep_search. Empty or profile_mismatch search returns IsError with readiness — not \"no results\". " +
-			"Ready + zero hits is success. Search auto-detects the project; vecgrep_init only for first-time register or path switch. " +
-			"Data defaults to ~/.vecgrep/projects/.",
+		Instructions: "vecgrep: local semantic code search. vecgrep_search answers directly on a searchable index. " +
+			"When the index is empty or its embedding profile mismatches, search returns IsError with a readiness payload " +
+			"(readiness.state/action) instead of results — that is not \"no results\"; run the named action " +
+			"(vecgrep_index, vecgrep_index force:true, or vecgrep_ensure mode:index_if_empty|force_rebuild) and retry. " +
+			"Ready + zero hits is success. Projects auto-detect from the working directory; vecgrep_init is only for " +
+			"first-time registration or switching path. Data defaults to ~/.vecgrep/projects/.",
 	})
 
 	// Register tools using typed handlers
@@ -378,7 +379,8 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 			"Fails with IsError and a readiness payload if the index is empty or the embedding profile mismatches — that is not \"no results\". " +
 			"Success with zero hits means no match on a searchable index. " +
 			"Supports modes: 'semantic', 'keyword', or 'hybrid' (default). " +
-			"If the embedding provider is unavailable, hybrid degrades to keyword-only with an explicit warning.",
+			"'keyword' needs no embedding provider. 'semantic' requires one and fails with the provider remedy when it is unreachable. " +
+			"'hybrid' degrades to keyword-only with an explicit warning when the provider is unavailable.",
 	}, s.handleSearch)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -391,12 +393,12 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 		Description: "Agent readiness helper. Modes: check (default) returns readiness only; " +
 			"index_if_empty indexes only when the index is empty; " +
 			"force_rebuild runs a full reindex when empty, profile_mismatch, or unknown freshness. " +
-			"Never silent-auto-indexes on every search — call this explicitly.",
+			"Indexing happens only in the index_if_empty and force_rebuild modes; vecgrep_search never indexes implicitly.",
 	}, s.handleEnsure)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_status",
-		Description: "Get index statistics, readiness.state/action, and conservative freshness evidence. Always call this before trusting search when unsure the index is searchable. Freshness is proven from raw source hashes, the last successful ingestion receipt, and codemap's bounded structural manifest when applicable.",
+		Description: "Get index statistics, readiness.state/action, provider and API-key status, and conservative freshness evidence. Useful to see whether the index is fresh before a long investigation; vecgrep_search itself refuses with the same readiness payload when the index is not searchable. Freshness is proven from raw source hashes, the last successful ingestion receipt, and codemap's bounded structural manifest when applicable.",
 	}, s.handleStatus)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -406,7 +408,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_delete",
-		Description: "Delete a file and all its chunks from the search index.",
+		Description: "Remove one file's chunks from the search index (the file on disk is untouched). file_path may be relative to the project root or absolute. Returns the number of chunks removed; the file is re-added by the next vecgrep_index if it still exists.",
 	}, s.handleDelete)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -431,7 +433,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "vecgrep_related_files",
-		Description: "Find files related to a given file (imports, tests, configs). Useful for understanding code dependencies.",
+		Description: "Find files related to a given file by static relationship: 'imports' (what it imports), 'imported_by' (what depends on it), 'tests' (its test files), or 'all'. Go dependencies are resolved with go/parser and are exact; JS/TS/Python use substring matching and can include false positives. Does not use embeddings.",
 	}, s.handleRelatedFiles)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -447,22 +449,22 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 	// Memory tools (global, not project-specific)
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "memory_remember",
-		Description: "Store a memory with optional importance, tags, and TTL. Memories are stored globally and persist across sessions.",
+		Description: "Store a memory with optional importance (0-1, default 0.5), tags, and TTL. Memories are global (~/.vecai/memory), persist across sessions and projects, and are embedded with a local Ollama nomic-embed-text at VECAI_OLLAMA_URL (default http://localhost:11434) regardless of the project's embedding provider — fails with a provider error if that Ollama is not running.",
 	}, s.handleMemoryRemember)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "memory_recall",
-		Description: "Search memories semantically. Returns memories ranked by relevance to your query.",
+		Description: "Search memories semantically (same local Ollama embedder as memory_remember). Ranking is query similarity weighted by importance and a 30-day half-life recency decay; filter by tags or min_importance. Fails with a provider error if local Ollama is not running.",
 	}, s.handleMemoryRecall)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "memory_forget",
-		Description: "Delete memories by ID, tags, or age. Bulk deletion requires confirmation.",
+		Description: "Delete memories by ID, by any of the given tags, or older than N hours. Deleting by tags or age is bulk and requires confirm:\"yes\"; deletion is permanent. Does not need the embedder.",
 	}, s.handleMemoryForget)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "memory_stats",
-		Description: "Get memory store statistics including total count, tags, and age distribution.",
+		Description: "Get memory store statistics: total count, tag counts, and age distribution. Read-only and does not need the embedder, so it works while local Ollama is down.",
 	}, s.handleMemoryStats)
 
 	return s
@@ -597,20 +599,15 @@ func (s *SDKServer) ensureMemoryInitialized(ctx context.Context) error {
 	// Load memory config
 	cfg := memory.DefaultConfig()
 
-	// Create embedding provider for memory
+	// The embedder is only needed by tools that embed (remember, recall).
+	// Opening the store is a local file operation, so stats and forget work
+	// even when the local Ollama is down; those tools must not fail on a ping.
 	provider := embed.NewOllamaProvider(embed.OllamaConfig{
 		URL:        cfg.OllamaURL,
 		Model:      cfg.EmbeddingModel,
 		Dimensions: cfg.EmbeddingDimensions,
 	})
 
-	// Check if provider is available
-	if err := provider.Ping(ctx); err != nil {
-		s.memoryInitErr = fmt.Errorf("embedding provider not available: %w. Ensure Ollama is running with nomic-embed-text model", err)
-		return s.memoryInitErr
-	}
-
-	// Create memory store
 	store, err := memory.NewMemoryStore(cfg, provider)
 	if err != nil {
 		s.memoryInitErr = fmt.Errorf("failed to initialize memory store: %w", err)
@@ -618,6 +615,19 @@ func (s *SDKServer) ensureMemoryInitialized(ctx context.Context) error {
 	}
 
 	s.memoryStore = store
+	return nil
+}
+
+// ensureMemoryEmbedder opens the store and verifies its embedder answers. Used
+// by the tools that embed text; the probe runs per call so a transient Ollama
+// outage never poisons the session the way a cached init error would.
+func (s *SDKServer) ensureMemoryEmbedder(ctx context.Context) error {
+	if err := s.ensureMemoryInitialized(ctx); err != nil {
+		return err
+	}
+	if err := s.memoryStore.Ping(ctx); err != nil {
+		return fmt.Errorf("embedding provider not available: %w. Memory tools embed with a local Ollama (nomic-embed-text at VECAI_OLLAMA_URL, default http://localhost:11434); ensure it is running with the model pulled", err)
+	}
 	return nil
 }
 
@@ -790,7 +800,7 @@ func (s *SDKServer) activateProject(ctx context.Context, projectPath string) (*s
 	fmt.Fprintf(&sb, "Activated vecgrep project: %s\n\n", projectPath)
 	// Only show .gitignore warning when using local mode
 	if !resolved.IsGlobalMode {
-		sb.WriteString("**IMPORTANT:** Add `.vecgrep` to your `.gitignore` file.\n\n")
+		sb.WriteString("Add `.vecgrep/` to .gitignore: the local index is machine-specific and large.\n\n")
 	}
 	fmt.Fprintf(&sb, "- Data dir: %s\n", cfg.DataDir)
 	fmt.Fprintf(&sb, "- Embedding provider: %s (%s)\n", cfg.Embedding.Provider, cfg.Embedding.Model)
@@ -915,7 +925,7 @@ func checkEmbeddingProvider(ctx context.Context, p embed.Provider) *sdkmcp.CallT
 // formatDaemonSearchResult formats the JSON result from a daemon.search
 // socket call into the same text format as the direct search path. The
 // result JSON has the shape {"results": [...], "mode": "...", "warnings": [...]}.
-func formatDaemonSearchResult(raw json.RawMessage, scopeNote string) string {
+func formatDaemonSearchResult(raw json.RawMessage, scopeNote string, codemapAvailable bool) string {
 	var resp struct {
 		Results  []search.Result `json:"results"`
 		Mode     string          `json:"mode"`
@@ -933,7 +943,7 @@ func formatDaemonSearchResult(raw json.RawMessage, scopeNote string) string {
 	for _, w := range resp.Warnings {
 		fmt.Fprintf(&sb, "> **Warning:** %s\n\n", w)
 	}
-	formatSearchResults(&sb, resp.Results)
+	formatSearchResults(&sb, resp.Results, codemapAvailable)
 	return sb.String()
 }
 
@@ -1162,7 +1172,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 			if degradedWarning != "" {
 				fmt.Fprintf(&body, "> **Warning:** %s\n\n", degradedWarning)
 			}
-			body.WriteString(formatDaemonSearchResult(rawResult, scopeNote))
+			body.WriteString(formatDaemonSearchResult(rawResult, scopeNote, state.codemapAvailable()))
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: body.String()}},
 			}, readiness, nil
@@ -1204,7 +1214,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		}
 
 		state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
-		formatSearchResults(&sb, results)
+		formatSearchResults(&sb, results, state.codemapAvailable())
 		state.annotateSearchHits(ctx, results, input.Query)
 	} else {
 		outcome, err := readState.searcher.SearchWithOutcome(ctx, input.Query, opts)
@@ -1230,7 +1240,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		}
 
 		state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
-		formatSearchResults(&sb, results)
+		formatSearchResults(&sb, results, state.codemapAvailable())
 		state.annotateSearchHits(ctx, results, input.Query)
 	}
 
@@ -1242,7 +1252,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 // formatSearchResults formats search results into markdown, including match
 // provenance (semantic vs structural) and next-action affordances so a weak
 // agent knows why each hit ranked where it did and what to do next.
-func formatSearchResults(sb *strings.Builder, results []search.Result) {
+func formatSearchResults(sb *strings.Builder, results []search.Result, codemapAvailable bool) {
 	if len(results) == 0 {
 		// True no-match on a searchable index (readiness already gated empty/mismatch).
 		sb.WriteString("No results found.\n")
@@ -1279,11 +1289,17 @@ func formatSearchResults(sb *strings.Builder, results []search.Result) {
 	if top.Score < 0.35 {
 		sb.WriteString("Top score is low — these may be weak matches. Try mode:\"keyword\" for exact identifiers, or rephrase the query closer to how the code names things.\n")
 	}
-	if top.SymbolName != "" {
+	// Only name codemap tools when the peer is actually reachable from this
+	// server; an agent whose client has no codemap must not be pointed at it.
+	switch {
+	case top.SymbolName != "" && codemapAvailable:
 		fmt.Fprintf(sb, "Next steps: codemap_context symbol:%q for callers/callees/tests of the top hit; vecgrep_similar file_location:\"%s:%d\" for related code.\n",
 			top.SymbolName, top.RelativePath, top.StartLine)
-	} else {
+	case codemapAvailable:
 		fmt.Fprintf(sb, "Next steps: vecgrep_similar file_location:\"%s:%d\" for related code; codemap_symbol_at to resolve the enclosing symbol.\n",
+			top.RelativePath, top.StartLine)
+	default:
+		fmt.Fprintf(sb, "Next steps: vecgrep_similar file_location:\"%s:%d\" for related code.\n",
 			top.RelativePath, top.StartLine)
 	}
 }
@@ -2256,7 +2272,7 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 	}
 
 	state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
-	formatSearchResults(&sb, results)
+	formatSearchResults(&sb, results, state.codemapAvailable())
 	state.annotateSearchHits(ctx, results, input.Query)
 
 	return &sdkmcp.CallToolResult{
@@ -2373,4 +2389,10 @@ func degradedSearchWarning(pingErr error) string {
 		msg += " " + embed.LauncherEnvHint
 	}
 	return msg
+}
+
+// codemapAvailable reports whether the peer codemap binary is reachable for
+// this activation, so agent-facing text only names codemap tools that exist.
+func (state projectStateSnapshot) codemapAvailable() bool {
+	return state.codemap != nil && state.codemap.Available()
 }

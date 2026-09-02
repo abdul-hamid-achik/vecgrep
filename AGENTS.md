@@ -4,11 +4,11 @@ Instructions for AI agents working on the vecgrep codebase.
 
 ## Project Overview
 
-vecgrep is a local-first semantic code search tool powered by vector embeddings. It indexes codebases and enables natural language search using Ollama for embedding generation.
+vecgrep is a local-first semantic code search tool powered by vector embeddings. It indexes codebases and enables natural language search; embeddings come from the configured provider (Ollama locally, or OpenAI / Cohere / Voyage with an API key).
 
 **Key features:**
 - Semantic search with vector embeddings
-- Local-first (Ollama integration)
+- Local-first (index and cache on disk; Ollama for keyless local embeddings)
 - Incremental indexing with file hashing
 - Language-aware code chunking
 - MCP (Model Context Protocol) server for AI assistant integration
@@ -27,7 +27,7 @@ internal/
   db/               # Pure veclite vector database (no SQL)
     vector_backend.go      # Vector backend interface
     veclite_backend.go     # VecLite HNSW implementation
-  embed/            # Embedding providers (Ollama, OpenAI)
+  embed/            # Embedding providers (Ollama, OpenAI, Cohere, Voyage) + throttle/cache
   index/            # File indexer and chunker
   app/              # Shared CLI/MCP service layer
   mcp/              # Model Context Protocol server (server_sdk.go)
@@ -73,7 +73,7 @@ task dev          # Hot reload development (air)
 task check        # Run fmt, lint, test (use before commits)
 task build        # Build binary to ./bin/vecgrep
 task test         # Run tests
-task flows        # Run terminal Studio flows
+task flows        # Run Glyphrun CLI flows (specs/flows/*.yml)
 ```
 
 ## Prerequisites
@@ -105,20 +105,19 @@ tool links the other's packages nor reads or shares the other's database.
 
 ### Embedding Flow
 1. Files are chunked by `internal/index/chunker.go` (language-aware)
-2. Chunks are embedded via `internal/embed/ollama.go`
+2. Chunks are embedded via the provider selected by `embedding.provider` (`internal/embed/{ollama,openai,cohere,voyage}.go`, wrapped by `ThrottledProvider`)
 3. Embeddings and metadata stored in veclite via `internal/db/db.go`
 4. Search uses vector similarity in `internal/search/search.go`
 
 ### MCP Server
-The MCP implementation in `internal/mcp/server_sdk.go` provides:
-- `vecgrep_init` - Initialize a project
-- `vecgrep_search` - Semantic search
-- `vecgrep_index` - Index files
-- `vecgrep_status` - Index statistics
-- `vecgrep_similar` - Find similar code by chunk ID, file:line, or text
-- `vecgrep_delete` - Remove file from index
-- `vecgrep_clean` - Sync database to disk and report stats
-- `vecgrep_reset` - Clear database
+Tools are registered in `internal/mcp/server_sdk.go` (`NewSDKServer`); that
+registration is the authoritative list and each `Description` is the contract.
+They fall into four groups: project lifecycle (`vecgrep_init`, `vecgrep_index`,
+`vecgrep_ensure`, `vecgrep_status`, `vecgrep_reset`, `vecgrep_clean`,
+`vecgrep_branch_status`), retrieval (`vecgrep_search`, `vecgrep_batch_search`,
+`vecgrep_similar`, `vecgrep_investigate`), structure (`vecgrep_overview`,
+`vecgrep_related_files`, `vecgrep_delete`), and cross-project memory
+(`memory_*`, always embedded with local Ollama — see `ensureMemoryInitialized`).
 
 ### Configuration
 Configuration uses a hierarchical resolution system (highest to lowest priority):
@@ -149,11 +148,6 @@ See `internal/config/resolution.go` for the full resolution logic.
 3. Run tests to ensure compatibility
 4. Note: Existing indexes may need to be rebuilt after schema changes
 
-### Modifying Studio
-1. Update Bubble Tea state and rendering in `internal/studio/`
-2. Keep shared behavior in `internal/app/` when CLI and Studio need the same operation
-3. Add unit tests for state transitions and Glyphrun specs under `specs/flows/`
-
 ## Code Style
 
 - Use `go fmt` and `golangci-lint`
@@ -175,8 +169,10 @@ Use the methods in `internal/db/db.go`. All data is stored in veclite vector pay
 
 ### Embedding Provider
 The `embed.Provider` interface allows for multiple provider implementations:
-- `internal/embed/ollama.go` - Ollama (local, default)
-- `internal/embed/openai.go` - OpenAI (cloud, requires API key)
+- `internal/embed/ollama.go` - Ollama (local, keyless)
+- `internal/embed/openai.go`, `cohere.go`, `voyage.go` - cloud providers; the key
+  comes from the launching process's environment (`embed.APIKeyEnvVars`) — run
+  `vecgrep doctor` to see what a given launcher can see
 
 ## Gotchas (learned the hard way)
 
