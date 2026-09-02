@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.0] - 2026-09-01
+
 ### Added
 - **`vecgrep doctor`** — one-shot diagnosis of what the current process sees:
   resolved project and config sources, embedding provider, API-key origin
