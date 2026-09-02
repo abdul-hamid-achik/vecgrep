@@ -40,6 +40,26 @@ provider error. Degraded results carry the same per-result-set normalized
 keyword scores, so `min_score` keeps working after degradation. Semantic mode
 never degrades; it returns an error instead.
 
+## Provider Credentials
+
+The server inherits its environment from the MCP client that spawned it, not
+from your interactive shell. When the configured cloud provider has no key in
+that environment:
+
+- `vecgrep serve --mcp` logs one stderr line at startup
+  (`vecgrep serve: project=… provider=openai … api_key=missing — set OPENAI_API_KEY …`).
+- `vecgrep_status` reports `API key: missing — set …` next to the readiness block.
+- `vecgrep_search` with `mode: "keyword"` works normally; hybrid degrades to
+  keyword-only with a `Warning:` line; `mode: "semantic"` returns `IsError` with
+  the provider-specific remedy.
+- A project that was never indexed reports `readiness.state = "empty"` with
+  `action = "vecgrep_index"` (not a database error), plus the key warning so the
+  agent knows indexing will fail until the key is fixed.
+
+See [Embedding Providers → API Keys Under MCP Launchers](./providers.md#api-keys-under-mcp-launchers)
+for where to put the key per launcher, and run `vecgrep doctor` from that
+launcher to confirm what it sees.
+
 ## Claude Code
 
 Add vecgrep globally:

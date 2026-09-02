@@ -145,6 +145,51 @@ vecgrep index --full
 
 Voyage indexing uses `document`; search uses `query`.
 
+## API Keys Under MCP Launchers
+
+vecgrep reads a cloud provider key from the environment of the process that
+starts it: `OPENAI_API_KEY` / `VECGREP_OPENAI_API_KEY` (or
+`embedding.openai_api_key` in `vecgrep.yaml`), and the equivalent names for
+Cohere and Voyage. An `export` in `~/.zshrc` only reaches interactive shells.
+MCP gateways and GUI-launched agents (mcphub, Claude Code, Codex, Cursor) do
+not source it, so the key that works in your terminal can be missing inside
+`vecgrep serve`.
+
+Diagnose from the launcher that reports the problem:
+
+```bash
+vecgrep doctor            # provider, key origin (never the value), index, daemon
+vecgrep doctor --format json --no-ping
+vecgrep status            # "API key: env:OPENAI_API_KEY" or "missing — set …"
+```
+
+`vecgrep serve --mcp` also prints one stderr line at startup
+(`provider=openai … api_key=missing …`) that shows up in the launcher's MCP log.
+
+Put the key where the launcher spawns vecgrep:
+
+- **mcphub** — inject it from TinyVault at spawn so it never lives in a config
+  file or in your ambient shell:
+
+  ```yaml
+  servers:
+    vecgrep:
+      command: /path/to/vecgrep
+      args: [serve, --mcp]
+      vault: local-agent          # tvault project holding OPENAI_API_KEY
+      vault_only: [OPENAI_API_KEY]
+  ```
+
+  or, without TinyVault, an `env:` block on the same entry.
+- **Claude Code / Codex / Cursor** — an `env` block on the vecgrep server entry
+  (`.mcp.json`, `~/.codex/config.toml`, `~/.cursor/mcp.json`).
+- **Any launcher** — `embedding.openai_api_key` in `~/.vecgrep/config.yaml`
+  (plaintext on disk; prefer the injection options above).
+
+Without a key, `vecgrep_search` still answers: `mode: keyword` never touches the
+embedder, and hybrid search degrades to keyword-only with an explicit warning.
+Semantic search and indexing need the key.
+
 ## Re-indexing Rules
 
 Changing provider, model, dimensions, distance metric, or chunking profile changes vector meaning. Run a full rebuild after changing any of those settings:

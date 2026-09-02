@@ -99,6 +99,8 @@ unreachable, hybrid search degrades to keyword-only with an explicit warning;
 degraded results carry the same normalized keyword scores.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runSearch,
+	// Runtime errors (no index, provider down) are not usage errors.
+	SilenceUsage: true,
 }
 
 var serveCmd = &cobra.Command{
@@ -106,13 +108,15 @@ var serveCmd = &cobra.Command{
 	Short: "Start the MCP stdio server",
 	Long: `Start the Model Context Protocol (MCP) server over stdio
 for integration with AI assistants.`,
-	RunE: runServe,
+	RunE:         runServe,
+	SilenceUsage: true,
 }
 
 var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show index status and statistics",
-	RunE:  runStatus,
+	Use:          "status",
+	Short:        "Show index status and statistics",
+	RunE:         runStatus,
+	SilenceUsage: true,
 }
 
 var similarCmd = &cobra.Command{
@@ -475,6 +479,8 @@ func init() {
 	// Status command flags
 	statusCmd.Flags().StringP("format", "f", "default", "output format (default, json)")
 	statusCmd.Flags().Bool("lightweight", false, "read vector-free health metadata without opening VecLite")
+	doctorCmd.Flags().StringP("format", "f", "default", "output format (default, json)")
+	doctorCmd.Flags().Bool("no-ping", false, "skip the live embedding request against the provider")
 
 	// Reset command flags
 	resetCmd.Flags().Bool("force", false, "skip confirmation prompt")
@@ -534,6 +540,7 @@ func init() {
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(similarCmd)
 	rootCmd.AddCommand(deleteCmd)
 	rootCmd.AddCommand(cleanCmd)
@@ -1347,6 +1354,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
+	logServeEnvironment(os.Stderr, projectRoot)
 	mcpServer := mcp.NewSDKServer(mcp.SDKServerConfig{ProjectRoot: projectRoot})
 	return mcpServer.Run(ctx)
 }
@@ -1377,6 +1385,10 @@ type StatusOutput struct {
 	ReceiptError     string                    `json:"ingestion_receipt_error,omitempty"`
 	Freshness        *app.IndexFreshnessReport `json:"freshness,omitempty"`
 	Lightweight      bool                      `json:"lightweight,omitempty"`
+	// ProviderKeyRequired is true for cloud providers; ProviderKeySource names
+	// where the key came from (env variable or config field), never its value.
+	ProviderKeyRequired bool   `json:"provider_key_required"`
+	ProviderKeySource   string `json:"provider_key_source,omitempty"`
 }
 
 // PendingChanges represents pending reindex changes
@@ -1389,26 +1401,28 @@ type PendingChanges struct {
 
 func statusOutputFromResponse(status *app.StatusResponse) StatusOutput {
 	output := StatusOutput{
-		ProjectRoot:      status.ProjectRoot,
-		DataDir:          status.DataDir,
-		Database:         status.VecLitePath,
-		VectorBackend:    status.VectorBackend,
-		EmbeddingModel:   status.Model,
-		Provider:         status.Provider,
-		Dimensions:       status.Dimensions,
-		ProfilePath:      status.ProfilePath,
-		ProfileStatus:    status.ProfileStatus,
-		ProfileMatches:   status.ProfileMatches,
-		CurrentProfile:   status.CurrentProfile,
-		StoredProfile:    status.StoredProfile,
-		VecLiteBytes:     status.VecLiteSizeBytes,
-		IndexedBytes:     status.IndexedBytes,
-		IndexFresh:       status.IndexFresh,
-		Stats:            status.Stats,
-		IngestionReceipt: status.IngestionReceipt,
-		ReceiptError:     status.ReceiptError,
-		Freshness:        status.Freshness,
-		Lightweight:      status.Lightweight,
+		ProjectRoot:         status.ProjectRoot,
+		DataDir:             status.DataDir,
+		Database:            status.VecLitePath,
+		VectorBackend:       status.VectorBackend,
+		EmbeddingModel:      status.Model,
+		Provider:            status.Provider,
+		Dimensions:          status.Dimensions,
+		ProfilePath:         status.ProfilePath,
+		ProfileStatus:       status.ProfileStatus,
+		ProfileMatches:      status.ProfileMatches,
+		CurrentProfile:      status.CurrentProfile,
+		StoredProfile:       status.StoredProfile,
+		VecLiteBytes:        status.VecLiteSizeBytes,
+		IndexedBytes:        status.IndexedBytes,
+		IndexFresh:          status.IndexFresh,
+		Stats:               status.Stats,
+		IngestionReceipt:    status.IngestionReceipt,
+		ReceiptError:        status.ReceiptError,
+		Freshness:           status.Freshness,
+		Lightweight:         status.Lightweight,
+		ProviderKeyRequired: status.ProviderKey.RequiresKey,
+		ProviderKeySource:   status.ProviderKey.Source,
 	}
 	if !status.LatestIndexedAt.IsZero() {
 		output.LatestIndexed = status.LatestIndexedAt.Format(time.RFC3339)
@@ -1483,6 +1497,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Veclite version: %s\n", status.VecliteVersion)
 	fmt.Printf("  Embedding model: %s (%s, %d dimensions)\n", status.Model, status.Provider, status.Dimensions)
 	fmt.Printf("  Provider health: %s\n", providerHealthLabel(status.ProviderHealth))
+	if status.ProviderKey.RequiresKey {
+		fmt.Printf("  API key:      %s\n", status.ProviderKey.Label())
+	}
 	fmt.Printf("  HNSW:         M=%d  efConstruction=%d  efSearch=%d\n", status.HNSWM, status.HNSWEfConstruction, status.HNSWEfSearch)
 	fmt.Printf("  Profile:     %s\n", status.ProfileStatus)
 	fmt.Printf("  Profile path: %s\n", status.ProfilePath)

@@ -307,6 +307,19 @@ vecgrep status --format json  # JSON output for scripting
 vecgrep status --lightweight --format json  # Bounded-memory health check
 ```
 
+### Diagnose the Setup
+
+```bash
+vecgrep doctor [--format json] [--no-ping]
+```
+
+Checks the resolved project, the embedding provider and where its API key comes
+from (never the value), local Ollama reachability, the index store, the daemon,
+and one live embedding request. Exits non-zero when a check fails. Run it from
+the launcher that reports a problem — MCP gateways and GUI agents do not inherit
+`~/.zshrc`, so a key exported in your terminal can still be missing there. See
+[docs/providers.md](docs/providers.md#api-keys-under-mcp-launchers).
+
 ### Index Management
 
 #### Delete a File

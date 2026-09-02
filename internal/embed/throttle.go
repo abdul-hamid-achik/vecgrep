@@ -550,3 +550,9 @@ func (p *ThrottledProvider) leaveInFlight(key string, result []float32, err erro
 	}
 	p.dedupMu.Unlock()
 }
+
+// Unwrap exposes the decorated provider so callers can identify the concrete
+// backend behind the throttle layer (see Underlying).
+func (p *ThrottledProvider) Unwrap() Provider {
+	return p.inner
+}

@@ -226,7 +226,7 @@ var (
 // embedBatchInternal performs a batch embedding request.
 func (p *OpenAIProvider) embedBatchInternal(ctx context.Context, texts []string) ([][]float32, error) {
 	if p.config.APIKey == "" {
-		return nil, NewProviderError("openai", "embed", ErrAPIKeyNotConfigured)
+		return nil, missingAPIKeyError(ProviderOpenAI, "embed")
 	}
 
 	var lastErr error
@@ -372,7 +372,7 @@ func (p *OpenAIProvider) Dimensions() int {
 // Ping checks if OpenAI is available and the API key is valid.
 func (p *OpenAIProvider) Ping(ctx context.Context) error {
 	if p.config.APIKey == "" {
-		return NewProviderError("openai", "ping", ErrAPIKeyNotConfigured)
+		return missingAPIKeyError(ProviderOpenAI, "ping")
 	}
 
 	// Try to get a small embedding to verify the API key works

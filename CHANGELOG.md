@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`vecgrep doctor`** — one-shot diagnosis of what the current process sees:
+  resolved project and config sources, embedding provider, API-key origin
+  (env variable or config field, never the value), local Ollama reachability,
+  index store existence, daemon liveness, and a live embedding probe
+  (`--no-ping` to skip). `--format json` for agents; exit 1 when a check fails.
+- **Key origin in status** — `vecgrep status` prints `API key: env:OPENAI_API_KEY`
+  or `missing — set …`; JSON gains `provider_key_required` /
+  `provider_key_source`. `vecgrep_status` (MCP) shows the same line.
+- **Startup line for MCP** — `vecgrep serve --mcp` logs one stderr line with
+  project, provider, model, key origin, and `index=not-built` so the launcher's
+  MCP log explains a failing session before the first tool call.
+
+### Fixed
+- **Never-built index no longer looks corrupt** — a read of a project whose
+  `vectors.veclite` does not exist returned veclite's
+  `collection not found: chunks` with a `reset --force` suggestion. CLI
+  commands now say `index not built … run vecgrep index`; MCP
+  `vecgrep_status`/`vecgrep_search`/`vecgrep_ensure` return
+  `readiness.state=empty`, `action=vecgrep_index`, and a provider-key warning
+  when the key is missing (`ensure mode:index_if_empty` proceeds to index).
+- **Keyword search no longer requires an embedder (MCP)** — `vecgrep_search`
+  probed the provider before every mode, so a missing API key failed
+  `mode: keyword` too. Keyword skips the probe; hybrid degrades to keyword-only
+  with a `Warning:` line (matching the CLI); semantic still fails with the
+  remedy.
+- **Provider remedies through decorators** — the MCP provider check
+  type-switched on the raw provider, but the active provider is wrapped in a
+  throttle/cache layer, so OpenAI/Cohere/Voyage users always got the generic
+  "verify your provider" text. Decorators now expose `Unwrap()`; remedies name
+  the exact variables (`OPENAI_API_KEY` / `VECGREP_OPENAI_API_KEY` /
+  `embedding.openai_api_key`) and explain that MCP launchers do not inherit
+  `~/.zshrc`.
+- **Missing-key errors name the variable** — `openai: ping: API key not
+  configured (set OPENAI_API_KEY or VECGREP_OPENAI_API_KEY)`; the
+  `embed.ErrAPIKeyNotConfigured` sentinel is preserved.
+
 ## [2.25.2] - 2026-08-30
 
 ### Fixed

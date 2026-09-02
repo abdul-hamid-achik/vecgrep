@@ -186,6 +186,9 @@ func OpenReadOnlySession(ctx context.Context, startDir string) (*Session, error)
 	if migrationWarning != "" {
 		return nil, fmt.Errorf("%w: %s", ErrMigrationRequired, migrationWarning)
 	}
+	if !fileExists(vecPath) {
+		return nil, IndexNotBuiltError(resolved.ProjectName, projectRoot, vecPath)
+	}
 
 	database, err := db.OpenWithOptions(db.OpenOptions{
 		Dimensions:         cfg.Embedding.Dimensions,
@@ -278,4 +281,17 @@ func IsMigrationRequired(err error) bool {
 
 func IsEmbeddingProfileMismatch(err error) bool {
 	return errors.Is(err, ErrEmbeddingProfileMismatch)
+}
+
+// IndexNotBuiltError explains that a project has no veclite store yet. A
+// read-only open of a missing store used to surface veclite's
+// "collection not found: chunks" together with a reset suggestion, which reads
+// like corruption; the real remedy is simply the first `vecgrep index`.
+func IndexNotBuiltError(projectName, projectRoot, vecPath string) error {
+	name := projectName
+	if name == "" {
+		name = filepath.Base(projectRoot)
+	}
+	return fmt.Errorf("%w for project %q (%s): %s does not exist yet; run 'vecgrep index' to build it",
+		ErrIndexNotBuilt, name, projectRoot, vecPath)
 }

@@ -363,6 +363,14 @@ func (s *mcpSession) acquireROContextInternal(ctx context.Context, admitted bool
 	}
 
 	if s.ro == nil {
+		// A read-only open of a store that was never written succeeds at the
+		// veclite layer and then fails with "collection not found: chunks",
+		// which reads like corruption. Name the real state instead so tool
+		// handlers can answer with readiness=empty and action=vecgrep_index.
+		if !storeExists(s.databasePath) {
+			s.mu.Unlock()
+			return nil, nil, app.IndexNotBuiltError(s.projectName, s.projectRoot, s.databasePath)
+		}
 		opts := s.dbOpts
 		opts.ReadOnly = true
 		opts.SharedRead = true
@@ -670,4 +678,10 @@ func formatLockError(err error) string {
 			"'vecgrep index' / 'vecgrep daemon reindex' from the CLI when the lock is free."
 	}
 	return err.Error()
+}
+
+// storeExists reports whether the veclite store file has been written.
+func storeExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }

@@ -60,6 +60,11 @@ type StatusResponse struct {
 	// semantic search will work before issuing a query.
 	ProviderHealth string
 
+	// ProviderKey reports where the configured cloud provider's API key comes
+	// from (or that it is missing) without exposing the value. Keyless
+	// providers report RequiresKey=false.
+	ProviderKey ProviderKeyStatus
+
 	// HasCodemapGraph reports whether codemap has an index for this project.
 	// A verified structural manifest is authoritative when required; otherwise
 	// the value falls back to stat-ing codemap's XDG registry. When true, codemap
@@ -208,6 +213,7 @@ func (s *Service) Status(ctx context.Context) (*StatusResponse, error) {
 		HNSWEfSearch:       hnswEfSearch,
 		VecliteVersion:     veclite.Version,
 		ProviderHealth:     providerHealth,
+		ProviderKey:        ResolveProviderKeyStatus(s.session.Config),
 		HasCodemapGraph:    hasCodemapGraph,
 	}, nil
 }

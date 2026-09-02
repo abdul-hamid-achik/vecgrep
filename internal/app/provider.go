@@ -123,3 +123,61 @@ func newInnerProvider(cfg *config.Config) (embed.Provider, error) {
 		return nil, fmt.Errorf("unknown embedding provider: %s", cfg.Embedding.Provider)
 	}
 }
+
+// ProviderKeyStatus describes the API-key situation of the configured
+// embedding provider without ever exposing the key itself.
+type ProviderKeyStatus struct {
+	// Provider is the configured provider type (ollama, openai, cohere, voyage).
+	Provider embed.ProviderType
+	// RequiresKey is true for cloud providers.
+	RequiresKey bool
+	// Source is where the active key comes from ("env:OPENAI_API_KEY",
+	// "config:embedding.openai_api_key") or "" when no key is available.
+	Source string
+}
+
+// Missing reports whether a required key is absent.
+func (k ProviderKeyStatus) Missing() bool {
+	return k.RequiresKey && k.Source == ""
+}
+
+// Label is a compact, printable summary: "env:OPENAI_API_KEY",
+// "missing (set OPENAI_API_KEY or VECGREP_OPENAI_API_KEY ...)", or
+// "not required" for keyless providers.
+func (k ProviderKeyStatus) Label() string {
+	switch {
+	case !k.RequiresKey:
+		return "not required"
+	case k.Source == "":
+		return "missing — " + embed.APIKeyHint(k.Provider)
+	default:
+		return k.Source
+	}
+}
+
+// ResolveProviderKeyStatus inspects the resolved configuration and the current
+// process environment for the configured provider's API key.
+func ResolveProviderKeyStatus(cfg *config.Config) ProviderKeyStatus {
+	if cfg == nil {
+		return ProviderKeyStatus{}
+	}
+	provider := embed.ProviderType(cfg.Embedding.Provider)
+	if provider == "" {
+		provider = embed.ProviderOllama
+	}
+	status := ProviderKeyStatus{Provider: provider, RequiresKey: embed.RequiresAPIKey(provider)}
+	if !status.RequiresKey {
+		return status
+	}
+	var configValue string
+	switch provider {
+	case embed.ProviderOpenAI:
+		configValue = cfg.Embedding.OpenAIAPIKey
+	case embed.ProviderCohere:
+		configValue = cfg.Embedding.CohereAPIKey
+	case embed.ProviderVoyage:
+		configValue = cfg.Embedding.VoyageAPIKey
+	}
+	status.Source = embed.APIKeySource(provider, configValue)
+	return status
+}

@@ -195,7 +195,7 @@ func (p *CohereProvider) embedBatchByInputType(ctx context.Context, texts []stri
 
 func (p *CohereProvider) embedBatchInternal(ctx context.Context, texts []string, inputType string) ([][]float32, error) {
 	if p.config.APIKey == "" {
-		return nil, NewProviderError("cohere", "embed", ErrAPIKeyNotConfigured)
+		return nil, missingAPIKeyError(ProviderCohere, "embed")
 	}
 
 	var lastErr error
@@ -310,7 +310,7 @@ func (p *CohereProvider) Dimensions() int {
 
 func (p *CohereProvider) Ping(ctx context.Context) error {
 	if p.config.APIKey == "" {
-		return NewProviderError("cohere", "ping", ErrAPIKeyNotConfigured)
+		return missingAPIKeyError(ProviderCohere, "ping")
 	}
 	if _, err := p.EmbedQuery(ctx, "test"); err != nil {
 		return NewProviderError("cohere", "ping", err)

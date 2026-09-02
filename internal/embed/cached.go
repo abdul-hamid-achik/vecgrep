@@ -130,3 +130,9 @@ func (c *CachedProvider) CacheSize() int {
 func (c *CachedProvider) ClearCache() {
 	c.cache.Clear()
 }
+
+// Unwrap exposes the decorated provider so callers can identify the concrete
+// backend behind the cache layer (see Underlying).
+func (c *CachedProvider) Unwrap() Provider {
+	return c.inner
+}

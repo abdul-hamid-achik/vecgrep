@@ -856,7 +856,9 @@ func writeReadiness(sb *strings.Builder, r app.Readiness) {
 
 // readinessToolError returns an IsError tool result when the index is not
 // searchable (empty or profile mismatch). Second value is the readiness struct.
-func readinessToolError(r app.Readiness) (*sdkmcp.CallToolResult, any, error) {
+// Non-empty notes (e.g. a missing provider API key) are appended so the agent
+// learns up front why the suggested action would fail.
+func readinessToolError(r app.Readiness, notes ...string) (*sdkmcp.CallToolResult, any, error) {
 	var sb strings.Builder
 	switch r.State {
 	case app.ReadinessEmpty:
@@ -869,6 +871,11 @@ func readinessToolError(r app.Readiness) (*sdkmcp.CallToolResult, any, error) {
 	writeReadiness(&sb, r)
 	if r.Action != "" {
 		fmt.Fprintf(&sb, "\nNext: call %s\n", r.Action)
+	}
+	for _, note := range notes {
+		if note != "" {
+			fmt.Fprintf(&sb, "\n**Warning:** %s\n", note)
+		}
 	}
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
@@ -894,38 +901,11 @@ func checkEmbeddingProvider(ctx context.Context, p embed.Provider) *sdkmcp.CallT
 	}
 
 	if err := p.Ping(ctx); err != nil {
-		var sb strings.Builder
-		sb.WriteString("Embedding provider is not available.\n\n")
-
-		// Check if it's an Ollama provider based on error message or model
-		if _, ok := p.(*embed.OllamaProvider); ok {
-			sb.WriteString("To fix this (Ollama):\n")
-			sb.WriteString("1. Install Ollama: https://ollama.ai\n")
-			sb.WriteString("2. Start Ollama:\n")
-			sb.WriteString("   OLLAMA_HOST=0.0.0.0 ollama serve\n")
-			sb.WriteString("3. Pull the embedding model:\n")
-			sb.WriteString("   ollama pull nomic-embed-text\n")
-		} else if _, ok := p.(*embed.OpenAIProvider); ok {
-			sb.WriteString("To fix this (OpenAI):\n")
-			sb.WriteString("1. Ensure OPENAI_API_KEY or VECGREP_OPENAI_API_KEY is set\n")
-			sb.WriteString("2. Verify your API key is valid\n")
-			sb.WriteString("3. Check your OpenAI account has available credits\n")
-		} else if _, ok := p.(*embed.CohereProvider); ok {
-			sb.WriteString("To fix this (Cohere):\n")
-			sb.WriteString("1. Ensure COHERE_API_KEY or VECGREP_COHERE_API_KEY is set\n")
-			sb.WriteString("2. Verify your API key is valid\n")
-			sb.WriteString("3. Check your Cohere account has available credits\n")
-		} else if _, ok := p.(*embed.VoyageProvider); ok {
-			sb.WriteString("To fix this (Voyage):\n")
-			sb.WriteString("1. Ensure VOYAGE_API_KEY or VECGREP_VOYAGE_API_KEY is set\n")
-			sb.WriteString("2. Verify your API key is valid\n")
-			sb.WriteString("3. Check your Voyage account has available credits\n")
-		} else {
-			sb.WriteString("Verify your embedding provider is configured correctly.\n")
-		}
-		fmt.Fprintf(&sb, "\nError: %v", err)
+		// The active provider is normally wrapped in a throttle/cache layer;
+		// providerUnavailableText unwraps it so the concrete backend's remedy
+		// is shown instead of the generic fallback.
 		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: providerUnavailableText(ctx, p, err)}},
 			IsError: true,
 		}
 	}
@@ -1039,6 +1019,11 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	// indexes never look like "No results found" on a warm daemon path.
 	readState, err := state.acquireRead(ctx)
 	if err != nil {
+		if errors.Is(err, app.ErrIndexNotBuilt) {
+			// Never indexed: same agent contract as an empty index, plus the
+			// provider-key note so the follow-up vecgrep_index is not a surprise.
+			return readinessToolError(indexNotBuiltReadiness(state.cfg), providerKeyNote(state.cfg))
+		}
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
 			IsError: true,
@@ -1054,12 +1039,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	}
 	if readiness.BlocksSearch() {
 		readState.release()
-		return readinessToolError(readiness)
-	}
-
-	if errResult := checkEmbeddingProvider(ctx, state.provider); errResult != nil {
-		readState.release()
-		return errResult, nil, nil
+		return readinessToolError(readiness, providerKeyNote(state.cfg))
 	}
 
 	opts := search.DefaultSearchOptions()
@@ -1110,7 +1090,8 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 	}
 
 	// Parse search mode
-	switch strings.ToLower(input.Mode) {
+	effectiveMode := strings.ToLower(input.Mode)
+	switch effectiveMode {
 	case "semantic":
 		opts.Mode = search.SearchModeSemantic
 	case "keyword":
@@ -1121,8 +1102,31 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		opts.Mode = search.SearchModeHybrid
 	}
 
+	// Keyword search never touches the embedder, so it must not be gated on
+	// one. Semantic search requires it. Hybrid degrades to keyword-only with an
+	// explicit warning — matching the CLI — so a missing API key costs ranking
+	// quality rather than the whole answer.
+	degradedWarning := ""
+	if opts.Mode != search.SearchModeKeyword {
+		if pingErr := pingProvider(ctx, state.provider); pingErr != nil {
+			if opts.Mode == search.SearchModeSemantic {
+				readState.release()
+				return &sdkmcp.CallToolResult{
+					Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: providerUnavailableText(ctx, state.provider, pingErr)}},
+					IsError: true,
+				}, readiness, nil
+			}
+			opts.Mode = search.SearchModeKeyword
+			effectiveMode = "keyword"
+			degradedWarning = degradedSearchWarning(pingErr)
+		}
+	}
+
 	var sb strings.Builder
 	writeReadiness(&sb, readiness)
+	if degradedWarning != "" {
+		fmt.Fprintf(&sb, "> **Warning:** %s\n\n", degradedWarning)
+	}
 
 	// Report scoping status so the caller knows whether codemap was used
 	if scopeNote != "" {
@@ -1138,7 +1142,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		params := daemonSearchParams{
 			Query:       input.Query,
 			Limit:       opts.Limit,
-			Mode:        input.Mode,
+			Mode:        effectiveMode,
 			Language:    input.Language,
 			Languages:   input.Languages,
 			ChunkTypes:  input.ChunkTypes,
@@ -1155,6 +1159,9 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 		if dErr == nil {
 			var body strings.Builder
 			writeReadiness(&body, readiness)
+			if degradedWarning != "" {
+				fmt.Fprintf(&body, "> **Warning:** %s\n\n", degradedWarning)
+			}
 			body.WriteString(formatDaemonSearchResult(rawResult, scopeNote))
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: body.String()}},
@@ -1316,18 +1323,27 @@ func (s *SDKServer) handleEnsure(ctx context.Context, req *sdkmcp.CallToolReques
 		}, nil, nil
 	}
 
+	ensureCfg := s.snapshotProjectState().cfg
+	var readiness app.Readiness
 	readState, err := s.acquireProjectReadSnapshot(ctx)
-	if err != nil {
+	switch {
+	case err == nil:
+		var readinessErr error
+		readiness, readinessErr = serviceFromRead(readState).Readiness(ctx)
+		readState.release()
+		if readinessErr != nil {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to compute readiness: %v", readinessErr)}},
+				IsError: true,
+			}, nil, nil
+		}
+	case errors.Is(err, app.ErrIndexNotBuilt):
+		// Never indexed: treat as empty so index_if_empty / force_rebuild
+		// build the store instead of failing on a missing file.
+		readiness = indexNotBuiltReadiness(ensureCfg)
+	default:
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to open database: %v", err)}},
-			IsError: true,
-		}, nil, nil
-	}
-	readiness, readinessErr := serviceFromRead(readState).Readiness(ctx)
-	readState.release()
-	if readinessErr != nil {
-		return &sdkmcp.CallToolResult{
-			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to compute readiness: %v", readinessErr)}},
 			IsError: true,
 		}, nil, nil
 	}
@@ -1356,6 +1372,9 @@ func (s *SDKServer) handleEnsure(ctx context.Context, req *sdkmcp.CallToolReques
 	if !needIndex {
 		if readiness.BlocksSearch() {
 			fmt.Fprintf(&sb, "\nNot searchable. Next: call %s\n", readiness.Action)
+			if note := providerKeyNote(ensureCfg); note != "" {
+				fmt.Fprintf(&sb, "\n**Warning:** %s\n", note)
+			}
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
 				IsError: true,
@@ -1510,8 +1529,22 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 	// when the daemon can serve stats. Daemon-only stats omit profile state.
 	readState, err := s.acquireProjectReadSnapshot(ctx)
 	if err != nil {
-		// Fall back to daemon stats when the local index is locked for read.
 		state := s.snapshotProjectState()
+		if errors.Is(err, app.ErrIndexNotBuilt) {
+			// Never indexed. Not an error for status: report the empty
+			// readiness, the exact next action, and whether the provider can
+			// actually embed once vecgrep_index is called.
+			r := indexNotBuiltReadiness(state.cfg)
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "Index status for: %s\n\n", state.projectRoot)
+			sb.WriteString("Index not built yet: no files or chunks indexed.\n")
+			writeReadiness(&sb, r)
+			writeProviderStatus(&sb, state.cfg)
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+			}, r, nil
+		}
+		// Fall back to daemon stats when the local index is locked for read.
 		if dc := state.daemon; dc != nil && dc.available() {
 			if rawStats, dErr := dc.stats(ctx); dErr == nil {
 				return &sdkmcp.CallToolResult{
@@ -1564,6 +1597,10 @@ func (s *SDKServer) handleStatus(ctx context.Context, req *sdkmcp.CallToolReques
 	if freshnessErr == nil {
 		writeFreshnessStatus(&sb, freshness, pending)
 	}
+
+	// Provider + API-key origin, so an agent sees "key missing" here instead
+	// of discovering it on the first semantic search.
+	writeProviderStatus(&sb, readState.cfg)
 
 	// Report codemap integration from the same activation snapshot.
 	if readState.codemapCfg.Enabled {
@@ -2225,4 +2262,115 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 	return &sdkmcp.CallToolResult{
 		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
 	}, nil, nil
+}
+
+// indexNotBuiltReadiness is the readiness envelope for a project whose veclite
+// store does not exist yet. Agents see the same state/action as an empty index;
+// the reason names the missing store instead of veclite's collection error.
+func indexNotBuiltReadiness(cfg *config.Config) app.Readiness {
+	r := app.DeriveReadiness(false, false, 0, true, "", nil, "", "")
+	if cfg != nil && cfg.DataDir != "" {
+		r.Reason = fmt.Sprintf("index not built yet (%s does not exist); call vecgrep_index to build it", db.VecLitePath(cfg.DataDir))
+	} else {
+		r.Reason = "index not built yet; call vecgrep_index to build it"
+	}
+	return r
+}
+
+// providerKeyNote returns a warning when the configured cloud provider has no
+// API key in this process's environment, "" otherwise. Attached to readiness
+// errors and status so an agent learns why indexing will fail before it tries,
+// and the human learns where the key has to live.
+func providerKeyNote(cfg *config.Config) string {
+	key := app.ResolveProviderKeyStatus(cfg)
+	if !key.Missing() {
+		return ""
+	}
+	return fmt.Sprintf("Embedding provider %s has no API key in this process: %s. %s",
+		key.Provider, embed.APIKeyHint(key.Provider), embed.LauncherEnvHint)
+}
+
+// writeProviderStatus appends the provider/model line and the API-key origin
+// to status output. The key value is never printed, only its source.
+func writeProviderStatus(sb *strings.Builder, cfg *config.Config) {
+	if sb == nil || cfg == nil {
+		return
+	}
+	key := app.ResolveProviderKeyStatus(cfg)
+	fmt.Fprintf(sb, "\nEmbedding provider: %s (%s, %d dimensions)\n", key.Provider, cfg.Embedding.Model, cfg.Embedding.Dimensions)
+	if key.RequiresKey {
+		fmt.Fprintf(sb, "API key: %s\n", key.Label())
+		if key.Missing() {
+			fmt.Fprintf(sb, "**Hint:** %s\n", embed.LauncherEnvHint)
+		}
+	}
+}
+
+// pingProvider probes the embedder once. A nil provider is reported as an
+// error so callers can treat "not configured" and "unreachable" alike.
+func pingProvider(ctx context.Context, p embed.Provider) error {
+	if p == nil {
+		return errors.New("embedding provider not configured")
+	}
+	return p.Ping(ctx)
+}
+
+// providerUnavailableText explains a failed provider probe with remedies for the
+// concrete backend behind any throttle/cache decorator. A missing API key adds
+// the launcher-environment explanation and, when a local ollama with embedding
+// models is reachable, the keyless preset tip.
+func providerUnavailableText(ctx context.Context, p embed.Provider, err error) string {
+	var sb strings.Builder
+	sb.WriteString("Embedding provider is not available.\n\n")
+	switch embed.Underlying(p).(type) {
+	case *embed.OllamaProvider:
+		sb.WriteString("To fix this (Ollama):\n")
+		sb.WriteString("1. Install Ollama: https://ollama.ai\n")
+		sb.WriteString("2. Start Ollama:\n")
+		sb.WriteString("   OLLAMA_HOST=0.0.0.0 ollama serve\n")
+		sb.WriteString("3. Pull the embedding model:\n")
+		sb.WriteString("   ollama pull nomic-embed-text\n")
+	case *embed.OpenAIProvider:
+		writeCloudKeyFix(&sb, "OpenAI", embed.ProviderOpenAI, err)
+	case *embed.CohereProvider:
+		writeCloudKeyFix(&sb, "Cohere", embed.ProviderCohere, err)
+	case *embed.VoyageProvider:
+		writeCloudKeyFix(&sb, "Voyage", embed.ProviderVoyage, err)
+	default:
+		sb.WriteString("Verify your embedding provider is configured correctly.\n")
+	}
+	if errors.Is(err, embed.ErrAPIKeyNotConfigured) {
+		sb.WriteString("\n")
+		sb.WriteString(embed.LauncherEnvHint)
+		sb.WriteString("\n")
+		if hint := embed.LocalOllamaHint(ctx); hint != "" {
+			fmt.Fprintf(&sb, "Tip: %s\n", hint)
+		}
+	}
+	fmt.Fprintf(&sb, "\nError: %v", err)
+	return sb.String()
+}
+
+func writeCloudKeyFix(sb *strings.Builder, label string, provider embed.ProviderType, err error) {
+	fmt.Fprintf(sb, "To fix this (%s):\n", label)
+	envVars := strings.Join(embed.APIKeyEnvVars(provider), " or ")
+	if errors.Is(err, embed.ErrAPIKeyNotConfigured) {
+		fmt.Fprintf(sb, "1. No API key was found in this process. Set %s (or %s in vecgrep.yaml) in the environment of the process that launches vecgrep\n",
+			envVars, embed.APIKeyConfigField(provider))
+	} else {
+		fmt.Fprintf(sb, "1. Ensure %s is set\n", envVars)
+	}
+	sb.WriteString("2. Verify your API key is valid\n")
+	fmt.Fprintf(sb, "3. Check your %s account has available credits\n", label)
+}
+
+// degradedSearchWarning describes a hybrid search that fell back to keyword-only
+// because the embedder was unavailable at query time.
+func degradedSearchWarning(pingErr error) string {
+	msg := fmt.Sprintf("embedding provider unavailable at query time (%v): results are keyword-only "+
+		"(BM25 normalized to 0-1 within this result set; top hit = 1.0); semantic ranking was skipped.", pingErr)
+	if errors.Is(pingErr, embed.ErrAPIKeyNotConfigured) {
+		msg += " " + embed.LauncherEnvHint
+	}
+	return msg
 }

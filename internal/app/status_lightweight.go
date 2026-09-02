@@ -109,6 +109,7 @@ func LightweightStatus(ctx context.Context, startDir string) (*StatusResponse, e
 		IngestionReceipt: receipt,
 		ReceiptError:     receiptError,
 		Freshness:        report,
+		ProviderKey:      ResolveProviderKeyStatus(cfg),
 		Lightweight:      true,
 	}, nil
 }

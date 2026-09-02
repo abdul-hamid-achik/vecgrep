@@ -147,6 +147,21 @@ without loading the VecLite/HNSW snapshot. Missing or invalid health metadata
 reports `freshness.state: "unknown"`; use the full status command when you
 need detailed vector/provider diagnostics.
 
+### Doctor
+
+```bash
+vecgrep doctor                    # human-readable checklist; exit 1 on failure
+vecgrep doctor --format json      # machine-readable
+vecgrep doctor --no-ping          # skip the live embedding request
+```
+
+Reports what *this process* sees: resolved project and config sources, the
+embedding provider, where its API key comes from (variable or config field —
+never the value), local Ollama reachability, whether the index store exists,
+the background daemon, and one live embedding request. Run it from the same
+launcher that misbehaves (an MCP gateway or GUI agent does not inherit your
+interactive shell).
+
 ### `profile_status` values
 
 The `profile_status` field tells a consumer whether the embedding profile
