@@ -994,6 +994,7 @@ func (idx *Indexer) chunkFile(ctx context.Context, projectRoot string, deleteExi
 		)
 		records[i].ChunkIndex = i
 		records[i].SourceHash = file.sourceHash
+		records[i].Selector = chunk.Selector
 	}
 	task := &fileTask{
 		path:      file.path,

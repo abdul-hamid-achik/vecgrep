@@ -522,6 +522,12 @@ func TestStructuralChunksPreserveLongSymbolTailAndFileGaps(t *testing.T) {
 		if len(chunk.Content) > structuralPreviewMaxBytes || !utf8.ValidString(chunk.Content) {
 			t.Fatalf("chunk %d bytes=%d valid=%t", i, len(chunk.Content), utf8.ValidString(chunk.Content))
 		}
+		if chunk.SymbolName != "" && (chunk.Selector == nil || chunk.Selector.StartLine != record.StartLine || chunk.Selector.FQN != record.FQN || chunk.Selector.File != record.File) {
+			t.Fatalf("split chunk %d lost declaration identity: %+v", i, chunk.Selector)
+		}
+		if chunk.SymbolName == "" && chunk.Selector != nil {
+			t.Fatal("file gap received a fabricated selector")
+		}
 		reconstructed.WriteString(chunk.Content)
 		if chunk.SymbolName != "" && !strings.Contains(chunk.EmbeddingContent, chunk.Content) {
 			t.Fatalf("chunk %d source was truncated out of its embedding payload", i)

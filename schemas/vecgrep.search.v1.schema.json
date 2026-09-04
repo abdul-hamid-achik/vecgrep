@@ -34,6 +34,18 @@
           "end_line": { "type": "integer", "minimum": 0 },
           "chunk_type": { "type": "string" },
           "symbol_name": { "type": "string" },
+          "selector": {
+            "type": "object",
+            "required": ["file", "start_line", "fqn", "kind"],
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "start_line": { "type": "integer", "minimum": 1 },
+              "fqn": { "type": "string" },
+              "kind": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "source_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
           "language": { "type": "string" },
           "distance": { "type": "number" },
           "score": { "type": "number" },

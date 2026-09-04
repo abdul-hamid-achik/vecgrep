@@ -13,9 +13,9 @@ capability, never a hard dependency.
 | Semantic recall over chunks (hybrid vector + BM25) | **vecgrep** | stand up a second siloed embed index |
 | Cross-project agent memory (importance/tags/TTL) | **vecgrep** | store memories; codemap only recalls |
 
-Both tools embed the same repo (`nomic-embed-text`, 768d, cosine) but the stores stay
-separate: codemap's is structure-anchored (node bodies + FQN), vecgrep's is
-recall-anchored (chunks, cross-repo). Structural exports reconcile through the
+When using both tools, configure Codemap's `semantic.backend: vecgrep` to avoid
+embedding the same repository twice. Codemap keeps its structural graph and
+Vecgrep keeps semantic chunks in Veclite. Structural exports reconcile through the
 durable join key `(project_key, relative_path, start_line, fqn, kind)` — never by
 merging stores or joining on bare symbol names (which collide).
 
@@ -85,3 +85,27 @@ merging stores or joining on bare symbol names (which collide).
   source; it never reads codemap's SQLite database.
 - Contract drift between the tools is guarded by golden tests
   (`internal/mcp/codemap_golden_test.go`).
+
+## Preserve a hit's symbol identity
+
+Structural search hits include optional `selector` and `source_hash` fields.
+The selector is `{file,start_line,fqn,kind}` for the original declaration;
+`start_line` on the hit itself describes the preview chunk and can differ for
+split symbols. Generic chunks have no selector. `source_hash` is the raw file's
+SHA-256, independent of the embedding or chunk hash. Existing indexes gain these
+fields when indexed again; the structural chunk profile change triggers rebuilds.
+
+Pass `selector` unchanged to `codemap impact --selector '<json>' --json` or to
+MCP operations accepting `selector`. Do not substitute the chunk ID or merge
+same-named symbols across files. Check index freshness and per-result graph
+confidence before using a hit to justify a change.
+
+A local integration test verifies the real Codemap export, Vecgrep ingestion,
+Veclite persistence, search projection and the exact impact round trip:
+
+```sh
+VECGREP_TEST_CODEMAP_BIN=/absolute/path/to/codemap go test ./internal/app -run TestCodemapProducerThroughStoredSearch
+```
+
+It uses temporary data and a deterministic embedding stub; no model service is
+called. This checks the contract, not semantic ranking quality.

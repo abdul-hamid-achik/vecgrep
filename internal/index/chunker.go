@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 )
 
 // ChunkType represents the type of code chunk.
@@ -47,6 +49,7 @@ type Chunk struct {
 	ChunkType        ChunkType
 	SymbolName       string
 	Origin           ChunkOrigin
+	Selector         *db.SymbolSelector
 }
 
 // defaultMaxChunkChars is a hard upper bound on the bytes in any single chunk

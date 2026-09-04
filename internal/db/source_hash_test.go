@@ -23,6 +23,7 @@ func TestSourceHashRoundTrip(t *testing.T) {
 		"package main", 1, 1, 0, 12, "generic", "", projectRoot,
 	)
 	chunk.SourceHash = sourceHash
+	chunk.Selector = &SymbolSelector{File: "main.go", StartLine: 1, FQN: "main.Run", Kind: "function"}
 	if _, err := database.InsertChunk(chunk, make([]float32, dimensions)); err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +54,9 @@ func TestSourceHashRoundTrip(t *testing.T) {
 	}
 	if len(chunks) != 1 || chunks[0].SourceHash != sourceHash {
 		t.Fatalf("chunk source hash round trip = %#v", chunks)
+	}
+	if chunks[0].Selector == nil || *chunks[0].Selector != *chunk.Selector {
+		t.Fatalf("selector round trip = %#v", chunks[0].Selector)
 	}
 	files, err := database.ListFiles(projectRoot)
 	if err != nil {
@@ -177,6 +181,45 @@ func TestSourceHashesReportLegacyRecordsAsIncomplete(t *testing.T) {
 	for _, file := range files {
 		if file.RelativePath == "legacy.go" && file.SourceHash != "" {
 			t.Fatalf("legacy file source hash = %q", file.SourceHash)
+		}
+	}
+}
+
+func TestSelectorBatchAndUpsertRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	database, err := Open("", 8, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := NewChunkRecord("/project/main.go", "main.go", "hash", 30, "go", "func Run() {}", 10, 12, 0, 30, "function", "Run", "/project")
+	chunk.Selector = &SymbolSelector{File: "main.go", StartLine: 3, FQN: "p.Run", Kind: "function"}
+	if _, err := database.InsertChunkBatch([]ChunkRecord{chunk}, [][]float32{make([]float32, 8)}); err != nil {
+		t.Fatal(err)
+	}
+	chunk.RelativePath, chunk.FilePath = "other.go", "/project/other.go"
+	chunk.Selector = &SymbolSelector{File: "other.go", StartLine: 4, FQN: "p.Other.Run", Kind: "method"}
+	if _, _, err := database.UpsertChunk(chunk, make([]float32, 8)); err != nil {
+		t.Fatal(err)
+	}
+	chunk.Selector.StartLine = 5
+	if _, _, err := database.UpsertChunk(chunk, make([]float32, 8)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open("", 8, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, test := range []struct {
+		file string
+		line int
+	}{{"main.go", 3}, {"other.go", 5}} {
+		chunks, err := database.GetChunksByFile(test.file)
+		if err != nil || len(chunks) != 1 || chunks[0].Selector == nil || chunks[0].Selector.StartLine != test.line {
+			t.Fatalf("%s selector: %+v err=%v", test.file, chunks, err)
 		}
 	}
 }

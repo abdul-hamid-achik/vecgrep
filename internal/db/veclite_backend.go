@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -32,8 +33,17 @@ type SearchExplanation struct {
 	Mode         SearchMode
 }
 
+// SymbolSelector preserves codemap's source identity independently of a chunk's preview range.
+type SymbolSelector struct {
+	File      string `json:"file"`
+	StartLine int    `json:"start_line"`
+	FQN       string `json:"fqn"`
+	Kind      string `json:"kind"`
+}
+
 // ChunkRecord represents a chunk with all its metadata from veclite.
 type ChunkRecord struct {
+	Selector     *SymbolSelector
 	ID           uint64
 	FilePath     string
 	RelativePath string
@@ -514,6 +524,7 @@ func (b *VecLiteBackend) InsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		"chunk_index": chunk.ChunkIndex,
 		"chunk_type":  chunk.ChunkType,
 		"symbol_name": chunk.SymbolName,
+		"selector":    encodeSelector(chunk.Selector),
 
 		// Unique key for upsert
 		"chunk_key": chunkKey,
@@ -579,6 +590,7 @@ func (b *VecLiteBackend) InsertChunkBatch(chunks []ChunkRecord, embeddings [][]f
 			"chunk_index":   chunk.ChunkIndex,
 			"chunk_type":    chunk.ChunkType,
 			"symbol_name":   chunk.SymbolName,
+			"selector":      encodeSelector(chunk.Selector),
 			"chunk_key":     chunkKey,
 			"project_root":  chunk.ProjectRoot,
 			"indexed_at":    chunk.IndexedAt.Format(time.RFC3339),
@@ -631,6 +643,7 @@ func (b *VecLiteBackend) UpsertChunk(chunk ChunkRecord, embedding []float32) (ui
 		"chunk_index":   chunk.ChunkIndex,
 		"chunk_type":    chunk.ChunkType,
 		"symbol_name":   chunk.SymbolName,
+		"selector":      encodeSelector(chunk.Selector),
 		"chunk_key":     chunkKey,
 		"project_root":  chunk.ProjectRoot,
 		"indexed_at":    chunk.IndexedAt.Format(time.RFC3339),
@@ -1380,6 +1393,7 @@ func recordToChunk(r *veclite.Record) ChunkRecord {
 		ChunkIndex:   getIntPayload(r.Payload, "chunk_index"),
 		ChunkType:    getStringPayload(r.Payload, "chunk_type"),
 		SymbolName:   getStringPayload(r.Payload, "symbol_name"),
+		Selector:     decodeSelector(getStringPayload(r.Payload, "selector")),
 		ProjectRoot:  getStringPayload(r.Payload, "project_root"),
 		IndexedAt:    indexedAt,
 		Vector:       r.Vector,
@@ -1835,3 +1849,22 @@ func (b *VecLiteBackend) resultsToSearchResults(results []veclite.Result) []Sear
 
 // Ensure VecLiteBackend implements VectorBackend.
 var _ VectorBackend = (*VecLiteBackend)(nil)
+
+func encodeSelector(selector *SymbolSelector) string {
+	if selector == nil {
+		return ""
+	}
+	encoded, _ := json.Marshal(selector)
+	return string(encoded)
+}
+
+func decodeSelector(value string) *SymbolSelector {
+	if value == "" {
+		return nil
+	}
+	var selector SymbolSelector
+	if json.Unmarshal([]byte(value), &selector) != nil || selector.File == "" || selector.StartLine <= 0 {
+		return nil
+	}
+	return &selector
+}

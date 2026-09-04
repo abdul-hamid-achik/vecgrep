@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/config"
+	"github.com/abdul-hamid-achik/vecgrep/internal/db"
 	"github.com/abdul-hamid-achik/vecgrep/internal/index"
 )
 
@@ -37,7 +38,7 @@ const (
 	structuralEmbeddingMaxBytes     = 4096
 	structuralEmbeddingDocBytes     = 1024
 	structuralEmbeddingSignatureMax = 512
-	structuralChunkProfileVersion   = "vecgrep-codemap-structural-consumer-v3-lossless"
+	structuralChunkProfileVersion   = "vecgrep-codemap-structural-consumer-v4-selectors"
 )
 
 // StructuralChunksMode controls whether indexing consumes codemap's stable
@@ -632,6 +633,7 @@ func boundedStructuralChunks(source string, startLine int, record *structuralSym
 			chunk.SymbolName = structuralSymbolName(*record)
 			chunk.EmbeddingContent = structuralEmbeddingTextForSource(*record, piece)
 			chunk.Origin = index.ChunkOriginStructural
+			chunk.Selector = &db.SymbolSelector{File: record.File, StartLine: record.StartLine, FQN: record.FQN, Kind: record.Kind}
 		}
 		chunks = append(chunks, chunk)
 		startLine += newlines

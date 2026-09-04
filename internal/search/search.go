@@ -29,17 +29,19 @@ type SearchExplanation = db.SearchExplanation
 
 // Result represents a search result with full metadata.
 type Result struct {
-	ChunkID      int64   `json:"chunk_id"`
-	FileID       int64   `json:"file_id"`
-	FilePath     string  `json:"file_path"`
-	RelativePath string  `json:"relative_path"`
-	Content      string  `json:"content"`
-	StartLine    int     `json:"start_line"`
-	EndLine      int     `json:"end_line"`
-	ChunkType    string  `json:"chunk_type"`
-	SymbolName   string  `json:"symbol_name,omitempty"`
-	Language     string  `json:"language"`
-	Distance     float32 `json:"distance"`
+	ChunkID      int64              `json:"chunk_id"`
+	FileID       int64              `json:"file_id"`
+	FilePath     string             `json:"file_path"`
+	RelativePath string             `json:"relative_path"`
+	Content      string             `json:"content"`
+	StartLine    int                `json:"start_line"`
+	EndLine      int                `json:"end_line"`
+	ChunkType    string             `json:"chunk_type"`
+	SymbolName   string             `json:"symbol_name,omitempty"`
+	Selector     *db.SymbolSelector `json:"selector,omitempty"`
+	SourceHash   string             `json:"source_hash,omitempty"`
+	Language     string             `json:"language"`
+	Distance     float32            `json:"distance"`
 	// Score is a 0-1 relevance value, higher is better. Semantic mode: cosine
 	// similarity. Hybrid mode: calibrated weighted fusion of cosine similarity
 	// and normalized BM25 (see db.VecLiteBackend.HybridSearch). Keyword mode:
@@ -495,6 +497,8 @@ func searchResultToResult(sr db.SearchResult) Result {
 		result.EndLine = sr.Chunk.EndLine
 		result.ChunkType = sr.Chunk.ChunkType
 		result.SymbolName = sr.Chunk.SymbolName
+		result.Selector = sr.Chunk.Selector
+		result.SourceHash = sr.Chunk.SourceHash
 		result.Language = sr.Chunk.Language
 	}
 
@@ -636,6 +640,8 @@ func (s *Searcher) SearchByFile(ctx context.Context, filePath string) ([]Result,
 			EndLine:      c.EndLine,
 			ChunkType:    c.ChunkType,
 			SymbolName:   c.SymbolName,
+			Selector:     c.Selector,
+			SourceHash:   c.SourceHash,
 			Language:     c.Language,
 			Score:        1.0, // Direct file match
 			Distance:     0.0,

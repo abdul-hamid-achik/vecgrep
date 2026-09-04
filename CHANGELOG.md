@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.27.0] - 2026-09-04
+
+### Changed
+- Preserve structural declaration selectors and raw source hashes through ingestion, storage and search results.
+- Update Veclite to v0.24.1 for cheaper unchanged read refreshes and explicit WAL reload errors.
+
+
 ## [2.26.1] - 2026-09-02
 
 ### Changed

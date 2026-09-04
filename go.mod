@@ -17,7 +17,7 @@ require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/lipgloss/v2 v2.0.4
-	github.com/abdul-hamid-achik/veclite v0.24.0
+	github.com/abdul-hamid-achik/veclite v0.24.1
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
