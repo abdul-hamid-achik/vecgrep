@@ -14,6 +14,27 @@ Highest priority wins:
 6. Global defaults in `~/.vecgrep/config.yaml`
 7. Built-in defaults
 
+## Use OpenAI by default
+
+Set the complete embedding profile in your global defaults:
+
+```bash
+vecgrep config set --global embedding.provider openai
+vecgrep config set --global embedding.model text-embedding-3-small
+vecgrep config set --global embedding.dimensions 1536
+```
+
+Provide `OPENAI_API_KEY` or `VECGREP_OPENAI_API_KEY` in the process running
+vecgrep, including your MCP launcher. OpenAI receives the source chunks sent
+for embedding. Initialization uses the resolved provider and model in both
+CLI and MCP.
+
+Project settings still take priority. If `vecgrep config show` reports Nomic,
+check the listed project config files for `embedding.provider`, `model`, and
+`dimensions` overrides. Remove those overrides to inherit your global profile.
+After changing an existing index's embedding profile, run `vecgrep index --full`
+to rebuild it. Vectors from different models cannot share an embedding space.
+
 ## Default Storage
 
 New projects use global storage by default:

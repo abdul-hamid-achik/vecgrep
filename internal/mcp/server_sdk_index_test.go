@@ -397,3 +397,36 @@ func assertProjectChunkCount(t *testing.T, session *mcpSession, file string, wan
 		t.Fatalf("chunk count for %s = %d, want %d", file, len(chunks), want)
 	}
 }
+
+func TestLocalInitInheritsGlobalEmbeddingProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, key := range []string{"VECGREP_EMBEDDING_PROVIDER", "VECGREP_EMBEDDING_MODEL", "VECGREP_EMBEDDING_DIMENSIONS"} {
+		t.Setenv(key, "")
+	}
+	configPath, err := config.GetGlobalConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SetConfigValuesInFile(configPath, map[string]any{
+		"defaults.embedding.provider": "openai", "defaults.embedding.model": "text-embedding-3-small", "defaults.embedding.dimensions": 1536,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := &SDKServer{}
+	result, _, err := s.handleInitLocal(context.Background(), t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("init failed: %+v", result)
+	}
+	defer func() { _ = s.session.close() }()
+	resolved, err := config.LoadResolved(s.projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := resolved.Config.Embedding
+	if e.Provider != "openai" || e.Model != "text-embedding-3-small" || e.Dimensions != 1536 {
+		t.Fatalf("wrong profile: %s/%s/%d", e.Provider, e.Model, e.Dimensions)
+	}
+}

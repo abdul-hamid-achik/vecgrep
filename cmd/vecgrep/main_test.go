@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"github.com/abdul-hamid-achik/vecgrep/internal/app"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,5 +112,65 @@ func TestRunBenchmarkEmbeddingsRejectsUnknownPresetBeforeProviderUse(t *testing.
 	err := runBenchmarkEmbeddings(cmd, nil)
 	if err == nil || !strings.Contains(err.Error(), `unknown embedding preset "unknown"`) {
 		t.Fatalf("runBenchmarkEmbeddings() error = %v, want unknown preset", err)
+	}
+}
+
+// Initialization must not replace the user's cloud profile with built-in Nomic.
+func TestInitInheritsGlobalEmbeddingProfile(t *testing.T) {
+	for _, mode := range []string{"cli-global", "cli-local", "app-global", "app-local"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			for _, key := range []string{"VECGREP_EMBEDDING_PROVIDER", "VECGREP_EMBEDDING_MODEL", "VECGREP_EMBEDDING_DIMENSIONS"} {
+				t.Setenv(key, "")
+			}
+			configPath, err := config.GetGlobalConfigPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := config.SetConfigValuesInFile(configPath, map[string]any{
+				"defaults.embedding.provider": "openai", "defaults.embedding.model": "text-embedding-3-small", "defaults.embedding.dimensions": 1536,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			output := captureStdout(t, func() {
+				var result *app.InitProjectResult
+				switch mode {
+				case "cli-global":
+					err = runInitGlobal(root, false)
+				case "cli-local":
+					err = runInitLocal(root, false)
+				case "app-global":
+					result, err = app.InitGlobalProject(context.Background(), root, false)
+				case "app-local":
+					result, err = app.InitLocalProject(context.Background(), root, false)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result != nil && (result.Provider != "openai" || result.Model != "text-embedding-3-small") {
+					t.Fatalf("wrong initialized profile: %+v", result)
+				}
+			})
+			if strings.HasPrefix(mode, "cli-") && !strings.Contains(output, "openai (text-embedding-3-small)") {
+				t.Fatalf("wrong init output: %s", output)
+			}
+			resolved, err := config.LoadResolved(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := resolved.Config.Embedding
+			if e.Provider != "openai" || e.Model != "text-embedding-3-small" || e.Dimensions != 1536 {
+				t.Fatalf("wrong resolved profile: %s/%s/%d", e.Provider, e.Model, e.Dimensions)
+			}
+			// Opening the index with the resolved dimensions must succeed too.
+			session, err := app.OpenSession(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := session.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

@@ -85,7 +85,11 @@ func InitLocalProject(ctx context.Context, startDir string, force bool) (*InitPr
 		return nil, err
 	}
 
-	cfg := config.DefaultConfig()
+	resolved, err := config.LoadResolved(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve init config: %w", err)
+	}
+	cfg := resolved.Config
 	cfg.DataDir = result.DataDir
 	cfg.DBPath = result.DBPath
 	if err := cfg.EnsureDataDir(); err != nil {
@@ -120,7 +124,11 @@ func resolveProjectDir(startDir string) (string, error) {
 }
 
 func initProjectDatabase(projectRoot, projectName, dataDir string, global bool) (*InitProjectResult, error) {
-	cfg := config.DefaultConfig()
+	resolved, err := config.LoadResolved(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve init config: %w", err)
+	}
+	cfg := resolved.Config
 	cfg.DataDir = dataDir
 	cfg.DBPath = filepath.Join(dataDir, config.DefaultDBFile)
 

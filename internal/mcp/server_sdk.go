@@ -688,8 +688,15 @@ func (s *SDKServer) handleInitLocal(ctx context.Context, path string, force bool
 		return s.activateProject(ctx, path)
 	}
 
-	// Create configuration
-	cfg := config.DefaultConfig()
+	// Use the same provider profile as indexing, including global defaults.
+	resolved, err := config.LoadResolved(path)
+	if err != nil {
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to resolve config: %v", err)}},
+			IsError: true,
+		}, nil, nil
+	}
+	cfg := resolved.Config
 	cfg.DataDir = dataDir
 	cfg.DBPath = filepath.Join(dataDir, config.DefaultDBFile)
 

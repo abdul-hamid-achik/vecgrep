@@ -630,7 +630,11 @@ func runInitGlobal(cwd string, force bool) error {
 	}
 
 	// Create config
-	cfg := config.DefaultConfig()
+	resolved, err := config.LoadResolved(cwd)
+	if err != nil {
+		return fmt.Errorf("resolve init config: %w", err)
+	}
+	cfg := resolved.Config
 	cfg.DataDir = dataDir
 	cfg.DBPath = filepath.Join(dataDir, config.DefaultDBFile)
 
@@ -674,7 +678,11 @@ func runInitLocal(cwd string, force bool) error {
 	}
 
 	// Create configuration
-	cfg := config.DefaultConfig()
+	resolved, err := config.LoadResolved(cwd)
+	if err != nil {
+		return fmt.Errorf("resolve init config: %w", err)
+	}
+	cfg := resolved.Config
 	cfg.DataDir = dataDir
 	cfg.DBPath = filepath.Join(dataDir, config.DefaultDBFile)
 
@@ -1884,8 +1892,11 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 		// No project found - show defaults
 		fmt.Println("No project found. Showing default configuration:")
 		fmt.Println()
-		cfg := config.DefaultConfig()
-		fmt.Print(config.ShowResolvedConfig(cfg, nil))
+		resolved, resolveErr := config.LoadResolved("")
+		if resolveErr != nil {
+			return resolveErr
+		}
+		fmt.Print(config.ShowResolvedConfig(resolved.Config, nil))
 		return nil
 	}
 
