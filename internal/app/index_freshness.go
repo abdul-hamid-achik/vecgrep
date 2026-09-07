@@ -36,13 +36,21 @@ const (
 )
 
 // StructuralManifestFreshness is codemap's source-free working-tree drift
-// summary. The fields mirror codemap.structural-manifest.v1.
+// summary. The fields mirror codemap.structural-manifest.v1. The file lists
+// are the additive delta behind the counters (omitted by older codemap builds
+// and by a fresh manifest): they name WHAT drifted, so agents and consumers
+// can scope repair instead of assuming the whole export moved.
 type StructuralManifestFreshness struct {
 	Checked bool `json:"checked"`
 	Fresh   bool `json:"fresh"`
 	Changed int  `json:"changed"`
 	New     int  `json:"new"`
 	Deleted int  `json:"deleted"`
+	// ChangedFiles, NewFiles, and DeletedFiles carry the project-relative
+	// drifted paths (additive in v1, empty when fresh or absent).
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	NewFiles     []string `json:"new_files,omitempty"`
+	DeletedFiles []string `json:"deleted_files,omitempty"`
 }
 
 // StructuralManifestReport is the validated identity preflight for the

@@ -284,8 +284,8 @@ func TestHotspotsParsesWrapperObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(hs) != 3 {
-		t.Fatalf("expected 3 hotspots, got %d: %+v", len(hs), hs)
+	if len(hs) != 4 {
+		t.Fatalf("expected 4 hotspots, got %d: %+v", len(hs), hs)
 	}
 	if hs[0].Symbol != "Hub" || hs[0].InDegree != 100 || hs[0].SharedName != 0 {
 		t.Errorf("hotspot[0] = %+v, want Hub/100/0", hs[0])
@@ -483,5 +483,74 @@ func TestStatusNotIndexed(t *testing.T) {
 	}
 	if st.Indexed() {
 		t.Fatalf("unregistered project must not be Indexed(), got %+v", st)
+	}
+}
+
+// TestHotspotsParsesQueryFrequency asserts the additive parse of codemap's
+// learning-from-use field: hotspots entries may carry query_frequency (0/absent
+// on older builds) without breaking the wrapper-object parse.
+func TestHotspotsParsesQueryFrequency(t *testing.T) {
+	fixture := fixturePath(t, "hotspots_c.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	hs, err := c.Hotspots(context.Background(), t.TempDir(), 200)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hs) != 4 {
+		t.Fatalf("expected 4 hotspots, got %d", len(hs))
+	}
+	bySymbol := map[string]HotspotResult{}
+	for _, h := range hs {
+		bySymbol[h.Symbol] = h
+	}
+	if got := bySymbol["Minor"].QueryFrequency; got != 40 {
+		t.Errorf("Minor query_frequency = %d, want 40", got)
+	}
+	if got := bySymbol["Hub"].QueryFrequency; got != 5 {
+		t.Errorf("Hub query_frequency = %d, want 5", got)
+	}
+}
+
+// TestRerankBreaksHubTiesByQueryFrequency pins the learning-from-use term:
+// Hub and Peer carry the same (uninflated) in_degree, but Peer is what agents
+// actually keep querying, so its structural component — hub-dominant with a
+// minority usage share — must outrank Hub's.
+func TestRerankBreaksHubTiesByQueryFrequency(t *testing.T) {
+	fixture := fixturePath(t, "hotspots_c.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	input := []CodemapRerankResult{
+		{Result: codemapSearchResult{SymbolName: "Hub", RelativePath: "b.go", Score: 0.5}},
+		{Result: codemapSearchResult{SymbolName: "Peer", RelativePath: "d.go", Score: 0.5}},
+	}
+	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8)
+	if out[0].Result.SymbolName != "Peer" {
+		t.Fatalf("queried Peer must outrank equally-hubbed Hub; got %s first (Peer=%f Hub=%f)",
+			out[0].Result.SymbolName, out[0].StructuralScore, out[1].StructuralScore)
+	}
+	if out[0].StructuralScore <= out[1].StructuralScore {
+		t.Fatalf("Peer structural score %f must exceed Hub %f",
+			out[0].StructuralScore, out[1].StructuralScore)
+	}
+}
+
+// TestRerankUsageCollapseWithoutFrequencyData pins the honesty rule: when the
+// hotspot feed carries NO query_frequency at all (older codemap, or a project
+// that has never been searched), the usage share collapses to zero and the hub
+// score keeps its full weight — an empty usage signal never dilutes structure.
+func TestRerankUsageCollapseWithoutFrequencyData(t *testing.T) {
+	fixture := fixturePath(t, "hotspots_no_freq_c.json")
+	bin := fakeCodemap(t, fixture, 0)
+	c := &CodemapClient{bin: bin}
+
+	input := []CodemapRerankResult{
+		{Result: codemapSearchResult{SymbolName: "Hub", RelativePath: "a.go", Score: 0.5}},
+	}
+	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8)
+	if len(out) != 1 || out[0].StructuralScore != 1.0 {
+		t.Fatalf("pure-hub structural score = %+v, want exactly 1.0", out)
 	}
 }

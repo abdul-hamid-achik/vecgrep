@@ -297,3 +297,43 @@ func manifestSource(t *testing.T, report StructuralManifestReport, runErr error)
 		},
 	}
 }
+
+// TestIndexFreshnessSurfacesManifestDelta asserts the additive parse of
+// codemap's freshness delta: the manifest may name the drifted files
+// (changed_files/new_files/deleted_files) and vecgrep must carry them through
+// its freshness report so consumers can scope repair without re-reading the
+// whole export.
+func TestIndexFreshnessSurfacesManifestDelta(t *testing.T) {
+	session, service := createTestSession(t)
+	projectKey, fingerprint := seedFreshnessIndex(t, session, true)
+
+	manifest := validStructuralManifest(projectKey, fingerprint)
+	manifest.Freshness = StructuralManifestFreshness{
+		Checked:      true,
+		Fresh:        false,
+		Changed:      2,
+		New:          1,
+		Deleted:      1,
+		ChangedFiles: []string{"internal/app/search.go", "internal/db/db.go"},
+		NewFiles:     []string{"internal/app/newer.go"},
+		DeletedFiles: []string{"internal/legacy/old.go"},
+	}
+	service.manifestSource = manifestSource(t, manifest, nil)
+	report, _, err := service.IndexFreshness(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.State != IndexFreshnessStale {
+		t.Fatalf("state = %s, want stale", report.State)
+	}
+	fresh := report.StructuralManifest.Freshness
+	if len(fresh.ChangedFiles) != 2 || fresh.ChangedFiles[0] != "internal/app/search.go" {
+		t.Errorf("changed_files = %v", fresh.ChangedFiles)
+	}
+	if len(fresh.NewFiles) != 1 || fresh.NewFiles[0] != "internal/app/newer.go" {
+		t.Errorf("new_files = %v", fresh.NewFiles)
+	}
+	if len(fresh.DeletedFiles) != 1 || fresh.DeletedFiles[0] != "internal/legacy/old.go" {
+		t.Errorf("deleted_files = %v", fresh.DeletedFiles)
+	}
+}

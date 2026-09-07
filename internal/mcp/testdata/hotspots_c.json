@@ -1,8 +1,9 @@
 {
   "project": "demo",
   "hotspots": [
-    { "symbol": "Hub", "in_degree": 100, "shared_name": 0 },
-    { "symbol": "Inflated", "in_degree": 100, "shared_name": 10 },
-    { "symbol": "Minor", "in_degree": 5, "shared_name": 0 }
+    { "symbol": "Hub", "in_degree": 100, "shared_name": 0, "query_frequency": 5 },
+    { "symbol": "Inflated", "in_degree": 100, "shared_name": 10, "query_frequency": 5 },
+    { "symbol": "Minor", "in_degree": 5, "shared_name": 0, "query_frequency": 40 },
+    { "symbol": "Peer", "in_degree": 100, "shared_name": 0, "query_frequency": 40 }
   ]
 }

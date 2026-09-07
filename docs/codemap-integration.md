@@ -11,7 +11,7 @@ capability, never a hard dependency.
 | Resolved call/type/test/import graph, blast radius, hotspots | **codemap** | re-derive it from import-regex when codemap answers |
 | Durable, reindex-proof annotations pinned to a symbol/path | **codemap** | keep its own; vecgrep writes *into* it (`source='vecgrep'`) |
 | Semantic recall over chunks (hybrid vector + BM25) | **vecgrep** | stand up a second siloed embed index |
-| Cross-project agent memory (importance/tags/TTL) | **vecgrep** | store memories; codemap only recalls |
+| Cross-project agent memory (importance/tags/TTL, near-duplicate refusal, related-memory links, usage lift) | **vecgrep** | store memories; codemap only recalls |
 
 When using both tools, configure Codemap's `semantic.backend: vecgrep` to avoid
 embedding the same repository twice. Codemap keeps its structural graph and
@@ -22,9 +22,17 @@ merging stores or joining on bare symbol names (which collide).
 ## What's wired
 
 - **Structural reranking** — `vecgrep_search` results are re-ranked by blending
-  semantic similarity with codemap's fan-in hub score
-  (`final = semantic × (1−w) + hub × w`, default weight 0.15). Reranked results
-  show their structural score so agents can see *why* a hit ranked where it did.
+  semantic similarity with codemap's structural component
+  (`final = semantic × (1−w) + structural × w`, default weight 0.15). The
+  structural component is hub-dominant: codemap's fan-in `in_degree`
+  (down-weighted when `shared_name > 1` marks a name-inflated hub) plus a
+  minority learning-from-use term — codemap's `query_frequency` (how many past
+  searches surfaced the symbol) takes a fixed 0.2 share of the structural
+  component, so an equally-hubbed symbol agents actually query outranks one
+  they ignore. When the hotspot feed carries no usage data at all (older
+  codemap builds, or a never-queried project) the share collapses to zero and
+  the hub score keeps its full weight. Reranked results show their structural
+  score so agents can see *why* a hit ranked where it did.
 - **Structural indexing** — when codemap is enabled, `vecgrep index` consumes the
   paginated `codemap export-symbols --json` v1 contract. Each symbol's available
   docstring, signature, and source are embedded together, while search previews
@@ -32,7 +40,9 @@ merging stores or joining on bare symbol names (which collide).
   and uncovered imports, globals, template/style blocks, and other gaps remain
   searchable as generic chunks. Stale, omitted, or invalid files fall back
   individually to vecgrep's built-in chunker; fresh files in the same export
-  stay structural.
+  stay structural. Re-embedding is already selective: the incremental hash
+  filter skips files whose content is unchanged, so a drifted working tree
+  costs embeddings only for what actually moved.
 - **Search-hit annotation** — top search hits are resolved to their enclosing
   symbol via `codemap symbol-at` and annotated, so vecgrep relevance signals
   survive codemap reindexes.
@@ -56,11 +66,18 @@ merging stores or joining on bare symbol names (which collide).
   and, when structural chunks were consumed, call only
   `codemap structural-manifest --json`. The manifest is timeout/output bounded
   and must match schema v1, export schema v1, project key, fingerprint,
-  completeness, and freshness. Status never downloads `export-symbols`; legacy,
-  corrupt, unavailable, or mismatched evidence reports `freshness.state:
-  unknown` until a successful `vecgrep index --full` rebuilds the proof. A durable
-  project tombstone also forces `unknown` if a multi-collection delete/reset is
-  interrupted, so retained hashes can never certify missing or ghost chunks.
+  completeness, and freshness. When the working tree has drifted, the
+  manifest's additive per-file delta (`changed_files`/`new_files`/
+  `deleted_files`) is surfaced verbatim inside the freshness report, so an
+  agent sees *which* files moved instead of only how many. Status never
+  downloads `export-symbols`; legacy, corrupt, unavailable, or mismatched
+  evidence reports `freshness.state: unknown` until a successful
+  `vecgrep index --full` rebuilds the proof. A durable project tombstone also
+  forces `unknown` if a multi-collection delete/reset is interrupted, so
+  retained hashes can never certify missing or ghost chunks. (Ingesting only
+  the delta — instead of re-paginating the full export — awaits an export v2
+  with a file filter: filtering the v1 pages would break their contiguous
+  `ordinal` determinism contract.)
 - **Vector-free health checks** — `vecgrep status --lightweight` reads the
   project-isolated `health/<project-key>/manifest.v1.json` sidecar and scans
   source hashes without opening VecLite. It is the preferred polling path for

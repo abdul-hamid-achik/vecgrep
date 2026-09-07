@@ -59,15 +59,18 @@ func (c *CodemapClient) Available() bool {
 // HotspotResult holds a single hotspot entry from `codemap hotspots --json`.
 //
 // codemap emits a HotspotRef per symbol with `in_degree` (the fan-in / call
-// reference count that drives the hub score) and `shared_name` (how many
+// reference count that drives the hub score), `shared_name` (how many
 // distinct definitions share this bare name; >1 means the in-degree is
-// inflated by name-based collisions and should be down-weighted). The older
-// vecgrep struct parsed a `refs` field codemap never emits, so the hub score
-// was uniformly 0 and the structural rerank blend was inert.
+// inflated by name-based collisions and should be down-weighted), and the
+// additive `query_frequency` (how many past searches surfaced the symbol;
+// absent/0 on older codemap builds). The older vecgrep struct parsed a `refs`
+// field codemap never emits, so the hub score was uniformly 0 and the
+// structural rerank blend was inert.
 type HotspotResult struct {
-	Symbol     string `json:"symbol"`
-	InDegree   int    `json:"in_degree"`
-	SharedName int    `json:"shared_name"`
+	Symbol         string `json:"symbol"`
+	InDegree       int    `json:"in_degree"`
+	SharedName     int    `json:"shared_name"`
+	QueryFrequency int64  `json:"query_frequency"`
 }
 
 // hotspotsReport mirrors codemap's HotspotsReport: the `hotspots --json`
@@ -568,25 +571,39 @@ type codemapSearchResult struct {
 	Score        float32
 }
 
+// queryFrequencyShare is the slice of codemap's structural component given to
+// the usage signal: structural = hub*(1-share) + usage*share. The hub fan-in
+// stays dominant; a constant (not config) until the signal proves itself.
+const queryFrequencyShare = 0.2
+
 // Rerank re-orders search results by blending the original vecgrep score with
 // codemap's structural importance. The structural signal is the symbol's
 // fan-in hub score (codemap's in_degree), down-weighted when shared_name>1 so
-// a name-inflated hub does not outrank a genuinely-referenced one. We
-// deliberately do NOT fold in blast-radius size: codemap's hotspots feed
-// doesn't carry it, so parsing it here would be dead code implying a signal
-// that isn't wired. structuralWeight is 0..1; 0 means no re-ranking.
+// a name-inflated hub does not outrank a genuinely-referenced one, plus a
+// minority learning-from-use term: codemap's query_frequency (how often past
+// searches actually surfaced the symbol) takes a queryFrequencyShare slice of
+// the structural component, so an equally-hubbed symbol that agents keep
+// querying outranks one they ignore. When no usage data exists at all (older
+// codemap builds report no query_frequency, or nothing has ever been queried)
+// the share collapses to zero and the hub score keeps its full weight — an
+// empty usage signal never dilutes structure. We deliberately do NOT fold in
+// blast-radius size: codemap's hotspots feed doesn't carry it, so parsing it
+// here would be dead code implying a signal that isn't wired.
+// structuralWeight is 0..1; 0 means no re-ranking.
 func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results []CodemapRerankResult, structuralWeight float32) []CodemapRerankResult {
 	if !c.Available() || structuralWeight <= 0 || len(results) == 0 {
 		return results
 	}
 
-	// Fetch hotspot scores (fan-in). codemap's in_degree is the hub signal;
-	// shared_name>1 marks a name-inflated hub (a name-based index counted
-	// every same-named definition together), so we discount those so a
-	// genuinely-referenced hub outranks a collision artifact.
+	// Fetch hotspot scores (fan-in + usage). codemap's in_degree is the hub
+	// signal; shared_name>1 marks a name-inflated hub (a name-based index
+	// counted every same-named definition together), so we discount those so
+	// a genuinely-referenced hub outranks a collision artifact.
 	hotspots, _ := c.Hotspots(ctx, projectPath, 200)
 	hubScore := make(map[string]float32, len(hotspots))
+	freqScore := make(map[string]float32, len(hotspots))
 	var maxHub float32 = 1
+	var maxFreq float32
 	for _, h := range hotspots {
 		score := float32(h.InDegree)
 		// Down-weight inflated hubs: divide the fan-in by the number of
@@ -598,9 +615,22 @@ func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results 
 		if score > hubScore[h.Symbol] {
 			hubScore[h.Symbol] = score
 		}
+		if float32(h.QueryFrequency) > freqScore[h.Symbol] {
+			freqScore[h.Symbol] = float32(h.QueryFrequency)
+		}
 		if hubScore[h.Symbol] > maxHub {
 			maxHub = hubScore[h.Symbol]
 		}
+		if freqScore[h.Symbol] > maxFreq {
+			maxFreq = freqScore[h.Symbol]
+		}
+	}
+
+	// No usage data anywhere (old codemap, or a never-queried project): the
+	// usage share collapses so the hub signal keeps its full weight.
+	usageShare := float32(0)
+	if maxFreq > 0 {
+		usageShare = queryFrequencyShare
 	}
 
 	semWeight := 1.0 - structuralWeight
@@ -613,10 +643,18 @@ func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results 
 		}
 		// Normalize hub score to 0..1
 		normalizedHub := hs / maxHub
-		results[i].StructuralScore = normalizedHub
+
+		// Normalize the usage signal to 0..1 over the same hotspot feed.
+		var normalizedFreq float32
+		if sym := results[i].Result.SymbolName; sym != "" && maxFreq > 0 {
+			normalizedFreq = freqScore[sym] / maxFreq
+		}
+
+		// Structural component: hub-dominant, usage as the minority term.
+		results[i].StructuralScore = normalizedHub*(1-usageShare) + normalizedFreq*usageShare
 
 		// Blend: final = sem * (1-w) + struct * w
-		results[i].FinalScore = results[i].Result.Score*semWeight + normalizedHub*structuralWeight
+		results[i].FinalScore = results[i].Result.Score*semWeight + results[i].StructuralScore*structuralWeight
 	}
 
 	// Sort by final score descending
