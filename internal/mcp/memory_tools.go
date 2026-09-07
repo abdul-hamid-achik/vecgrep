@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,12 +28,25 @@ func (s *SDKServer) handleMemoryRemember(ctx context.Context, req *sdkmcp.CallTo
 	}
 
 	opts := memory.RememberOptions{
-		Importance: input.Importance,
-		Tags:       input.Tags,
-		TTLHours:   input.TTLHours,
+		Importance:     input.Importance,
+		Tags:           input.Tags,
+		TTLHours:       input.TTLHours,
+		AllowDuplicate: input.AllowDuplicate,
 	}
 
-	id, err := s.memoryStore.Remember(ctx, input.Content, opts)
+	res, err := s.memoryStore.Remember(ctx, input.Content, opts)
+	var dup *memory.DuplicateError
+	if errors.As(err, &dup) {
+		var sb strings.Builder
+		sb.WriteString("Not stored: this content is a near-duplicate of an existing memory.\n\n")
+		fmt.Fprintf(&sb, "- Existing memory ID: %d (similarity %.2f)\n", dup.ExistingID, dup.Score)
+		fmt.Fprintf(&sb, "- Existing content: %s\n", truncateString(dup.Content, 200))
+		sb.WriteString("\nIf this is an update to that memory, forget the old one first (memory_forget with its ID), then store the new version. To keep both anyway, re-store with allow_duplicate=true.")
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: sb.String()}},
+			IsError: true,
+		}, nil, nil
+	}
 	if err != nil {
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: fmt.Sprintf("Failed to store memory: %v", err)}},
@@ -41,7 +55,7 @@ func (s *SDKServer) handleMemoryRemember(ctx context.Context, req *sdkmcp.CallTo
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Memory stored successfully (ID: %d)\n\n", id)
+	fmt.Fprintf(&sb, "Memory stored successfully (ID: %d)\n\n", res.ID)
 	fmt.Fprintf(&sb, "- Content: %s\n", truncateString(input.Content, 100))
 	fmt.Fprintf(&sb, "- Importance: %.2f\n", opts.Importance)
 	if len(opts.Tags) > 0 {
@@ -49,6 +63,12 @@ func (s *SDKServer) handleMemoryRemember(ctx context.Context, req *sdkmcp.CallTo
 	}
 	if opts.TTLHours > 0 {
 		fmt.Fprintf(&sb, "- Expires in: %d hours\n", opts.TTLHours)
+	}
+	if len(res.Related) > 0 {
+		sb.WriteString("\nLinked to related memories (bidirectional):\n")
+		for _, r := range res.Related {
+			fmt.Fprintf(&sb, "- #%d: %s\n", r.ID, truncateString(r.Content, 100))
+		}
 	}
 
 	return &sdkmcp.CallToolResult{
@@ -104,6 +124,23 @@ func (s *SDKServer) handleMemoryRecall(ctx context.Context, req *sdkmcp.CallTool
 		fmt.Fprintf(&sb, "**Created:** %s\n", m.CreatedAt.Format(time.RFC3339))
 		if m.ExpiresAt != nil {
 			fmt.Fprintf(&sb, "**Expires:** %s\n", m.ExpiresAt.Format(time.RFC3339))
+		}
+		if m.AccessCount > 0 {
+			fmt.Fprintf(&sb, "**Accesses:** %d", m.AccessCount)
+			if m.LastAccessedAt != nil {
+				fmt.Fprintf(&sb, " (last %s)", m.LastAccessedAt.Format(time.RFC3339))
+			}
+			sb.WriteString("\n")
+		}
+		if len(m.Related) > 0 {
+			fmt.Fprintf(&sb, "**Related:** ")
+			for j, r := range m.Related {
+				if j > 0 {
+					sb.WriteString("; ")
+				}
+				fmt.Fprintf(&sb, "#%d %s", r.ID, truncateString(r.Content, 80))
+			}
+			sb.WriteString("\n")
 		}
 		sb.WriteString("\n```\n")
 		sb.WriteString(m.Content)
@@ -200,6 +237,7 @@ func (s *SDKServer) handleMemoryStats(ctx context.Context, req *sdkmcp.CallToolR
 	sb.WriteString("Memory Store Statistics:\n\n")
 	fmt.Fprintf(&sb, "- Total memories: %d\n", stats.TotalMemories)
 	fmt.Fprintf(&sb, "- Total unique tags: %d\n", stats.TotalTags)
+	fmt.Fprintf(&sb, "- Linked memories: %d\n", stats.LinkedMemories)
 	fmt.Fprintf(&sb, "- Expired memories: %d\n", stats.ExpiredMemories)
 
 	if stats.OldestMemory != nil {

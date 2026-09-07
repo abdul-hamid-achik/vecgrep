@@ -523,6 +523,7 @@ func init() {
 	memoryRememberCmd.Flags().String("tags", "", "comma-separated tags (e.g. codemap,<project_key>)")
 	memoryRememberCmd.Flags().Float64("importance", 0.5, "importance (0-1)")
 	memoryRememberCmd.Flags().Int("ttl-hours", 0, "expiration in hours (0 = never)")
+	memoryRememberCmd.Flags().Bool("allow-duplicate", false, "store even when the content is a near-duplicate of an existing memory")
 
 	// Add memory subcommands
 	memoryCmd.AddCommand(memoryRecallCmd)

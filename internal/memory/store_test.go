@@ -2,7 +2,9 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,14 +81,14 @@ func TestRememberAndRecall(t *testing.T) {
 	ctx := context.Background()
 
 	// Remember a note
-	id, err := store.Remember(ctx, "This is a test memory about Go programming", RememberOptions{
+	res, err := store.Remember(ctx, "This is a test memory about Go programming", RememberOptions{
 		Importance: 0.8,
 		Tags:       []string{"programming", "go"},
 	})
 	if err != nil {
 		t.Fatalf("Remember failed: %v", err)
 	}
-	if id == 0 {
+	if res.ID == 0 {
 		t.Error("Expected non-zero ID")
 	}
 
@@ -124,13 +126,13 @@ func TestForgetByID(t *testing.T) {
 	ctx := context.Background()
 
 	// Remember a note
-	id, err := store.Remember(ctx, "Memory to delete", RememberOptions{})
+	res, err := store.Remember(ctx, "Memory to delete", RememberOptions{})
 	if err != nil {
 		t.Fatalf("Remember failed: %v", err)
 	}
 
 	// Forget by ID
-	deleted, err := store.Forget(ctx, ForgetOptions{ID: id})
+	deleted, err := store.Forget(ctx, ForgetOptions{ID: res.ID})
 	if err != nil {
 		t.Fatalf("Forget failed: %v", err)
 	}
@@ -214,11 +216,11 @@ func TestExpiredMemories(t *testing.T) {
 
 	// Remember a note with very short TTL (we can't actually test expiration without time manipulation,
 	// but we can test that TTL is stored correctly)
-	id, err := store.Remember(ctx, "Expiring memory", RememberOptions{TTLHours: 1})
+	res, err := store.Remember(ctx, "Expiring memory", RememberOptions{TTLHours: 1})
 	if err != nil {
 		t.Fatalf("Remember failed: %v", err)
 	}
-	if id == 0 {
+	if res.ID == 0 {
 		t.Error("Expected non-zero ID")
 	}
 
@@ -448,11 +450,11 @@ func TestSpecialCharactersInContent(t *testing.T) {
 
 	// Test content with special characters
 	specialContent := "Memory with special chars: <>&\"'`\n\t\r\x00unicode: \u0041\u0042\u0043"
-	id, err := store.Remember(ctx, specialContent, RememberOptions{})
+	res, err := store.Remember(ctx, specialContent, RememberOptions{})
 	if err != nil {
 		t.Fatalf("Remember with special chars failed: %v", err)
 	}
-	if id == 0 {
+	if res.ID == 0 {
 		t.Error("Expected non-zero ID")
 	}
 
@@ -491,11 +493,11 @@ func TestLargeContent(t *testing.T) {
 
 	// Create large content (10KB)
 	largeContent := strings.Repeat("This is a test sentence for large content. ", 250)
-	id, err := store.Remember(ctx, largeContent, RememberOptions{})
+	res, err := store.Remember(ctx, largeContent, RememberOptions{})
 	if err != nil {
 		t.Fatalf("Remember large content failed: %v", err)
 	}
-	if id == 0 {
+	if res.ID == 0 {
 		t.Error("Expected non-zero ID")
 	}
 
@@ -690,11 +692,11 @@ func TestEmptyTagsList(t *testing.T) {
 	ctx := context.Background()
 
 	// Store with empty tags
-	id, err := store.Remember(ctx, "No tags memory", RememberOptions{Tags: []string{}})
+	res, err := store.Remember(ctx, "No tags memory", RememberOptions{Tags: []string{}})
 	if err != nil {
 		t.Fatalf("Remember failed: %v", err)
 	}
-	if id == 0 {
+	if res.ID == 0 {
 		t.Error("Expected non-zero ID")
 	}
 
@@ -705,5 +707,301 @@ func TestEmptyTagsList(t *testing.T) {
 	}
 	if len(memories[0].Tags) != 0 {
 		t.Errorf("Expected 0 tags, got %d", len(memories[0].Tags))
+	}
+}
+
+// testVec builds a 768-dim L2-normalized vector from leading values, so tests
+// can reason about exact cosine similarities between hand-picked texts.
+func testVec(values ...float32) []float32 {
+	v := make([]float32, 768)
+	copy(v, values)
+	var norm float64
+	for _, x := range v {
+		norm += float64(x) * float64(x)
+	}
+	norm = math.Sqrt(norm)
+	for i := range v {
+		v[i] = float32(float64(v[i]) / norm)
+	}
+	return v
+}
+
+// setupTestStoreWithProvider builds a store with an explicit config and
+// embedding provider, for tests that exercise dedup, links, or usage ranking.
+func setupTestStoreWithProvider(t *testing.T, cfg *Config, provider *mockProvider) (*MemoryStore, func()) {
+	t.Helper()
+
+	tmpDir, err := os.MkdirTemp("", "memory-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	if cfg.DBPath == "" {
+		cfg.DBPath = filepath.Join(tmpDir, "test.veclite")
+	} else {
+		cfg.DBPath = filepath.Join(tmpDir, filepath.Base(cfg.DBPath))
+	}
+
+	store, err := NewMemoryStore(cfg, provider)
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		t.Fatalf("Failed to create store: %v", err)
+	}
+
+	cleanup := func() {
+		_ = store.Close()
+		_ = os.RemoveAll(tmpDir)
+	}
+	return store, cleanup
+}
+
+func TestRememberRejectsDuplicate(t *testing.T) {
+	cfg := &Config{
+		EmbeddingDimensions: 768,
+		DedupThreshold:      DefaultDedupThreshold,
+	}
+	// Parallel vectors make every text a perfect cosine match, the
+	// worst case for duplicate detection.
+	provider := &mockProvider{}
+	store, cleanup := setupTestStoreWithProvider(t, cfg, provider)
+	defer cleanup()
+	ctx := context.Background()
+
+	first, err := store.Remember(ctx, "the deploy port is 8080", RememberOptions{})
+	if err != nil {
+		t.Fatalf("first Remember failed: %v", err)
+	}
+
+	_, err = store.Remember(ctx, "the deploy port is 8080", RememberOptions{})
+	var dup *DuplicateError
+	if !errors.As(err, &dup) {
+		t.Fatalf("expected DuplicateError, got %v", err)
+	}
+	if dup.ExistingID != first.ID {
+		t.Errorf("DuplicateError points at %d, want %d", dup.ExistingID, first.ID)
+	}
+	if dup.Score < DefaultDedupThreshold {
+		t.Errorf("duplicate score %f below threshold %f", dup.Score, DefaultDedupThreshold)
+	}
+
+	// The refusal must not have stored anything.
+	stats, _ := store.Stats(ctx)
+	if stats.TotalMemories != 1 {
+		t.Errorf("expected 1 memory after refused duplicate, got %d", stats.TotalMemories)
+	}
+
+	// allow_duplicate overrides the refusal.
+	if _, err := store.Remember(ctx, "the deploy port is 8080", RememberOptions{AllowDuplicate: true}); err != nil {
+		t.Fatalf("allow_duplicate Remember failed: %v", err)
+	}
+	stats, _ = store.Stats(ctx)
+	if stats.TotalMemories != 2 {
+		t.Errorf("expected 2 memories after forced duplicate, got %d", stats.TotalMemories)
+	}
+}
+
+func TestRememberLinksRelatedBidirectional(t *testing.T) {
+	cfg := &Config{
+		EmbeddingDimensions: 768,
+		DedupThreshold:      DefaultDedupThreshold,
+		RelatedThreshold:    0.6,
+	}
+	// A·B = 1/sqrt(2) ≈ 0.71 (linked); C is orthogonal to both (not linked).
+	vecs := map[string][]float32{
+		"alpha one": testVec(1),
+		"alpha two": testVec(1, 1),
+		"gamma":     testVec(0, 0, 1),
+		"alpha":     testVec(1),
+		"two":       testVec(1, 1),
+	}
+	store, cleanup := setupTestStoreWithProvider(t, cfg, &mockProvider{embedFunc: func(text string) []float32 {
+		return vecs[text]
+	}})
+	defer cleanup()
+	ctx := context.Background()
+
+	resA, err := store.Remember(ctx, "alpha one", RememberOptions{})
+	if err != nil {
+		t.Fatalf("Remember alpha one failed: %v", err)
+	}
+	resB, err := store.Remember(ctx, "alpha two", RememberOptions{})
+	if err != nil {
+		t.Fatalf("Remember alpha two failed: %v", err)
+	}
+	if len(resB.Related) != 1 || resB.Related[0].ID != resA.ID {
+		t.Errorf("expected link to alpha one (%d), got %+v", resA.ID, resB.Related)
+	}
+	resC, err := store.Remember(ctx, "gamma", RememberOptions{})
+	if err != nil {
+		t.Fatalf("Remember gamma failed: %v", err)
+	}
+	if len(resC.Related) != 0 {
+		t.Errorf("orthogonal memory should have no links, got %+v", resC.Related)
+	}
+
+	// Backlinks: the earlier memory must know about the later one too.
+	recA, err := store.coll.Get(resA.ID)
+	if err != nil {
+		t.Fatalf("Get alpha one failed: %v", err)
+	}
+	links := parseRelatedIDs(recA.Payload)
+	if len(links) != 1 || links[0] != resB.ID {
+		t.Errorf("alpha one backlinks = %v, want [%d]", links, resB.ID)
+	}
+
+	// Recall resolves link previews in both directions.
+	for _, q := range []string{"alpha", "two"} {
+		memories, err := store.Recall(ctx, q, RecallOptions{Limit: 5})
+		if err != nil {
+			t.Fatalf("Recall %q failed: %v", q, err)
+		}
+		found := false
+		for _, m := range memories {
+			if m.ID != resA.ID && m.ID != resB.ID {
+				continue
+			}
+			if len(m.Related) == 1 && m.Related[0].ID != m.ID {
+				found = true
+				if m.Related[0].Content == "" {
+					t.Errorf("related preview for %d has no content", m.ID)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("recall %q: neither memory resolved its related link", q)
+		}
+	}
+}
+
+func TestRecallUsageLift(t *testing.T) {
+	// Two memories, "alpha" always the more similar to the query; "beta"
+	// starts far below but carries a large access count. A strong UsageBoost
+	// must promote beta above alpha; a disabled boost must not.
+	run := func(usageBoost float64) []string {
+		t.Helper()
+		cfg := &Config{
+			EmbeddingDimensions: 768,
+			UsageBoost:          usageBoost,
+		}
+		vecs := map[string][]float32{
+			"alpha note": testVec(1),
+			"beta note":  testVec(1, 1), // cosine 0.71 to the alpha query
+			"alpha":      testVec(1),
+		}
+		store, cleanup := setupTestStoreWithProvider(t, cfg, &mockProvider{embedFunc: func(text string) []float32 {
+			return vecs[text]
+		}})
+		defer cleanup()
+		ctx := context.Background()
+
+		if _, err := store.Remember(ctx, "alpha note", RememberOptions{}); err != nil {
+			t.Fatalf("Remember alpha failed: %v", err)
+		}
+		beta, err := store.Remember(ctx, "beta note", RememberOptions{})
+		if err != nil {
+			t.Fatalf("Remember beta failed: %v", err)
+		}
+
+		// Seed a heavy access history on beta directly in its payload.
+		rec, err := store.coll.Get(beta.ID)
+		if err != nil {
+			t.Fatalf("Get beta failed: %v", err)
+		}
+		payload := clonePayload(rec.Payload)
+		payload[payloadAccessCount] = int64(50)
+		payload[payloadLastAccessedAt] = time.Now().Unix()
+		if err := store.coll.Update(beta.ID, payload); err != nil {
+			t.Fatalf("seed beta access failed: %v", err)
+		}
+
+		memories, err := store.Recall(ctx, "alpha", RecallOptions{Limit: 2})
+		if err != nil {
+			t.Fatalf("Recall failed: %v", err)
+		}
+		var order []string
+		for _, m := range memories {
+			order = append(order, m.Content)
+		}
+		return order
+	}
+
+	// No usage boost: similarity order wins (alpha first, beta second).
+	if got := run(0); len(got) != 2 || got[0] != "alpha note" {
+		t.Errorf("with UsageBoost=0 expected alpha first, got %v", got)
+	}
+	// With the boost, the heavily used memory overtakes the more similar one.
+	if got := run(1.0); len(got) != 2 || got[0] != "beta note" {
+		t.Errorf("with UsageBoost=1.0 expected heavily-used beta first, got %v", got)
+	}
+}
+
+func TestRecallTracksAccess(t *testing.T) {
+	cfg := &Config{
+		EmbeddingDimensions: 768,
+		UsageBoost:          DefaultUsageBoost,
+	}
+	store, cleanup := setupTestStoreWithProvider(t, cfg, &mockProvider{})
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := store.Remember(ctx, "tracked memory", RememberOptions{}); err != nil {
+		t.Fatalf("Remember failed: %v", err)
+	}
+
+	for want := int64(1); want <= 2; want++ {
+		memories, err := store.Recall(ctx, "tracked", RecallOptions{Limit: 1})
+		if err != nil {
+			t.Fatalf("Recall failed: %v", err)
+		}
+		if len(memories) != 1 {
+			t.Fatalf("expected 1 memory, got %d", len(memories))
+		}
+		m := memories[0]
+		if m.AccessCount != want {
+			t.Errorf("recall %d: in-memory access count = %d, want %d", want, m.AccessCount, want)
+		}
+		if m.LastAccessedAt == nil {
+			t.Errorf("recall %d: last accessed not set", want)
+		}
+		// The count must live in the payload (WAL-durable), not just memory.
+		rec, err := store.coll.Get(m.ID)
+		if err != nil {
+			t.Fatalf("Get failed: %v", err)
+		}
+		if got := getInt64Payload(rec.Payload, payloadAccessCount); got != want {
+			t.Errorf("recall %d: payload access_count = %d, want %d", want, got, want)
+		}
+		if got := getInt64Payload(rec.Payload, payloadLastAccessedAt); got == 0 {
+			t.Errorf("recall %d: payload last_accessed_at not set", want)
+		}
+	}
+}
+
+func TestStatsLinkedMemories(t *testing.T) {
+	cfg := &Config{
+		EmbeddingDimensions: 768,
+		DedupThreshold:      DefaultDedupThreshold,
+		RelatedThreshold:    0.6,
+	}
+	vecs := map[string][]float32{
+		"alpha one": testVec(1),
+		"alpha two": testVec(1, 1),
+		"gamma":     testVec(0, 0, 1),
+	}
+	store, cleanup := setupTestStoreWithProvider(t, cfg, &mockProvider{embedFunc: func(text string) []float32 {
+		return vecs[text]
+	}})
+	defer cleanup()
+	ctx := context.Background()
+
+	_, _ = store.Remember(ctx, "alpha one", RememberOptions{})
+	_, _ = store.Remember(ctx, "alpha two", RememberOptions{})
+	_, _ = store.Remember(ctx, "gamma", RememberOptions{})
+
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats failed: %v", err)
+	}
+	if stats.LinkedMemories != 2 {
+		t.Errorf("LinkedMemories = %d, want 2", stats.LinkedMemories)
 	}
 }

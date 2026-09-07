@@ -449,12 +449,12 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 	// Memory tools (global, not project-specific)
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "memory_remember",
-		Description: "Store a memory with optional importance (0-1, default 0.5), tags, and TTL. Memories are global (~/.vecai/memory), persist across sessions and projects, and are embedded with a local Ollama nomic-embed-text at VECAI_OLLAMA_URL (default http://localhost:11434) regardless of the project's embedding provider — fails with a provider error if that Ollama is not running.",
+		Description: "Store a memory with optional importance (0-1, default 0.5), tags, and TTL. Memories are global (~/.vecai/memory), persist across sessions and projects, and are embedded with a local Ollama nomic-embed-text at VECAI_OLLAMA_URL (default http://localhost:11434) regardless of the project's embedding provider — fails with a provider error if that Ollama is not running. Near-duplicates of existing memories are refused with a pointer to the existing memory (override with allow_duplicate); semantically related memories are automatically linked in both directions.",
 	}, s.handleMemoryRemember)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "memory_recall",
-		Description: "Search memories semantically (same local Ollama embedder as memory_remember). Ranking is query similarity weighted by importance and a 30-day half-life recency decay; filter by tags or min_importance. Fails with a provider error if local Ollama is not running.",
+		Description: "Search memories semantically (same local Ollama embedder as memory_remember). Ranking is query similarity weighted by importance, a 30-day half-life recency decay, and a usage lift — memories you actually recall often and recently rank higher; filter by tags or min_importance. Each result lists its related memories (auto-linked by similarity), so one recall can surface connected knowledge. Fails with a provider error if local Ollama is not running.",
 	}, s.handleMemoryRecall)
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
@@ -464,7 +464,7 @@ func NewSDKServer(cfg SDKServerConfig) *SDKServer {
 
 	sdkmcp.AddTool(s.server, &sdkmcp.Tool{
 		Name:        "memory_stats",
-		Description: "Get memory store statistics: total count, tag counts, and age distribution. Read-only and does not need the embedder, so it works while local Ollama is down.",
+		Description: "Get memory store statistics: total count, linked (related-graph) count, tag counts, and age distribution. Read-only and does not need the embedder, so it works while local Ollama is down.",
 	}, s.handleMemoryStats)
 
 	return s

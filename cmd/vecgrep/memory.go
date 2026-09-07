@@ -210,6 +210,7 @@ func runMemoryRemember(cmd *cobra.Command, args []string) error {
 	tagsCSV, _ := cmd.Flags().GetString("tags")
 	importance, _ := cmd.Flags().GetFloat64("importance")
 	ttlHours, _ := cmd.Flags().GetInt("ttl-hours")
+	allowDuplicate, _ := cmd.Flags().GetBool("allow-duplicate")
 
 	store, err := openMemoryStore(cmd.Context())
 	if err != nil {
@@ -217,14 +218,22 @@ func runMemoryRemember(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = store.Close() }()
 
-	id, err := store.Remember(cmd.Context(), content, memory.RememberOptions{
-		Importance: importance,
-		Tags:       parseTags(tagsCSV),
-		TTLHours:   ttlHours,
+	res, err := store.Remember(cmd.Context(), content, memory.RememberOptions{
+		Importance:     importance,
+		Tags:           parseTags(tagsCSV),
+		TTLHours:       ttlHours,
+		AllowDuplicate: allowDuplicate,
 	})
+	var dup *memory.DuplicateError
+	if errors.As(err, &dup) {
+		return fmt.Errorf("not stored: %w (forget memory %d first, or pass --allow-duplicate to keep both)", dup, dup.ExistingID)
+	}
 	if err != nil {
 		return fmt.Errorf("remember failed: %w", err)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Memory stored (id %d)\n", id)
+	fmt.Fprintf(cmd.OutOrStdout(), "Memory stored (id %d)\n", res.ID)
+	for _, r := range res.Related {
+		fmt.Fprintf(cmd.OutOrStdout(), "linked to #%d: %s\n", r.ID, r.Content)
+	}
 	return nil
 }

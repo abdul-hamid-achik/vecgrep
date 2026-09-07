@@ -514,12 +514,14 @@ vecgrep implements the [Model Context Protocol](https://modelcontextprotocol.io/
 
 Global agent memory for storing and recalling notes across sessions. Memory is stored at `~/.vecai/memory/memory.veclite`.
 
+Memory behaves like compiled knowledge, not a search cache: near-duplicate content is refused (with a pointer to the existing memory), semantically related memories are auto-linked in both directions, and memories you actually recall often and recently get a usage lift in ranking.
+
 | Tool | Description |
 |------|-------------|
-| `memory_remember` | Store a memory with optional importance, tags, and TTL |
-| `memory_recall` | Search memories semantically with filtering options |
+| `memory_remember` | Store a memory with optional importance, tags, and TTL; refuses near-duplicates and auto-links related memories |
+| `memory_recall` | Search memories semantically with filtering options; results include related memories and access counts |
 | `memory_forget` | Delete memories by ID, tags, or age |
-| `memory_stats` | Get memory store statistics |
+| `memory_stats` | Get memory store statistics (including linked-memory count) |
 
 **memory_remember Parameters:**
 
@@ -529,6 +531,7 @@ Global agent memory for storing and recalling notes across sessions. Memory is s
 | `importance` | float | No | Priority level 0.0-1.0 (default: 0.5) |
 | `tags` | array | No | Categorization tags for filtering |
 | `ttl_hours` | int | No | Expiration in hours (0 = never expires) |
+| `allow_duplicate` | bool | No | Store even when the content is a near-duplicate (default: false) |
 
 **memory_recall Parameters:**
 

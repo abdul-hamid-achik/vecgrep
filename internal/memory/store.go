@@ -3,15 +3,42 @@ package memory
 import (
 	"context"
 	"fmt"
+	"math"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/abdul-hamid-achik/vecgrep/internal/embed"
 	"github.com/abdul-hamid-achik/veclite"
 )
 
+// Payload keys for the compiled-memory layer: usage tracking and the
+// bidirectional related-links graph, both stored in the veclite payload so
+// they survive crash recovery through the write-ahead log.
+const (
+	payloadAccessCount    = "access_count"
+	payloadLastAccessedAt = "last_accessed_at"
+	payloadRelated        = "related"
+)
+
+// maxRelatedLinks bounds how many semantic links a single memory carries, so
+// hub memories cannot grow payloads without limit. When a memory's link list
+// is full, new backlinks to it are skipped (never evicted).
+const maxRelatedLinks = 8
+
+// relatedPreviewLimit bounds how many related memories Recall resolves with
+// content, so a 10-hit recall cannot return 80 embedded previews.
+const relatedPreviewLimit = 3
+
+// accessSaturation is the access count at which the usage lift reaches half
+// of its cap: lift = UsageBoost * count/(count+accessSaturation) * recency.
+const accessSaturation = 5.0
+
 // MemoryStore manages persistent memory using veclite.
 type MemoryStore struct {
+	mu       sync.Mutex
 	db       *veclite.DB
 	coll     *veclite.Collection
 	provider embed.Provider
@@ -20,13 +47,50 @@ type MemoryStore struct {
 
 // Memory represents a stored memory with metadata.
 type Memory struct {
-	ID         uint64
+	ID             uint64
+	Content        string
+	Importance     float64
+	Tags           []string
+	CreatedAt      time.Time
+	ExpiresAt      *time.Time
+	AccessCount    int64
+	LastAccessedAt *time.Time
+	Related        []RelatedMemory
+	Score          float32 // Search relevance score
+
+	// relatedIDs holds the raw payload link IDs, populated by recordToMemory
+	// for the related-preview resolution in Recall.
+	relatedIDs []uint64
+}
+
+// RelatedMemory is a resolved semantic link to another memory, surfaced by
+// Recall so connections between memories are visible without a second query.
+type RelatedMemory struct {
+	ID      uint64
+	Content string
+}
+
+// RememberResult reports what Remember stored.
+type RememberResult struct {
+	// ID is the new memory's ID.
+	ID uint64
+	// Related lists the existing memories the new one was linked to. Links
+	// are bidirectional: the other side also records the new ID.
+	Related []RelatedMemory
+}
+
+// DuplicateError is returned by Remember when new content is a near-duplicate
+// of an existing memory and AllowDuplicate was not set. ExistingID points at
+// the memory that already holds the information.
+type DuplicateError struct {
+	ExistingID uint64
+	Score      float64
 	Content    string
-	Importance float64
-	Tags       []string
-	CreatedAt  time.Time
-	ExpiresAt  *time.Time
-	Score      float32 // Search relevance score
+}
+
+func (e *DuplicateError) Error() string {
+	return fmt.Sprintf("near-duplicate of memory %d (similarity %.2f): %s",
+		e.ExistingID, e.Score, truncateRunes(e.Content, 80))
 }
 
 // RememberOptions contains options for storing a memory.
@@ -34,6 +98,10 @@ type RememberOptions struct {
 	Importance float64  // 0.0-1.0, default 0.5
 	Tags       []string // Categorization tags
 	TTLHours   int      // Expiration in hours (0=never)
+	// AllowDuplicate stores the content even when it is a near-duplicate of
+	// an existing memory (similarity >= DedupThreshold). The duplicate is
+	// stored but not linked to its twin.
+	AllowDuplicate bool
 }
 
 // RecallOptions contains options for searching memories.
@@ -54,6 +122,7 @@ type ForgetOptions struct {
 type Stats struct {
 	TotalMemories   int64
 	TotalTags       int
+	LinkedMemories  int64 // memories carrying at least one related-link
 	OldestMemory    *time.Time
 	NewestMemory    *time.Time
 	ExpiredMemories int64
@@ -103,9 +172,12 @@ func NewMemoryStore(cfg *Config, provider embed.Provider) (*MemoryStore, error) 
 }
 
 // Remember stores a memory with optional metadata.
-func (s *MemoryStore) Remember(ctx context.Context, content string, opts RememberOptions) (uint64, error) {
+func (s *MemoryStore) Remember(ctx context.Context, content string, opts RememberOptions) (RememberResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if content == "" {
-		return 0, fmt.Errorf("content cannot be empty")
+		return RememberResult{}, fmt.Errorf("content cannot be empty")
 	}
 
 	// Set default importance
@@ -119,7 +191,39 @@ func (s *MemoryStore) Remember(ctx context.Context, content string, opts Remembe
 	// Generate embedding
 	embedding, err := s.provider.Embed(ctx, content)
 	if err != nil {
-		return 0, fmt.Errorf("failed to generate embedding: %w", err)
+		return RememberResult{}, fmt.Errorf("failed to generate embedding: %w", err)
+	}
+
+	// Duplicate detection and related-link discovery in one similarity probe
+	// against the whole store — no filters, because both semantics are global
+	// by definition. Expired memories are neither duplicate nor link targets.
+	var relatedIDs []uint64
+	if s.config.DedupThreshold > 0 || s.config.RelatedThreshold > 0 {
+		hits, err := s.coll.Search(embedding, veclite.TopK(maxRelatedLinks+1))
+		if err != nil {
+			return RememberResult{}, fmt.Errorf("similarity probe failed: %w", err)
+		}
+		for _, h := range hits {
+			if memoryExpired(h.Record.Payload) {
+				continue
+			}
+			sim := float64(h.Score)
+			if s.config.DedupThreshold > 0 && sim >= s.config.DedupThreshold {
+				if !opts.AllowDuplicate {
+					return RememberResult{}, &DuplicateError{
+						ExistingID: h.Record.ID,
+						Score:      sim,
+						Content:    getStringPayload(h.Record.Payload, "content"),
+					}
+				}
+				// Forced duplicate: stored, but not linked to its twin —
+				// linking identical content is noise, not connection.
+				continue
+			}
+			if s.config.RelatedThreshold > 0 && sim >= s.config.RelatedThreshold && len(relatedIDs) < maxRelatedLinks {
+				relatedIDs = append(relatedIDs, h.Record.ID)
+			}
+		}
 	}
 
 	// Calculate expiration time
@@ -130,11 +234,14 @@ func (s *MemoryStore) Remember(ctx context.Context, content string, opts Remembe
 
 	// Build payload
 	payload := map[string]any{
-		"content":    content,
-		"importance": opts.Importance,
-		"tags":       strings.Join(opts.Tags, ","),
-		"created_at": time.Now().Unix(),
-		"expires_at": expiresAt,
+		"content":             content,
+		"importance":          opts.Importance,
+		"tags":                strings.Join(opts.Tags, ","),
+		"created_at":          time.Now().Unix(),
+		"expires_at":          expiresAt,
+		payloadAccessCount:    int64(0),
+		payloadLastAccessedAt: int64(0),
+		payloadRelated:        joinIDs(relatedIDs),
 	}
 
 	// Insert into veclite. Importance is set both in the payload (for GTE
@@ -143,14 +250,58 @@ func (s *MemoryStore) Remember(ctx context.Context, content string, opts Remembe
 	id, err := s.coll.InsertWithOptions(embedding, payload,
 		veclite.WithImportance(float32(opts.Importance)))
 	if err != nil {
-		return 0, fmt.Errorf("failed to store memory: %w", err)
+		return RememberResult{}, fmt.Errorf("failed to store memory: %w", err)
 	}
 
-	return id, nil
+	// Backlinks make the connection graph bidirectional. Best-effort: a
+	// failed backlink leaves a one-way link, never breaks the store.
+	for _, otherID := range relatedIDs {
+		s.linkMemories(otherID, id)
+	}
+
+	// Resolve link previews for the immediate response.
+	var related []RelatedMemory
+	for _, otherID := range relatedIDs {
+		rec, err := s.coll.Get(otherID)
+		if err != nil || memoryExpired(rec.Payload) {
+			continue
+		}
+		related = append(related, RelatedMemory{
+			ID:      rec.ID,
+			Content: getStringPayload(rec.Payload, "content"),
+		})
+	}
+
+	return RememberResult{ID: id, Related: related}, nil
+}
+
+// linkMemories records a backlink from otherID to id in otherID's payload.
+// Callers hold s.mu. A full link list or a missing record silently skips the
+// backlink.
+func (s *MemoryStore) linkMemories(otherID, id uint64) {
+	rec, err := s.coll.Get(otherID)
+	if err != nil {
+		return
+	}
+	links := parseRelatedIDs(rec.Payload)
+	for _, l := range links {
+		if l == id {
+			return // already linked
+		}
+	}
+	if len(links) >= maxRelatedLinks {
+		return
+	}
+	payload := clonePayload(rec.Payload)
+	payload[payloadRelated] = joinIDs(append(links, id))
+	_ = s.coll.Update(otherID, payload)
 }
 
 // Recall searches memories semantically.
 func (s *MemoryStore) Recall(ctx context.Context, query string, opts RecallOptions) ([]Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if query == "" {
 		return nil, fmt.Errorf("query cannot be empty")
 	}
@@ -216,18 +367,11 @@ func (s *MemoryStore) Recall(ctx context.Context, query string, opts RecallOptio
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
-	// Convert results, filtering expired memories
-	now := time.Now().Unix()
-	memories := make([]Memory, 0, opts.Limit)
-
+	// Convert results, filtering expired memories and re-verifying tag scope.
+	memories := make([]Memory, 0, len(results))
 	for _, r := range results {
-		if len(memories) >= opts.Limit {
-			break
-		}
-
-		// Check expiration
 		expiresAt := getInt64Payload(r.Record.Payload, "expires_at")
-		if expiresAt > 0 && expiresAt < now {
+		if expiresAt > 0 && expiresAt < time.Now().Unix() {
 			continue // Skip expired memory
 		}
 
@@ -244,7 +388,97 @@ func (s *MemoryStore) Recall(ctx context.Context, query string, opts RecallOptio
 		memories = append(memories, memory)
 	}
 
+	// Learning from use: memories the agent actually recalls get a
+	// usage-lifted rank, so working knowledge resurface before stale knowledge
+	// with similar similarity. Ranking modifier only — never excludes.
+	if s.config.UsageBoost > 0 {
+		sort.SliceStable(memories, func(i, j int) bool {
+			li, lj := usageLift(s.config, &memories[i]), usageLift(s.config, &memories[j])
+			si, sj := memories[i].Score*(1+float32(li)), memories[j].Score*(1+float32(lj))
+			if si != sj {
+				return si > sj
+			}
+			return memories[i].ID < memories[j].ID
+		})
+	}
+
+	if len(memories) > opts.Limit {
+		memories = memories[:opts.Limit]
+	}
+
+	// Persist this recall's usage so future recalls learn from it. Payload-side
+	// (not veclite's in-memory access tracking) so counts survive crash
+	// recovery through the WAL.
+	if s.config.UsageBoost > 0 {
+		now := time.Now().Unix()
+		for i := range memories {
+			s.recordAccess(&memories[i], now)
+		}
+	}
+
+	// Resolve related-memory previews so connections surface without a second
+	// query. The payload keeps up to maxRelatedLinks links; content previews
+	// are capped at relatedPreviewLimit.
+	for i := range memories {
+		for _, linkID := range memories[i].relatedIDs {
+			if len(memories[i].Related) >= relatedPreviewLimit {
+				break
+			}
+			rec, err := s.coll.Get(linkID)
+			if err != nil || memoryExpired(rec.Payload) {
+				continue
+			}
+			memories[i].Related = append(memories[i].Related, RelatedMemory{
+				ID:      rec.ID,
+				Content: getStringPayload(rec.Payload, "content"),
+			})
+		}
+	}
+
 	return memories, nil
+}
+
+// usageLift is the learning-from-use ranking term: saturating in access count
+// (half effect at accessSaturation accesses) and fading with the recency of
+// the last access at the same half-life as creation decay, so a heavily used
+// memory that goes stale loses its lift. Returns a fractional multiplier cap
+// in [0, UsageBoost].
+func usageLift(cfg *Config, m *Memory) float64 {
+	if cfg.UsageBoost <= 0 {
+		return 0
+	}
+	count := float64(m.AccessCount)
+	if count == 0 {
+		return 0
+	}
+	sat := count / (count + accessSaturation)
+	recency := 1.0
+	if m.LastAccessedAt != nil && cfg.DecayHalfLifeHours > 0 {
+		hours := time.Since(*m.LastAccessedAt).Hours()
+		recency = math.Pow(2, -hours/float64(cfg.DecayHalfLifeHours))
+	}
+	return cfg.UsageBoost * sat * recency
+}
+
+// recordAccess increments a recalled memory's access count and last-access
+// timestamp in its payload. Callers hold s.mu. veclite's Update replaces the
+// whole payload, so the record's current payload is cloned and rewritten.
+// Best-effort: a lost access count only costs a little ranking signal.
+func (s *MemoryStore) recordAccess(m *Memory, now int64) {
+	rec, err := s.coll.Get(m.ID)
+	if err != nil {
+		return
+	}
+	payload := clonePayload(rec.Payload)
+	count := getInt64Payload(payload, payloadAccessCount) + 1
+	payload[payloadAccessCount] = count
+	payload[payloadLastAccessedAt] = now
+	if err := s.coll.Update(m.ID, payload); err != nil {
+		return
+	}
+	m.AccessCount = count
+	ts := time.Unix(now, 0)
+	m.LastAccessedAt = &ts
 }
 
 // hasAllTags reports whether tags contains every tag in want (exact match,
@@ -361,6 +595,11 @@ func (s *MemoryStore) Stats(ctx context.Context) (*Stats, error) {
 
 		stats.TotalMemories++
 
+		// Track the connection graph's footprint
+		if len(parseRelatedIDs(r.Payload)) > 0 {
+			stats.LinkedMemories++
+		}
+
 		// Track creation times
 		createdAt := getInt64Payload(r.Payload, "created_at")
 		if createdAt > 0 {
@@ -441,15 +680,82 @@ func recordToMemory(r *veclite.Record, score float32) Memory {
 		}
 	}
 
-	return Memory{
-		ID:         r.ID,
-		Content:    getStringPayload(r.Payload, "content"),
-		Importance: getFloat64Payload(r.Payload, "importance"),
-		Tags:       tags,
-		CreatedAt:  createdAt,
-		ExpiresAt:  expiresAt,
-		Score:      score,
+	var lastAccessedAt *time.Time
+	if ts := getInt64Payload(r.Payload, payloadLastAccessedAt); ts > 0 {
+		t := time.Unix(ts, 0)
+		lastAccessedAt = &t
 	}
+
+	return Memory{
+		ID:             r.ID,
+		Content:        getStringPayload(r.Payload, "content"),
+		Importance:     getFloat64Payload(r.Payload, "importance"),
+		Tags:           tags,
+		CreatedAt:      createdAt,
+		ExpiresAt:      expiresAt,
+		AccessCount:    getInt64Payload(r.Payload, payloadAccessCount),
+		LastAccessedAt: lastAccessedAt,
+		Related:        nil, // resolved in Recall after the top-limit trim
+		relatedIDs:     parseRelatedIDs(r.Payload),
+		Score:          score,
+	}
+}
+
+// memoryExpired reports whether a payload's TTL has lapsed. Memories that no
+// longer exist semantically (expired) are neither duplicate nor link targets.
+func memoryExpired(payload map[string]any) bool {
+	expiresAt := getInt64Payload(payload, "expires_at")
+	return expiresAt > 0 && expiresAt < time.Now().Unix()
+}
+
+// parseRelatedIDs extracts the related-link ID list from a payload.
+func parseRelatedIDs(payload map[string]any) []uint64 {
+	s := getStringPayload(payload, payloadRelated)
+	if s == "" {
+		return nil
+	}
+	var ids []uint64
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if id, err := strconv.ParseUint(part, 10, 64); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// joinIDs serializes a related-link ID list for payload storage.
+func joinIDs(ids []uint64) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.FormatUint(id, 10)
+	}
+	return strings.Join(parts, ",")
+}
+
+// clonePayload copies a record payload before mutating it for Update, which
+// replaces the map wholesale.
+func clonePayload(payload map[string]any) map[string]any {
+	clone := make(map[string]any, len(payload))
+	for k, v := range payload {
+		clone[k] = v
+	}
+	return clone
+}
+
+// truncateRunes truncates s to maxRunes runes, adding "..." when truncated.
+func truncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }
 
 func getStringPayload(payload map[string]any, key string) string {
