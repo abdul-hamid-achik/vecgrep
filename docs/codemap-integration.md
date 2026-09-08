@@ -27,9 +27,11 @@ merging stores or joining on bare symbol names (which collide).
   structural component is hub-dominant: codemap's fan-in `in_degree`
   (down-weighted when `shared_name > 1` marks a name-inflated hub) plus a
   minority learning-from-use term — codemap's `query_frequency` (how many past
-  searches surfaced the symbol) takes a fixed 0.2 share of the structural
-  component, so an equally-hubbed symbol agents actually query outranks one
-  they ignore. When the hotspot feed carries no usage data at all (older
+  searches surfaced the symbol) takes a configurable share of the structural
+  component (`codemap.query_frequency_weight`, env
+  `VECGREP_CODEMAP_QUERY_FREQUENCY_WEIGHT`, default 0.2), so an equally-hubbed
+  symbol agents actually query outranks one they ignore. When the hotspot feed
+  carries no usage data at all (older
   codemap builds, or a never-queried project) the share collapses to zero and
   the hub score keeps its full weight. Reranked results show their structural
   score so agents can see *why* a hit ranked where it did.
@@ -74,10 +76,21 @@ merging stores or joining on bare symbol names (which collide).
   evidence reports `freshness.state: unknown` until a successful
   `vecgrep index --full` rebuilds the proof. A durable project tombstone also
   forces `unknown` if a multi-collection delete/reset is interrupted, so
-  retained hashes can never certify missing or ghost chunks. (Ingesting only
-  the delta — instead of re-paginating the full export — awaits an export v2
-  with a file filter: filtering the v1 pages would break their contiguous
-  `ordinal` determinism contract.)
+  retained hashes can never certify missing or ghost chunks.
+- **Certified delta re-ingestion** — when an index run starts and the codemap
+  manifest attests a `reindex_delta` whose `from_fingerprint` is exactly the
+  fingerprint vecgrep's last complete receipt certified and whose
+  `to_fingerprint` is the manifest's current fingerprint, the run inverts the
+  old trade-off: instead of re-reading the whole export, it ingests only the
+  delta files through the `codemap.structural-export.v2` filtered export
+  (`--files-from`, filter fingerprint verified on every page), drops the
+  delta-deleted files' chunks, and writes a scope-complete receipt carrying
+  the attested `to_fingerprint`. Records for every other file are identical
+  between the two exports, so unchanged files keep their certified chunks.
+  Any doubt — no receipt, no attestation, incomplete or erroring previous
+  run, producer unavailable, fingerprint off by one byte — falls back to the
+  full export path. The attestation is codemap's own claim about its last
+  run; vecgrep never derives it.
 - **Vector-free health checks** — `vecgrep status --lightweight` reads the
   project-isolated `health/<project-key>/manifest.v1.json` sidecar and scans
   source hashes without opening VecLite. It is the preferred polling path for

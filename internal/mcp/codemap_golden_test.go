@@ -310,7 +310,7 @@ func TestRerankChangesOrdering(t *testing.T) {
 		{Result: codemapSearchResult{SymbolName: "Hub", RelativePath: "b.go", Score: 0.55}},
 	}
 	// Heavy structural weight so the hub signal dominates.
-	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8)
+	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8, 0.2)
 	if out[0].Result.SymbolName != "Hub" {
 		t.Fatalf("rerank should lift the hub to first; got order %s, %s",
 			out[0].Result.SymbolName, out[1].Result.SymbolName)
@@ -332,7 +332,7 @@ func TestRerankDownWeightsInflatedHub(t *testing.T) {
 		{Result: codemapSearchResult{SymbolName: "Hub", RelativePath: "b.go", Score: 0.5}},
 		{Result: codemapSearchResult{SymbolName: "Inflated", RelativePath: "c.go", Score: 0.5}},
 	}
-	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8)
+	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8, 0.2)
 
 	score := map[string]float32{}
 	for _, r := range out {
@@ -526,7 +526,7 @@ func TestRerankBreaksHubTiesByQueryFrequency(t *testing.T) {
 		{Result: codemapSearchResult{SymbolName: "Hub", RelativePath: "b.go", Score: 0.5}},
 		{Result: codemapSearchResult{SymbolName: "Peer", RelativePath: "d.go", Score: 0.5}},
 	}
-	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8)
+	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8, 0.2)
 	if out[0].Result.SymbolName != "Peer" {
 		t.Fatalf("queried Peer must outrank equally-hubbed Hub; got %s first (Peer=%f Hub=%f)",
 			out[0].Result.SymbolName, out[0].StructuralScore, out[1].StructuralScore)
@@ -549,7 +549,7 @@ func TestRerankUsageCollapseWithoutFrequencyData(t *testing.T) {
 	input := []CodemapRerankResult{
 		{Result: codemapSearchResult{SymbolName: "Hub", RelativePath: "a.go", Score: 0.5}},
 	}
-	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8)
+	out := c.Rerank(context.Background(), t.TempDir(), input, 0.8, 0.2)
 	if len(out) != 1 || out[0].StructuralScore != 1.0 {
 		t.Fatalf("pure-hub structural score = %+v, want exactly 1.0", out)
 	}

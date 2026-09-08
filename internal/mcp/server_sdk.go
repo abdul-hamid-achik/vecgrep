@@ -1220,7 +1220,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 			}
 		}
 
-		state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
+		state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight(), state.codemapQueryFrequencyWeight())
 		formatSearchResults(&sb, results, state.codemapAvailable())
 		state.annotateSearchHits(ctx, results, input.Query)
 	} else {
@@ -1246,7 +1246,7 @@ func (s *SDKServer) handleSearch(ctx context.Context, req *sdkmcp.CallToolReques
 			}
 		}
 
-		state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
+		state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight(), state.codemapQueryFrequencyWeight())
 		formatSearchResults(&sb, results, state.codemapAvailable())
 		state.annotateSearchHits(ctx, results, input.Query)
 	}
@@ -2084,11 +2084,22 @@ func (state projectStateSnapshot) codemapStructuralWeight() float32 {
 	return 0.15
 }
 
+// codemapQueryFrequencyWeight returns the configured share of the structural
+// re-rank component given to codemap's query_frequency usage signal,
+// defaulting to 0.2 when not explicitly set. 0 collapses to a pure hub score.
+func (state projectStateSnapshot) codemapQueryFrequencyWeight() float32 {
+	if state.codemapCfg.QueryFrequencyWeight > 0 {
+		return state.codemapCfg.QueryFrequencyWeight
+	}
+	return 0.2
+}
+
 // rerankWithCodemap re-orders search results using codemap's structural
-// importance data (fan-in hub scores). The re-ranked results are written
-// back into the slice in-place. This is best-effort: if codemap is
-// unavailable or returns no data, results are left in their original order.
-func (state projectStateSnapshot) rerankWithCodemap(ctx context.Context, results []search.Result, structuralWeight float32) {
+// importance data (fan-in hub scores, plus the query_frequency usage share).
+// The re-ranked results are written back into the slice in-place. This is
+// best-effort: if codemap is unavailable or returns no data, results are left
+// in their original order.
+func (state projectStateSnapshot) rerankWithCodemap(ctx context.Context, results []search.Result, structuralWeight float32, queryFrequencyWeight float32) {
 	if state.codemap == nil || !state.codemap.Available() || structuralWeight <= 0 || len(results) <= 1 {
 		return
 	}
@@ -2105,7 +2116,7 @@ func (state projectStateSnapshot) rerankWithCodemap(ctx context.Context, results
 		}
 	}
 
-	reranked := state.codemap.Rerank(ctx, state.projectRoot, rerankInput, structuralWeight)
+	reranked := state.codemap.Rerank(ctx, state.projectRoot, rerankInput, structuralWeight, queryFrequencyWeight)
 
 	// Reorder the original results slice to match reranked order, carrying
 	// the structural scores onto the results so downstream formatting can
@@ -2278,7 +2289,7 @@ func (s *SDKServer) handleInvestigate(ctx context.Context, req *sdkmcp.CallToolR
 		}
 	}
 
-	state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight())
+	state.rerankWithCodemap(ctx, results, state.codemapStructuralWeight(), state.codemapQueryFrequencyWeight())
 	formatSearchResults(&sb, results, state.codemapAvailable())
 	state.annotateSearchHits(ctx, results, input.Query)
 

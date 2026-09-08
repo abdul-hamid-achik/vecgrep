@@ -121,7 +121,7 @@ func TestCodemapClientRerankUnavailableReturnsOriginal(t *testing.T) {
 		{Result: codemapSearchResult{SymbolName: "A", Score: 0.9}},
 		{Result: codemapSearchResult{SymbolName: "B", Score: 0.5}},
 	}
-	result := c.Rerank(context.Background(), "/tmp", input, 0.3)
+	result := c.Rerank(context.Background(), "/tmp", input, 0.3, 0.2)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(result))
 	}
@@ -139,7 +139,7 @@ func TestCodemapClientRerankZeroWeightReturnsOriginal(t *testing.T) {
 	input := []CodemapRerankResult{
 		{Result: codemapSearchResult{SymbolName: "A", Score: 0.9}},
 	}
-	result := c.Rerank(context.Background(), "/tmp", input, 0)
+	result := c.Rerank(context.Background(), "/tmp", input, 0, 0)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(result))
 	}

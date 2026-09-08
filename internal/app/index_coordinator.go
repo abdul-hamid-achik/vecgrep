@@ -128,6 +128,25 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 	if err != nil {
 		return nil, err
 	}
+	// Certified delta path: when codemap's manifest attests that exactly the
+	// files our receipt certified have moved since, this run ingests only the
+	// delta through the v2 filtered export instead of re-reading the whole
+	// stream. Unchanged files keep their certified chunks, and the receipt
+	// advances to the attested to_fingerprint with scope intact. Any doubt
+	// (no receipt, no attestation, producer unavailable) falls back to the
+	// full path below — a nil plan is the conservative answer.
+	var delta *deltaIngestionPlan
+	if !req.FullReindex && len(req.Paths) == 0 && requestedMode != StructuralChunksOff {
+		receipt, receiptErr := LoadIngestionReceipt(c.cfg.DataDir, c.projectRoot)
+		if receiptErr == nil {
+			delta = planDeltaIngestion(receipt, loadCodemapDeltaManifest(ctx, c.cfg, c.projectRoot))
+			if delta != nil {
+				if _, engaged, cfgErr := configureStructuralChunksWithFilter(indexer, c.cfg.Codemap, req.StructuralChunks, delta.ChangedNew); cfgErr != nil || !engaged {
+					delta = nil
+				}
+			}
+		}
+	}
 	// A project_dirty tombstone is durable evidence of an interrupted
 	// multi-collection mutation. Do not let an incremental run appear to repair
 	// it: only ReindexAll resets the project and can clear the marker. Requiring
@@ -146,7 +165,7 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 	if err != nil {
 		return nil, err
 	}
-	scopeComplete := req.FullReindex || len(req.Paths) == 0
+	scopeComplete := req.FullReindex || len(req.Paths) == 0 || delta != nil
 	// Poison the previous success before ensureEmbeddingProfileForIndex or the
 	// indexer can mutate collection metadata/chunks. Failure here is a hard
 	// preflight error and leaves the old searchable index untouched.
@@ -163,11 +182,29 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 		indexer.SetProgressCallback(progress)
 	}
 
+	// A certified delta may prune files codemap deleted: their chunks would
+	// otherwise survive as ghosts, because the walk no longer sees the file.
+	// A deletion failure fails the run closed — the delta attestation assumed
+	// these removals happened.
+	paths := req.Paths
+	if delta != nil {
+		paths = delta.ChangedNew
+	}
 	var indexErr error
-	if req.FullReindex {
-		result, indexErr = indexer.ReindexAll(ctx, c.projectRoot)
-	} else {
-		result, indexErr = indexer.Index(ctx, c.projectRoot, req.Paths...)
+	if delta != nil {
+		for _, rel := range delta.Deleted {
+			if _, delErr := database.DeleteProjectFile(ctx, c.projectRoot, rel); delErr != nil {
+				indexErr = fmt.Errorf("delete delta-pruned file %s: %w", rel, delErr)
+				break
+			}
+		}
+	}
+	if indexErr == nil {
+		if req.FullReindex {
+			result, indexErr = indexer.ReindexAll(ctx, c.projectRoot)
+		} else {
+			result, indexErr = indexer.Index(ctx, c.projectRoot, paths...)
+		}
 	}
 	flushErr := flushProvider(c.provider)
 	if indexErr != nil {

@@ -93,6 +93,12 @@ func ParseConfigValue(key, value string) (any, error) {
 			return nil, fmt.Errorf("invalid codemap.structural_weight value %q: %w", value, err)
 		}
 		return float32(w), nil
+	case "codemap.query_frequency_weight":
+		w, err := strconv.ParseFloat(value, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid codemap.query_frequency_weight value %q: %w", value, err)
+		}
+		return float32(w), nil
 	case "daemon.autostart":
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
@@ -230,6 +236,8 @@ func ApplyConfigValue(cfg *Config, key, value string) error {
 		cfg.Codemap.MCPEndpoint = parsed.(string)
 	case "codemap.structural_weight":
 		cfg.Codemap.StructuralWeight = parsed.(float32)
+	case "codemap.query_frequency_weight":
+		cfg.Codemap.QueryFrequencyWeight = parsed.(float32)
 	case "codemap.structural_chunks":
 		cfg.Codemap.StructuralChunks = parsed.(string)
 	case "daemon.autostart":

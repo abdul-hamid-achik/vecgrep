@@ -571,17 +571,12 @@ type codemapSearchResult struct {
 	Score        float32
 }
 
-// queryFrequencyShare is the slice of codemap's structural component given to
-// the usage signal: structural = hub*(1-share) + usage*share. The hub fan-in
-// stays dominant; a constant (not config) until the signal proves itself.
-const queryFrequencyShare = 0.2
-
 // Rerank re-orders search results by blending the original vecgrep score with
 // codemap's structural importance. The structural signal is the symbol's
 // fan-in hub score (codemap's in_degree), down-weighted when shared_name>1 so
 // a name-inflated hub does not outrank a genuinely-referenced one, plus a
 // minority learning-from-use term: codemap's query_frequency (how often past
-// searches actually surfaced the symbol) takes a queryFrequencyShare slice of
+// searches actually surfaced the symbol) takes a queryFrequencyWeight slice of
 // the structural component, so an equally-hubbed symbol that agents keep
 // querying outranks one they ignore. When no usage data exists at all (older
 // codemap builds report no query_frequency, or nothing has ever been queried)
@@ -589,8 +584,9 @@ const queryFrequencyShare = 0.2
 // empty usage signal never dilutes structure. We deliberately do NOT fold in
 // blast-radius size: codemap's hotspots feed doesn't carry it, so parsing it
 // here would be dead code implying a signal that isn't wired.
-// structuralWeight is 0..1; 0 means no re-ranking.
-func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results []CodemapRerankResult, structuralWeight float32) []CodemapRerankResult {
+// structuralWeight is 0..1; 0 means no re-ranking. queryFrequencyWeight is
+// 0..1 (the configured share of the structural component); 0 means pure hub.
+func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results []CodemapRerankResult, structuralWeight float32, queryFrequencyWeight float32) []CodemapRerankResult {
 	if !c.Available() || structuralWeight <= 0 || len(results) == 0 {
 		return results
 	}
@@ -630,7 +626,7 @@ func (c *CodemapClient) Rerank(ctx context.Context, projectPath string, results 
 	// usage share collapses so the hub signal keeps its full weight.
 	usageShare := float32(0)
 	if maxFreq > 0 {
-		usageShare = queryFrequencyShare
+		usageShare = queryFrequencyWeight
 	}
 
 	semWeight := 1.0 - structuralWeight

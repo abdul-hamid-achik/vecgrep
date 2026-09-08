@@ -53,6 +53,20 @@ type StructuralManifestFreshness struct {
 	DeletedFiles []string `json:"deleted_files,omitempty"`
 }
 
+// StructuralReindexDelta mirrors codemap's additive reindex_delta attestation:
+// the file-level drift of codemap's most recent index run, anchored by the
+// structural fingerprints before and after it. A receipt certifying
+// FromFingerprint may re-ingest exactly these files through the filtered
+// export — every other record is identical between the two exports.
+type StructuralReindexDelta struct {
+	FromFingerprint string   `json:"from_fingerprint"`
+	ToFingerprint   string   `json:"to_fingerprint"`
+	ChangedFiles    []string `json:"changed_files"`
+	NewFiles        []string `json:"new_files"`
+	DeletedFiles    []string `json:"deleted_files"`
+	CreatedAt       string   `json:"created_at"`
+}
+
 // StructuralManifestReport is the validated identity preflight for the
 // structural snapshot consumed by vecgrep. It contains no source bodies.
 type StructuralManifestReport struct {
@@ -64,6 +78,9 @@ type StructuralManifestReport struct {
 	TotalRecords        int                         `json:"total_records"`
 	Complete            bool                        `json:"complete"`
 	Freshness           StructuralManifestFreshness `json:"freshness"`
+	// ReindexDelta, when present, attests the file-level drift of codemap's
+	// most recent index run (additive in v1; absent on older producers).
+	ReindexDelta *StructuralReindexDelta `json:"reindex_delta,omitempty"`
 }
 
 // IndexFreshnessReport explains the conservative freshness decision. State is
@@ -138,6 +155,46 @@ func runCodemapStructuralManifest(ctx context.Context, bin, projectRoot string, 
 }
 
 func (s *codemapStructuralManifestSource) load(ctx context.Context, projectRoot, projectKey, fingerprint string) (*StructuralManifestReport, error) {
+	report, err := s.decode(ctx, projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStructuralManifest(*report, projectKey, fingerprint); err != nil {
+		return nil, err
+	}
+	return report, nil
+}
+
+// loadUnpinned decodes and shape-validates the manifest without pinning the
+// index fingerprint. The delta planner needs the attested from/to pair —
+// by definition neither side of it matches the receipt's fingerprint yet.
+func (s *codemapStructuralManifestSource) loadUnpinned(ctx context.Context, projectRoot, projectKey string) (*StructuralManifestReport, error) {
+	report, err := s.decode(ctx, projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	if report.SchemaVersion != structuralManifestSchemaVersion {
+		return nil, fmt.Errorf("%w: unsupported schema_version %d", errStructuralManifestInvalid, report.SchemaVersion)
+	}
+	if report.Project == "" || !validLowerHex(report.ProjectKey, 12) {
+		return nil, fmt.Errorf("%w: invalid project identity", errStructuralManifestInvalid)
+	}
+	if report.ProjectKey != projectKey {
+		return nil, fmt.Errorf("%w: project_key", errStructuralManifestMismatch)
+	}
+	if !validLowerHex(report.IndexFingerprint, 64) {
+		return nil, fmt.Errorf("%w: invalid index_fingerprint", errStructuralManifestInvalid)
+	}
+	if report.TotalRecords < 0 || !report.Complete {
+		return nil, fmt.Errorf("%w: incomplete structural snapshot", errStructuralManifestInvalid)
+	}
+	if !report.Freshness.Checked {
+		return nil, fmt.Errorf("%w: freshness not checked", errStructuralManifestInvalid)
+	}
+	return report, nil
+}
+
+func (s *codemapStructuralManifestSource) decode(ctx context.Context, projectRoot string) (*StructuralManifestReport, error) {
 	if s == nil || s.bin == "" || s.run == nil {
 		return nil, fmt.Errorf("codemap structural manifest adapter unavailable")
 	}
@@ -159,9 +216,6 @@ func (s *codemapStructuralManifestSource) load(ctx context.Context, projectRoot,
 		return nil, fmt.Errorf("%w: trailing data: %v", errStructuralManifestInvalid, err)
 	}
 	if err := validateStructuralManifestShape(out); err != nil {
-		return nil, err
-	}
-	if err := validateStructuralManifest(report, projectKey, fingerprint); err != nil {
 		return nil, err
 	}
 	return &report, nil

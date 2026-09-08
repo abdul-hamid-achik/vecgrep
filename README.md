@@ -439,6 +439,7 @@ vector:
 
 codemap:
   structural_chunks: auto      # auto (per-file fallback), off, or required
+  query_frequency_weight: 0.2  # share of the structural rerank given to codemap's query-frequency signal
 ```
 
 ### Vector Backend

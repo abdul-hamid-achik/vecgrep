@@ -239,6 +239,11 @@ type CodemapConfig struct {
 	// score when re-ranking hybrid search results (0-1). 0 disables
 	// re-ranking. Default 0.15.
 	StructuralWeight float32 `mapstructure:"structural_weight" yaml:"structural_weight,omitempty"`
+	// QueryFrequencyWeight is the share (0-1) of codemap's structural
+	// re-rank component given to the learning-from-use signal (the
+	// hotspots query_frequency counters); the hub fan-in keeps the rest.
+	// 0 collapses to a pure hub score. Default 0.2.
+	QueryFrequencyWeight float32 `mapstructure:"query_frequency_weight" yaml:"query_frequency_weight,omitempty"`
 	// StructuralChunks controls symbol-bounded indexing from codemap's public
 	// export contract: auto (best-effort with fallback), off, or required.
 	StructuralChunks string `mapstructure:"structural_chunks" yaml:"structural_chunks,omitempty"`

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,10 @@ import (
 
 const (
 	structuralExportSchemaVersion = 1
+	// A file-filtered export (codemap.structural-export.v2) keeps the record
+	// shape but scopes ordinals/totals to the requested slice and echoes the
+	// filter with a stable fingerprint.
+	structuralExportFilteredSchemaVersion = 2
 	// Symbol chunks are ultimately embedded into a 4096-byte model budget. Ask
 	// codemap for a modest source window rather than retaining 256 KiB for every
 	// symbol. Signature and docstring are independently capped by the producer,
@@ -83,9 +88,19 @@ type structuralChunksSetup struct {
 }
 
 func configureStructuralChunks(idx *index.Indexer, cfg config.CodemapConfig, override string) (structuralChunksSetup, error) {
+	setup, _, err := configureStructuralChunksWithFilter(idx, cfg, override, nil)
+	return setup, err
+}
+
+// configureStructuralChunksWithFilter is configureStructuralChunks with an
+// optional v2 file filter: when files is non-empty, the indexer's structural
+// source streams only those files. The bool reports whether a filtered source
+// was actually installed (false when structural chunks are off, codemap is
+// unavailable, or the filter collapsed to nothing).
+func configureStructuralChunksWithFilter(idx *index.Indexer, cfg config.CodemapConfig, override string, files []string) (structuralChunksSetup, bool, error) {
 	var setup structuralChunksSetup
 	if idx == nil {
-		return setup, fmt.Errorf("indexer is nil")
+		return setup, false, fmt.Errorf("indexer is nil")
 	}
 	configured := cfg.StructuralChunks
 	if override != "" {
@@ -93,18 +108,18 @@ func configureStructuralChunks(idx *index.Indexer, cfg config.CodemapConfig, ove
 	}
 	mode, err := ParseStructuralChunksMode(configured)
 	if err != nil {
-		return setup, err
+		return setup, false, err
 	}
 	setup.RequestedMode = mode
 	if mode == StructuralChunksOff {
 		idx.SetStructuralChunkSource(nil, false)
-		return setup, nil
+		return setup, false, nil
 	}
 	if mode == StructuralChunksAuto && !cfg.Enabled {
 		idx.SetStructuralChunkSource(nil, false)
 		setup.FallbackCode = "codemap_disabled"
 		setup.FallbackReason = "codemap integration is disabled"
-		return setup, nil
+		return setup, false, nil
 	}
 
 	bin := cfg.Bin
@@ -114,16 +129,31 @@ func configureStructuralChunks(idx *index.Indexer, cfg config.CodemapConfig, ove
 	resolved, err := config.ResolveBinary(bin)
 	if err != nil {
 		if mode == StructuralChunksRequired {
-			return setup, fmt.Errorf("codemap structural chunks required: %w", err)
+			return setup, false, fmt.Errorf("codemap structural chunks required: %w", err)
 		}
 		idx.SetStructuralChunkSource(nil, false)
 		setup.FallbackCode = "producer_unavailable"
 		setup.FallbackReason = "codemap producer is unavailable"
-		return setup, nil
+		return setup, false, nil
 	}
-	idx.SetStructuralChunkSource(newCodemapStructuralSource(resolved), mode == StructuralChunksRequired)
+	if len(files) == 0 {
+		idx.SetStructuralChunkSource(newCodemapStructuralSource(resolved), mode == StructuralChunksRequired)
+		setup.SourceEnabled = true
+		return setup, false, nil
+	}
+	source, err := newFilteredCodemapStructuralSource(resolved, files)
+	if err != nil {
+		if mode == StructuralChunksRequired {
+			return setup, false, fmt.Errorf("codemap structural chunks required: %w", err)
+		}
+		idx.SetStructuralChunkSource(nil, false)
+		setup.FallbackCode = "producer_unavailable"
+		setup.FallbackReason = "codemap filtered export is unavailable"
+		return setup, false, nil
+	}
+	idx.SetStructuralChunkSource(source, mode == StructuralChunksRequired)
 	setup.SourceEnabled = true
-	return setup, nil
+	return setup, true, nil
 }
 
 type structuralExportReport struct {
@@ -139,6 +169,9 @@ type structuralExportReport struct {
 	Complete         bool                     `json:"complete"`
 	NextOffset       int                      `json:"next_offset"`
 	Records          []structuralSymbolRecord `json:"records"`
+	// V2 filtered exports echo the requested slice; absent on v1.
+	FilesFilter           []string `json:"files_filter,omitempty"`
+	FilesFilterFingerprint string  `json:"files_filter_fingerprint,omitempty"`
 }
 
 type structuralSymbolRecord struct {
@@ -169,12 +202,21 @@ type structuralSymbolRecord struct {
 
 type structuralPageRunner func(context.Context, string, string, int, int, int) ([]byte, error)
 
+type structuralFilteredPageRunner func(context.Context, string, string, string, int, int, int) ([]byte, error)
+
 type codemapStructuralSource struct {
 	bin           string
 	pageLimit     int
 	maxContent    int
 	maxTotalBytes int
 	runPage       structuralPageRunner
+	runFiltered   structuralFilteredPageRunner
+	// filesFromPath and expectedFilterFingerprint are set only on the
+	// filtered variant: the temp file holding one canonical path per line
+	// (passed to codemap via --files-from) and the fingerprint codemap must
+	// echo on every page.
+	filesFromPath           string
+	expectedFilterFingerprint string
 }
 
 func newCodemapStructuralSource(bin string) *codemapStructuralSource {
@@ -184,7 +226,107 @@ func newCodemapStructuralSource(bin string) *codemapStructuralSource {
 		maxContent:    structuralExportMaxContent,
 		maxTotalBytes: structuralExportMaxTotalOutput,
 		runPage:       runCodemapStructuralPage,
+		runFiltered:   runCodemapStructuralFilteredPage,
 	}
+}
+
+// newFilteredCodemapStructuralSource builds a structural chunk source that
+// streams only the requested files through codemap's v2 filtered export. The
+// filter is canonicalized exactly like codemap canonicalizes it (slash paths,
+// cleaned, deduped, sorted) so the echoed fingerprint verifies.
+func newFilteredCodemapStructuralSource(bin string, files []string) (*codemapStructuralSource, error) {
+	canonical := make([]string, 0, len(files))
+	seen := make(map[string]bool, len(files))
+	for _, f := range files {
+		f = filepath.ToSlash(filepath.Clean(strings.TrimSpace(f)))
+		if f == "." || f == "" || seen[f] {
+			continue
+		}
+		seen[f] = true
+		canonical = append(canonical, f)
+	}
+	if len(canonical) == 0 {
+		return nil, fmt.Errorf("filtered structural source needs at least one file")
+	}
+	sort.Strings(canonical)
+
+	tmp, err := os.CreateTemp("", "vecgrep-export-files-*.txt")
+	if err != nil {
+		return nil, fmt.Errorf("write structural export filter list: %w", err)
+	}
+	builder := strings.Builder{}
+	for _, f := range canonical {
+		builder.WriteString(f)
+		builder.WriteString("\n")
+	}
+	if _, err := tmp.WriteString(builder.String()); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return nil, fmt.Errorf("write structural export filter list: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return nil, fmt.Errorf("write structural export filter list: %w", err)
+	}
+
+	digest := sha256.New()
+	_, _ = fmt.Fprintf(digest, "codemap-structural-export-filter-v%d\x00", structuralExportFilteredSchemaVersion)
+	for _, f := range canonical {
+		_, _ = fmt.Fprintf(digest, "%s\x00", f)
+	}
+	return &codemapStructuralSource{
+		bin:                       bin,
+		pageLimit:                 structuralExportPageLimit,
+		maxContent:                structuralExportMaxContent,
+		maxTotalBytes:             structuralExportMaxTotalOutput,
+		runPage:                   runCodemapStructuralPage,
+		runFiltered:               runCodemapStructuralFilteredPage,
+		filesFromPath:             tmp.Name(),
+		expectedFilterFingerprint: hex.EncodeToString(digest.Sum(nil)),
+	}, nil
+}
+
+// releaseFilterList removes the temp filter list once a load has finished.
+func (s *codemapStructuralSource) releaseFilterList() {
+	if s != nil && s.filesFromPath != "" {
+		_ = os.Remove(s.filesFromPath)
+		s.filesFromPath = ""
+	}
+}
+
+func runCodemapStructuralFilteredPage(ctx context.Context, bin, projectRoot, filesFrom string, offset, limit, maxContent int) ([]byte, error) {
+	pageCtx, cancel := context.WithTimeout(ctx, structuralExportPageTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(pageCtx, bin,
+		"export-symbols", "--json",
+		"--offset", strconv.Itoa(offset),
+		"--limit", strconv.Itoa(limit),
+		"--max-content-bytes", strconv.Itoa(maxContent),
+		"--files-from", filesFrom,
+	)
+	cmd.Dir = projectRoot
+	stdout := newCappedCommandOutput(structuralExportMaxPageOutput)
+	stderr := newCappedCommandOutput(64 * 1024)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	if err != nil {
+		if pageCtx.Err() != nil {
+			return nil, fmt.Errorf("codemap filtered export-symbols: %w", pageCtx.Err())
+		}
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = codemapFailureMessage(stdout.Bytes())
+		}
+		if message != "" {
+			return nil, fmt.Errorf("codemap filtered export-symbols: %s", message)
+		}
+		return nil, fmt.Errorf("codemap filtered export-symbols: %w", err)
+	}
+	if stdout.Overflowed() {
+		return nil, fmt.Errorf("codemap filtered export-symbols exceeded the %d-byte page output limit", structuralExportMaxPageOutput)
+	}
+	return stdout.Bytes(), nil
 }
 
 func runCodemapStructuralPage(ctx context.Context, bin, projectRoot string, offset, limit, maxContent int) ([]byte, error) {
@@ -275,9 +417,22 @@ func (s *codemapStructuralSource) LoadStructuralChunks(ctx context.Context, proj
 	if s == nil || s.bin == "" || s.runPage == nil {
 		return nil, fmt.Errorf("codemap structural adapter unavailable")
 	}
+	filtered := s.filesFromPath != ""
+	if filtered && (s.runFiltered == nil || s.expectedFilterFingerprint == "") {
+		return nil, fmt.Errorf("codemap filtered structural adapter unavailable")
+	}
+	// The temp filter list is owned by this load; remove it whenever the load
+	// ends so repeated delta runs never accumulate temp files.
+	if filtered {
+		defer s.releaseFilterList()
+	}
 	expectedProjectKey, err := structuralProjectKey(projectRoot)
 	if err != nil {
 		return nil, err
+	}
+	expectedSchema := structuralExportSchemaVersion
+	if filtered {
+		expectedSchema = structuralExportFilteredSchemaVersion
 	}
 
 	var (
@@ -298,7 +453,12 @@ func (s *codemapStructuralSource) LoadStructuralChunks(ctx context.Context, proj
 		maxTotalBytes = structuralExportMaxTotalOutput
 	}
 	for {
-		out, err := s.runPage(ctx, s.bin, projectRoot, offset, s.pageLimit, s.maxContent)
+		var out []byte
+		if filtered {
+			out, err = s.runFiltered(ctx, s.bin, projectRoot, s.filesFromPath, offset, s.pageLimit, s.maxContent)
+		} else {
+			out, err = s.runPage(ctx, s.bin, projectRoot, offset, s.pageLimit, s.maxContent)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -310,13 +470,16 @@ func (s *codemapStructuralSource) LoadStructuralChunks(ctx context.Context, proj
 		if err := json.Unmarshal(out, &page); err != nil {
 			return nil, fmt.Errorf("decode codemap structural export page at offset %d: %w", offset, err)
 		}
-		if err := validateStructuralPage(page, offset, s.pageLimit, s.maxContent, expectedProjectKey, project, fingerprint, total); err != nil {
+		if err := validateStructuralPage(page, expectedSchema, offset, s.pageLimit, s.maxContent, expectedProjectKey, project, fingerprint, total); err != nil {
 			return nil, err
 		}
 		if offset == 0 {
 			project = page.Project
 			fingerprint = page.IndexFingerprint
 			total = page.TotalRecords
+			if filtered && page.FilesFilterFingerprint != s.expectedFilterFingerprint {
+				return nil, fmt.Errorf("codemap filtered export echoed an unexpected filter fingerprint")
+			}
 		}
 		for _, record := range page.Records {
 			selectorKey, issue, err := validateStructuralRecord(record, page)
@@ -363,8 +526,8 @@ func (s *codemapStructuralSource) LoadStructuralChunks(ctx context.Context, proj
 	return buildStructuralChunkSet(projectRoot, expectedProjectKey, fingerprint, records, fileIssues), nil
 }
 
-func validateStructuralPage(page structuralExportReport, offset, limit, maxContent int, projectKey, project, fingerprint string, total int) error {
-	if page.SchemaVersion != structuralExportSchemaVersion {
+func validateStructuralPage(page structuralExportReport, expectedSchema, offset, limit, maxContent int, projectKey, project, fingerprint string, total int) error {
+	if page.SchemaVersion != expectedSchema {
 		return fmt.Errorf("unsupported codemap structural export schema %d", page.SchemaVersion)
 	}
 	if page.Project == "" || page.ProjectKey != projectKey || !validLowerHex(page.ProjectKey, 12) {
@@ -396,7 +559,7 @@ func validateStructuralPage(page structuralExportReport, offset, limit, maxConte
 }
 
 func validateStructuralRecord(record structuralSymbolRecord, page structuralExportReport) (string, error, error) {
-	if record.SchemaVersion != structuralExportSchemaVersion || record.Project != page.Project || record.ProjectKey != page.ProjectKey || record.IndexFingerprint != page.IndexFingerprint {
+	if record.SchemaVersion != page.SchemaVersion || record.Project != page.Project || record.ProjectKey != page.ProjectKey || record.IndexFingerprint != page.IndexFingerprint {
 		return "", nil, fmt.Errorf("codemap structural record envelope mismatch for %s", record.File)
 	}
 	clean := filepath.Clean(filepath.FromSlash(record.File))

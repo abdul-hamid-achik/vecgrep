@@ -606,7 +606,7 @@ func TestCodemapStructuralSharedV1Fixture(t *testing.T) {
 	if err := json.Unmarshal(data, &page); err != nil {
 		t.Fatalf("parse shared v1 fixture: %v", err)
 	}
-	if err := validateStructuralPage(page, 0, 128, 262144, page.ProjectKey, "", "", -1); err != nil {
+	if err := validateStructuralPage(page, structuralExportSchemaVersion, 0, 128, 262144, page.ProjectKey, "", "", -1); err != nil {
 		t.Fatalf("validate shared v1 page: %v", err)
 	}
 	if len(page.Records) != 1 {

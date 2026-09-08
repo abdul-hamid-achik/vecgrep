@@ -13,6 +13,7 @@ func TestLoadResolvedAppliesCodemapEnv(t *testing.T) {
 	t.Setenv("VECGREP_CODEMAP_BIN", "/usr/local/bin/codemap")
 	t.Setenv("VECGREP_CODEMAP_MCP_ENDPOINT", "stdio")
 	t.Setenv("VECGREP_CODEMAP_STRUCTURAL_WEIGHT", "0.25")
+	t.Setenv("VECGREP_CODEMAP_QUERY_FREQUENCY_WEIGHT", "0.4")
 	t.Setenv("VECGREP_CODEMAP_STRUCTURAL_CHUNKS", "required")
 
 	resolved, err := LoadResolved(projectRoot)
@@ -32,6 +33,9 @@ func TestLoadResolvedAppliesCodemapEnv(t *testing.T) {
 	}
 	if cfg.Codemap.StructuralWeight != 0.25 {
 		t.Fatalf("codemap.structural_weight = %f, want 0.25", cfg.Codemap.StructuralWeight)
+	}
+	if cfg.Codemap.QueryFrequencyWeight != 0.4 {
+		t.Fatalf("codemap.query_frequency_weight = %f, want 0.4", cfg.Codemap.QueryFrequencyWeight)
 	}
 	if cfg.Codemap.StructuralChunks != "required" {
 		t.Fatalf("codemap.structural_chunks = %q, want required", cfg.Codemap.StructuralChunks)
@@ -152,10 +156,11 @@ func TestMergeCodemapConfig(t *testing.T) {
 	dst := DefaultConfig()
 	src := &Config{
 		Codemap: CodemapConfig{
-			Enabled:          true,
-			Bin:              "/custom/codemap",
-			StructuralWeight: 0.5,
-			StructuralChunks: "required",
+			Enabled:              true,
+			Bin:                  "/custom/codemap",
+			StructuralWeight:     0.5,
+			QueryFrequencyWeight: 0.3,
+			StructuralChunks:     "required",
 		},
 	}
 	mergeCodemapConfig(dst, src)
@@ -168,6 +173,9 @@ func TestMergeCodemapConfig(t *testing.T) {
 	}
 	if dst.Codemap.StructuralWeight != 0.5 {
 		t.Errorf("codemap.structural_weight = %f, want 0.5", dst.Codemap.StructuralWeight)
+	}
+	if dst.Codemap.QueryFrequencyWeight != 0.3 {
+		t.Errorf("codemap.query_frequency_weight = %f, want 0.3", dst.Codemap.QueryFrequencyWeight)
 	}
 	if dst.Codemap.StructuralChunks != "required" {
 		t.Errorf("codemap.structural_chunks = %q, want required", dst.Codemap.StructuralChunks)
