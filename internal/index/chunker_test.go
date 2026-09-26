@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -419,6 +420,11 @@ func TestIsTextFile(t *testing.T) {
 		{"utf8", []byte("こんにちは"), true},
 		{"binary with null", []byte{0x00, 0x01, 0x02}, false},
 		{"mixed with null", []byte("Hello\x00World"), false},
+		// The 8KB sample window can end in the middle of a multi-byte rune
+		// (common in CJK/emoji text); that must not mark valid text as binary.
+		{"3-byte rune straddles 8KB boundary", append(bytes.Repeat([]byte("a"), 8191), []byte("中")...), true},
+		{"4-byte rune straddles 8KB boundary", append(bytes.Repeat([]byte("a"), 8190), []byte("😀")...), true},
+		{"invalid byte at 8KB boundary", append(bytes.Repeat([]byte("a"), 8191), 0xff, 'a'), false},
 	}
 
 	for _, tt := range tests {
