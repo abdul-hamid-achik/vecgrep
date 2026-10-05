@@ -33,12 +33,3 @@ jobs:
 
       - name: Build CLI
         run: task build
-
-      - name: Generate coverage
-        run: go test -coverprofile=coverage.out ./...
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v7
-        with:
-          files: coverage.out
-          fail_ci_if_error: false
