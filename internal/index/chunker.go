@@ -731,13 +731,20 @@ func IsTextFile(content []byte) bool {
 		return true
 	}
 
-	// Check first 8KB for null bytes or invalid UTF-8
+	// Check first 8KB for null bytes or invalid UTF-8. Extend the sample window
+	// to the next UTF-8 rune boundary (at most 3 bytes) so that a cut in the
+	// middle of a multi-byte rune — routine in CJK/emoji text — does not make
+	// valid text look binary and silently drop the whole file from the index.
 	checkSize := 8192
 	if len(content) < checkSize {
 		checkSize = len(content)
 	}
+	end := checkSize
+	for end < len(content) && !utf8.RuneStart(content[end]) {
+		end++
+	}
 
-	sample := content[:checkSize]
+	sample := content[:end]
 
 	// Check for null bytes (binary indicator)
 	for _, b := range sample {
