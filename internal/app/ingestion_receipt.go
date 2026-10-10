@@ -561,7 +561,7 @@ func writeIngestionReceiptAtomic(path string, receipt IngestionReceipt) (retErr 
 		return fmt.Errorf("open ingestion receipt directory for sync: %w", err)
 	}
 	defer directory.Close()
-	if err := directory.Sync(); err != nil {
+	if err := syncDir(directory); err != nil {
 		return fmt.Errorf("sync ingestion receipt directory: %w", err)
 	}
 	return nil
