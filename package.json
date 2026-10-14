@@ -8,6 +8,9 @@
     "site:build": "vitepress build docs",
     "site:preview": "vitepress preview docs --host 127.0.0.1"
   },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1"
+  },
   "devDependencies": {
     "vitepress": "1.6.4"
   },
