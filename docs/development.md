@@ -51,7 +51,7 @@ task race         # Run tests with the race detector
 task short        # Run short tests
 task verbose      # Run verbose tests
 task cov          # Generate coverage output
-task flows        # Run all terminal Studio flows
+task flows        # Run all terminal CLI flows (specs/flows)
 task site         # Start the VitePress docs site
 task site:build   # Build the VitePress docs site
 task clean        # Remove build artifacts
@@ -384,7 +384,7 @@ Glyphrun terminal flows live in `specs/flows/`, matching the flow/action layout 
 
 ```bash
 task flows
-task flow FLOW=specs/flows/studio_launch_quit.yml
+task flow FLOW=specs/flows/index_dry_run.yml
 ```
 
 ### Docs Site

@@ -84,7 +84,7 @@ task test        # Run all tests
 task verbose     # Verbose output
 task short       # Skip integration tests
 task cov         # Generate coverage report
-task flows       # Run terminal Studio flows
+task flows       # Run terminal CLI flows (specs/flows)
 ```
 
 ### Writing Tests
