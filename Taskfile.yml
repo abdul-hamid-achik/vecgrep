@@ -205,6 +205,47 @@ tasks:
     cmds:
       - bun run site:preview -- {{.CLI_ARGS}}
 
+  desktop:deps:
+    desc: Install Vecgrep Studio (Electron) dependencies
+    cmds:
+      - cd electron && npm install --no-audit --no-fund
+    status:
+      - test -d electron/node_modules/electron/dist
+
+  desktop:
+    desc: Launch Vecgrep Studio, the Electron desktop app
+    deps: [build, desktop:deps]
+    cmds:
+      - cd electron && npm start -- {{.CLI_ARGS}}
+
+  desktop:smoke:
+    desc: Headless bridge self-test for Vecgrep Studio (CLI + MCP)
+    deps: [build]
+    cmds:
+      - cd electron && node smoke.js
+
+  desktop:verify:
+    desc: Launch Studio headless and verify the rendered UI
+    deps: [build, desktop:deps]
+    cmds:
+      - cd electron && ./node_modules/.bin/electron . --verify-ui --quit-after 240
+
+  desktop:dist:
+    desc: Package Vecgrep Studio as a macOS .app (bundles bin/vecgrep)
+    deps: [build, desktop:deps]
+    cmds:
+      - cd electron && npm run dist
+
+  desktop:install:
+    desc: Install Vecgrep Studio.app into /Applications
+    deps: [desktop:dist]
+    cmds:
+      - rm -rf "/Applications/Vecgrep Studio.app"
+      - cp -R "electron/dist/Vecgrep Studio-darwin-arm64/Vecgrep Studio.app" /Applications/
+      - xattr -cr "/Applications/Vecgrep Studio.app"
+      - codesign --force --deep -s - "/Applications/Vecgrep Studio.app"
+      - echo 'installed at /Applications/Vecgrep Studio.app'
+
   ship:
     desc: Run the local release verification pipeline
     cmds:

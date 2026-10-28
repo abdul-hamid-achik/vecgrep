@@ -1,0 +1,20 @@
+{
+  "name": "vecgrep-studio",
+  "version": "0.1.0",
+  "description": "Vecgrep Studio — aplicación de escritorio (Electron) para revisar y trabajar con vecgrep",
+  "private": true,
+  "type": "commonjs",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "node smoke.js",
+    "test": "node smoke.js",
+    "dist": "./build-app.sh"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

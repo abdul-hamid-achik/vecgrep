@@ -718,6 +718,7 @@ task build        # Build binary
 task flows        # Run terminal Studio flows
 task site         # Start the VitePress docs site
 task site:build   # Build the docs site
+task desktop      # Launch Vecgrep Studio (Electron app, see electron/)
 ```
 
 ## License
