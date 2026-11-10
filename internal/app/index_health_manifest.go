@@ -215,7 +215,7 @@ func WriteIndexHealthManifest(dataDir, projectRoot string, manifest *IndexHealth
 		return fmt.Errorf("open index health manifest directory for sync: %w", err)
 	}
 	defer directory.Close()
-	if err := directory.Sync(); err != nil {
+	if err := syncDir(directory); err != nil {
 		return fmt.Errorf("sync index health manifest directory: %w", err)
 	}
 	return nil
