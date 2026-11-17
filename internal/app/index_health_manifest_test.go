@@ -154,3 +154,71 @@ func TestLightweightStatusVerifiesVectorFreeManifest(t *testing.T) {
 		t.Fatalf("status after invalidation = %#v", status)
 	}
 }
+
+// Lightweight status must read the embedding profile from the vector-free
+// manifest (where new indexes record it) instead of only the legacy
+// embedding_profile.json sidecar — for an index whose profile lives in VecLite
+// collection metadata the sidecar no longer exists, and status wrongly reported
+// "missing". A manifest-carried profile that differs from the configured one
+// must surface as "mismatch", never "missing".
+func TestLightweightStatusReadsEmbeddingProfileFromManifest(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, ".vecgrep")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "vecgrep.yaml"), []byte("data_dir: .vecgrep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const attemptID = "00112233445566778899aabbccddeeff"
+	if err := beginIngestionReceiptAttempt(dataDir, root, attemptID, StructuralChunksOff, true); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := LoadIngestionReceipt(dataDir, root)
+	if err != nil || receipt == nil {
+		t.Fatalf("load receipt = %#v, error = %v", receipt, err)
+	}
+	receipt.IngestionComplete = true
+	path, err := IngestionReceiptPath(dataDir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeIngestionReceiptAtomic(path, *receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeIngestionReceiptAttempt(dataDir, root, attemptID, nil); err != nil {
+		t.Fatal(err)
+	}
+	key, err := ingestionReceiptProjectKey(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := &EmbeddingProfile{
+		SchemaVersion: embeddingProfileSchemaVersion,
+		ProfileID:     "sentinel-profile",
+		Provider:      "sentinel-provider",
+		Model:         "sentinel-model",
+		Dimensions:    123,
+		Distance:      "cosine",
+		Modality:      "text",
+	}
+	if err := WriteIndexHealthManifest(dataDir, root, &IndexHealthManifest{
+		SchemaVersion:    indexHealthManifestSchemaVersion,
+		AttemptID:        attemptID,
+		ProjectKey:       key,
+		Stats:            map[string]int64{"files": 2, "chunks": 9},
+		EmbeddingProfile: sentinel,
+		SourceHashes:     map[string]string{},
+		UpdatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := LightweightStatus(t.Context(), root)
+	if err != nil {
+		t.Fatalf("LightweightStatus() error = %v", err)
+	}
+	if status.ProfileStatus != "mismatch" || status.ProfileMatches {
+		t.Fatalf("profile status = %q matches = %v, want mismatch/false (profile must come from the manifest, not the absent sidecar)", status.ProfileStatus, status.ProfileMatches)
+	}
+}

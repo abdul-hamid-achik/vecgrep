@@ -32,8 +32,18 @@ func LightweightStatus(ctx context.Context, startDir string) (*StatusResponse, e
 		stats = cloneHealthStats(manifest.Stats)
 	}
 
-	receipt, receiptErr := LoadIngestionReceipt(cfg.DataDir, projectRoot)
-	profile, profileErr := LoadEmbeddingProfile(nil, cfg.DataDir)
+	// The embedding profile comes from the vector-free manifest first: new
+	// indexes record it there at index time, and the legacy sidecar no longer
+	// exists for them (opening VecLite just to read collection metadata would
+	// load every record). The sidecar remains the fallback for legacy indexes
+	// whose manifest predates the field.
+	var profile *EmbeddingProfile
+	var profileErr error
+	if manifest != nil && manifest.EmbeddingProfile != nil {
+		profile = manifest.EmbeddingProfile
+	} else {
+		profile, profileErr = LoadEmbeddingProfile(nil, cfg.DataDir)
+	}
 	profileStatus := "ok"
 	profileMatches := true
 	if profileErr != nil {
@@ -51,6 +61,7 @@ func LightweightStatus(ctx context.Context, startDir string) (*StatusResponse, e
 		profileMatches = false
 	}
 
+	receipt, receiptErr := LoadIngestionReceipt(cfg.DataDir, projectRoot)
 	report := &IndexFreshnessReport{State: IndexFreshnessUnknown, Reason: "index_health_manifest_missing"}
 	var pending *index.PendingChanges
 	if manifestErr != nil {

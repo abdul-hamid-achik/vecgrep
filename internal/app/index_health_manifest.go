@@ -22,14 +22,20 @@ const indexHealthManifestSchemaVersion = 1
 // matching successful ingestion receipt and attempt ID. This makes a crash
 // between manifest publication and receipt finalization fail closed.
 type IndexHealthManifest struct {
-	SchemaVersion   int               `json:"schema_version"`
-	AttemptID       string            `json:"attempt_id"`
-	ProjectKey      string            `json:"project_key"`
-	Stats           map[string]int64  `json:"stats"`
-	IndexedBytes    int64             `json:"indexed_bytes"`
-	LatestIndexedAt time.Time         `json:"latest_indexed_at,omitempty"`
-	SourceHashes    map[string]string `json:"source_hashes"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	SchemaVersion int              `json:"schema_version"`
+	AttemptID     string           `json:"attempt_id"`
+	ProjectKey    string           `json:"project_key"`
+	Stats         map[string]int64 `json:"stats"`
+	// EmbeddingProfile snapshots the profile recorded in VecLite collection
+	// metadata at index time, so the vector-free lightweight status can report
+	// it without opening the store (the legacy embedding_profile.json sidecar
+	// is only a migration source and no longer exists for new indexes).
+	// Absent on manifests written before this field existed.
+	EmbeddingProfile *EmbeddingProfile `json:"embedding_profile,omitempty"`
+	IndexedBytes     int64             `json:"indexed_bytes"`
+	LatestIndexedAt  time.Time         `json:"latest_indexed_at,omitempty"`
+	SourceHashes     map[string]string `json:"source_hashes"`
+	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
 // IndexHealthManifestPath returns the project-isolated health manifest path.
@@ -113,8 +119,10 @@ func validRelativeHealthPath(path string) bool {
 }
 
 // BuildIndexHealthManifest snapshots vector-free index metadata while the
-// database is already open after a successful indexing pass.
-func BuildIndexHealthManifest(database *db.DB, projectRoot, attemptID string) (*IndexHealthManifest, error) {
+// database is already open after a successful indexing pass. The embedding
+// profile is read back from collection metadata (where the index just saved
+// it); a profile read failure only omits the field, never the manifest.
+func BuildIndexHealthManifest(database *db.DB, dataDir, projectRoot, attemptID string) (*IndexHealthManifest, error) {
 	if database == nil {
 		return nil, fmt.Errorf("index health manifest database is nil")
 	}
@@ -151,15 +159,17 @@ func BuildIndexHealthManifest(database *db.DB, projectRoot, attemptID string) (*
 	if stats == nil {
 		stats = map[string]int64{}
 	}
+	profile, _ := LoadEmbeddingProfile(database, dataDir)
 	return &IndexHealthManifest{
-		SchemaVersion:   indexHealthManifestSchemaVersion,
-		AttemptID:       attemptID,
-		ProjectKey:      projectKey,
-		Stats:           cloneHealthStats(stats),
-		IndexedBytes:    indexedBytes,
-		LatestIndexedAt: latestIndexedAt,
-		SourceHashes:    cloneSourceHashes(sourceHashes),
-		UpdatedAt:       time.Now().UTC(),
+		SchemaVersion:    indexHealthManifestSchemaVersion,
+		AttemptID:        attemptID,
+		ProjectKey:       projectKey,
+		Stats:            cloneHealthStats(stats),
+		EmbeddingProfile: profile,
+		IndexedBytes:     indexedBytes,
+		LatestIndexedAt:  latestIndexedAt,
+		SourceHashes:     cloneSourceHashes(sourceHashes),
+		UpdatedAt:        time.Now().UTC(),
 	}, nil
 }
 

@@ -245,7 +245,7 @@ func (c *IndexCoordinator) indexLocked(ctx context.Context, req IndexRequest, pr
 	// non-fatal to indexing: full status can still inspect VecLite, while
 	// lightweight status fails closed until a later complete index repairs it.
 	if postErr == nil && scopeComplete {
-		if manifest, manifestErr := BuildIndexHealthManifest(database, c.projectRoot, attemptID); manifestErr != nil {
+		if manifest, manifestErr := BuildIndexHealthManifest(database, c.cfg.DataDir, c.projectRoot, attemptID); manifestErr != nil {
 			log.Printf("index health manifest unavailable: %v", manifestErr)
 		} else if manifestErr := WriteIndexHealthManifest(c.cfg.DataDir, c.projectRoot, manifest); manifestErr != nil {
 			log.Printf("index health manifest not published: %v", manifestErr)
